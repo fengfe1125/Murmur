@@ -116,6 +116,16 @@ sudo systemctl status murmur-update --no-pager
 测试通过才会重启已经启用的平台服务；失败会把代码还原到上一个提交，正在运行的机器人
 不会被重启。`.env`、SQLite 数据库、日志、档案与照片均被 Git 忽略，更新不会覆盖它们。
 
+首次绑定可在本机运行（会要求本机 SSH / gcloud 密钥口令）：
+
+```bash
+./scripts/link-vps-to-github.sh --repo OWNER/REPO \
+  --gcloud INSTANCE --zone ZONE --project PROJECT
+```
+
+该脚本会生成仅限此仓库的**只读** Deploy Key，上传到 VPS 后立即删除本机临时私钥；
+Deploy Key 不具备 GitHub 写入权限。
+
 改人格只需要重启，不用重装：
 
 ```bash

@@ -76,6 +76,10 @@ Google Cloud Compute Engine：
 迁移过程不显示任何密钥。若电脑上的 Murmur 已手动停止，加 `--local-stopped` 后仍需输入
 `CUTOVER`，才会启动远端通道。
 
+迁移完成并推送代码到私有 GitHub 仓库后，可用 `scripts/link-vps-to-github.sh` 给 VPS 设置
+只读 Deploy Key。以后在 VPS 执行 `sudo systemctl start murmur-update`，就会拉取、测试并重启
+已启用的服务，且不会覆盖 `.env` 或聊天记忆。
+
 ### 先在命令行试
 
 ```bash
