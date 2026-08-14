@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Pull a reviewed GitHub commit, verify it, then restart only enabled services.
+# This file is installed as /usr/local/sbin/murmur-update on the VPS.
+
+set -euo pipefail
+
+APP_DIR=/opt/murmur
+SERVICE_USER=murmur
+BRANCH=${MURMUR_GIT_BRANCH:-main}
+SERVICES=(murmur-web murmur-telegram murmur-dingtalk murmur-wechat murmur-qq)
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || {
+  echo "Run as root: sudo murmur-update" >&2
+  exit 2
+}
+[[ -d "$APP_DIR/.git" ]] || {
+  echo "$APP_DIR is not linked to GitHub yet." >&2
+  exit 2
+}
+
+as_murmur() {
+  runuser -u "$SERVICE_USER" -- "$@"
+}
+
+git_murmur() {
+  as_murmur git -C "$APP_DIR" "$@"
+}
+
+[[ -z "$(git_murmur status --porcelain)" ]] || {
+  echo "Refusing to update: $APP_DIR has uncommitted source changes." >&2
+  exit 1
+}
+
+current=$(git_murmur rev-parse HEAD)
+git_murmur fetch --prune origin "$BRANCH"
+target=$(git_murmur rev-parse "origin/$BRANCH")
+
+if [[ "$current" == "$target" ]]; then
+  echo "Murmur is already at $current"
+  exit 0
+fi
+
+git_murmur merge-base --is-ancestor "$current" "$target" || {
+  echo "Refusing a non-fast-forward update; inspect the Git history first." >&2
+  exit 1
+}
+
+echo "Updating Murmur ${current:0:12} → ${target:0:12}"
+git_murmur merge --ff-only "$target"
+
+if ! as_murmur bash -c "
+  cd '$APP_DIR'
+  .venv/bin/pip install -e .
+  for test in tests/test_*.py; do .venv/bin/python \"\$test\"; done
+"; then
+  echo "Checks failed; restoring $current and leaving running services untouched." >&2
+  git_murmur reset --hard "$current"
+  as_murmur bash -c "cd '$APP_DIR' && .venv/bin/pip install -e ."
+  exit 1
+fi
+
+# Let later releases improve this updater and the service units too.
+install -m 0755 "$APP_DIR/deploy/murmur-update" /usr/local/sbin/murmur-update
+install -m 0644 "$APP_DIR/deploy/murmur-update.service" /etc/systemd/system/murmur-update.service
+install -m 0644 "$APP_DIR/deploy/"*.service /etc/systemd/system/
+install -m 0644 "$APP_DIR/deploy/murmur-logrotate" /etc/logrotate.d/murmur
+systemctl daemon-reload
+
+restarted=()
+for service in "${SERVICES[@]}"; do
+  if systemctl is-enabled --quiet "$service"; then
+    systemctl restart "$service"
+    systemctl is-active --quiet "$service"
+    restarted+=("$service")
+  fi
+done
+
+printf 'Updated and restarted: %s\n' "${restarted[*]:-no enabled services}"

@@ -1,0 +1,8 @@
+[Unit]
+Description=Murmur — verified update from GitHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/murmur-update

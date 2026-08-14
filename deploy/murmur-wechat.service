@@ -1,0 +1,39 @@
+[Unit]
+Description=Murmur — WeChat (Tencent ClawBot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=murmur
+WorkingDirectory=/opt/murmur
+EnvironmentFile=/opt/murmur/.env
+
+# 服务器上不装 OpenClaw：在本地扫码登录，把凭据文件拷过来就行。
+#   scp ~/.openclaw/openclaw-weixin/accounts/*.json \
+#       server:/opt/murmur/openclaw/openclaw-weixin/accounts/
+# 下面这行让 Murmur 去这个目录找，而不是 ~/.openclaw
+# （ProtectHome=true 会挡住家目录，所以不能指望默认路径）。
+# 或者更省事：直接把 token 填进 .env 的 WECHAT_TOKEN。
+Environment=OPENCLAW_STATE_DIR=/opt/murmur/openclaw
+
+ExecStart=/opt/murmur/.venv/bin/murmur wechat
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# 看板按文件读取日志；部署包里的 logrotate 负责轮转。
+StandardOutput=append:/opt/murmur/logs/murmur_wechat.log
+StandardError=append:/opt/murmur/logs/murmur_wechat.log
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/murmur
+
+[Install]
+WantedBy=multi-user.target

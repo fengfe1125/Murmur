@@ -1,0 +1,40 @@
+[project]
+name = "murmur"
+version = "0.2.0"
+description = "发一张图，它回你一句戳中的话。"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.60",              # OpenCode Zen 是 OpenAI 兼容网关
+    "python-telegram-bot>=21.6",
+    "dingtalk-stream>=0.20",
+    "pillow>=11.0",
+    "pillow-heif>=0.20",         # iPhone 的 .HEIC
+    "python-dotenv>=1.0",
+    "requests>=2.31",            # 钉钉 / 微信 / QQ 的 HTTP 调用
+    "cryptography>=42.0",        # 微信 CDN 的图是 AES-128-ECB 加密的
+    "qq-botpy>=1.2",             # QQ 官方机器人 WebSocket 网关
+]
+
+[project.scripts]
+murmur = "murmur.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6",   # lint；测试是 tests/ 里的自包含脚本，不需要 pytest
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["murmur"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# 注释里大量中文说明，行长限制意义不大
+ignore = ["E501"]

@@ -1,0 +1,30 @@
+[Unit]
+Description=Murmur — DingTalk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=murmur
+WorkingDirectory=/opt/murmur
+EnvironmentFile=/opt/murmur/.env
+ExecStart=/opt/murmur/.venv/bin/murmur dingtalk
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# 看板按文件读取日志；部署包里的 logrotate 负责轮转。
+StandardOutput=append:/opt/murmur/logs/murmur_dingtalk.log
+StandardError=append:/opt/murmur/logs/murmur_dingtalk.log
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/murmur
+
+[Install]
+WantedBy=multi-user.target

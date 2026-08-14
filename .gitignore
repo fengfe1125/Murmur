@@ -1,0 +1,18 @@
+.env
+places.json
+*.db
+# WAL 模式下数据大部分躺在旁边这两个文件里，一样是私密聊天记录
+*.db-wal
+*.db-shm
+logs/
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
+dossiers/
+photos/
+# 微信官方通道的游标与上下文 token，等同于会话凭据，只留在部署机器。
+wechat/
