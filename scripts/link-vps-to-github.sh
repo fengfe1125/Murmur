@@ -54,10 +54,20 @@ remote_run() {
 }
 
 remote_copy() {
-  local local_file="$1" remote_file="$2"
-  if [[ "$MODE" == ssh ]]; then scp "$local_file" "$SSH_TARGET:$remote_file"
-  else gcloud compute scp "$local_file" "$GCE_INSTANCE:$remote_file" --zone "$GCE_ZONE" --project "$GCE_PROJECT"
-  fi
+  local local_file="$1" remote_file="$2" attempt
+  for attempt in 1 2 3; do
+    if [[ "$MODE" == ssh ]]; then
+      scp "$local_file" "$SSH_TARGET:$remote_file" && return 0
+    elif gcloud compute scp "$local_file" "$GCE_INSTANCE:$remote_file" \
+      --zone "$GCE_ZONE" --project "$GCE_PROJECT"; then
+      return 0
+    fi
+    if (( attempt < 3 )); then
+      echo "Upload interrupted; retrying ($attempt/3)…" >&2
+      sleep 3
+    fi
+  done
+  return 1
 }
 
 STAMP=$(date +%Y%m%d-%H%M%S)
