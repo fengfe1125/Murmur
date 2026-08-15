@@ -351,7 +351,7 @@ transport，不碰网络。计划外多做的一件事：
   ——那文件里是 RSA 私钥，等同于 APNs 的 `.p8`，原本没被挡住。
 - worker 里 FCM 是 opt-in：没配就只跑 iOS，Android 投递挂起重试而不判死。
 
-**P3 · Android attestor** — 已完成（commit `d0c1e64`）
+**P3 · Android attestor** — 已完成（commit `da9cf75`）
 
 `app_attest_android.py`（`AndroidKeyAttestor`）+ 21 条测试，全部用合成证书链，
 不需要真设备也不碰网络。与计划的出入：
