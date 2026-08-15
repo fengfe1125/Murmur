@@ -265,8 +265,23 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         var eventID: String?
         var eventName = "message"
         var dataLines: [String] = []
-        for try await line in bytes.lines {
+        // Split on newlines by hand rather than using AsyncBytes.lines: that
+        // sequence drops blank lines, and a blank line is exactly what
+        // terminates one SSE event.  With it, every field of every event piles
+        // into a single dispatch carrying only the last event's name, so all
+        // the bubbles preceding `done` are silently lost.
+        var buffer: [UInt8] = []
+        buffer.reserveCapacity(1024)
+        for try await byte in bytes {
             try Task.checkCancellation()
+            guard byte == 0x0A else {
+                buffer.append(byte)
+                continue
+            }
+            if buffer.last == 0x0D { buffer.removeLast() }
+            let line = String(decoding: buffer, as: UTF8.self)
+            buffer.removeAll(keepingCapacity: true)
+
             if line.isEmpty {
                 if let event = try decodeEvent(id: eventID, name: eventName, data: dataLines.joined(separator: "\n")) {
                     continuation.yield(event)
@@ -274,6 +289,8 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
                 eventID = nil
                 eventName = "message"
                 dataLines.removeAll(keepingCapacity: true)
+            } else if line.hasPrefix(":") {
+                continue                                  // keep-alive comment
             } else if line.hasPrefix("id:") {
                 eventID = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
             } else if line.hasPrefix("event:") {
