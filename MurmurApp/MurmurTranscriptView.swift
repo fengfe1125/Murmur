@@ -51,7 +51,7 @@ private struct DeliveryTicks: View {
                     .scaleEffect(state == .answered ? 1 : 0.6, anchor: .leading)
             }
             .font(.system(size: 10, weight: .bold))
-            .foregroundStyle(state == .answered ? MurmurTheme.olive : MurmurTheme.secondaryInk.opacity(0.75))
+            .foregroundStyle(state == .answered ? MurmurTheme.outgoingBubble : MurmurTheme.secondaryInk.opacity(0.75))
             .frame(width: 16, alignment: .leading)
             .animation(.spring(response: 0.32, dampingFraction: 0.72), value: state)
             .accessibilityLabel(state == .answered ? "已送达，Murmur 正在回应" : "已送达")
@@ -122,7 +122,7 @@ private struct MessageRow: View {
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
                         .background(
-                            isOutgoing ? MurmurTheme.olive : MurmurTheme.raisedPaper,
+                            isOutgoing ? MurmurTheme.outgoingBubble : MurmurTheme.raisedPaper,
                             in: BubbleShape(isOutgoing: isOutgoing)
                         )
                         .overlay {

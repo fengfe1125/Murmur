@@ -41,6 +41,16 @@ enum MurmurTheme {
             ? UIColor(red: 0.93, green: 0.53, blue: 0.43, alpha: 1)
             : UIColor(red: 0.76, green: 0.27, blue: 0.20, alpha: 1)
     })
+    /// Outgoing chat bubbles only.  Kept separate from `olive`, which is the
+    /// app-wide tint, so softening the bubble does not wash out every control.
+    /// Both values stay above 4.5:1 against the white bubble text; the dark
+    /// variant deepens rather than lightens, because the light olive used as a
+    /// tint there only reaches 2.3:1 behind white.
+    static let outgoingBubble = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.26, green: 0.33, blue: 0.18, alpha: 1)
+            : UIColor(red: 0.42, green: 0.48, blue: 0.25, alpha: 1)
+    })
 
     static let pageInset: CGFloat = 20
     static let contentWidth: CGFloat = 1_080
@@ -87,9 +97,13 @@ struct MurmurChatView: View {
                 if model.identity != nil {
                     ToolbarItem(placement: .topBarTrailing) {
                         HStack(spacing: 8) {
-                            Text(model.connection.label)
-                                .font(MurmurTheme.body(.caption2, weight: .medium))
-                                .foregroundStyle(connectionCaptionColor)
+                            // "已连接" is the normal case and just adds noise;
+                            // a broken connection still has to be visible.
+                            if model.connection != .connected {
+                                Text(model.connection.label)
+                                    .font(MurmurTheme.body(.caption2, weight: .medium))
+                                    .foregroundStyle(connectionCaptionColor)
+                            }
                             Button {
                                 showSettings = true
                             } label: {
@@ -430,21 +444,27 @@ private struct MomentComposer: View {
                     Button(action: submit) {
                         Image(systemName: "arrow.up")
                             .font(.system(size: 16, weight: .bold))
-                            .frame(width: 44, height: 44)
                             .foregroundStyle(model.canSubmit ? MurmurTheme.paper : MurmurTheme.secondaryInk)
+                            // The disc is inset from the 44pt hit area so it
+                            // sits inside the field instead of butting against
+                            // its border; the tap target keeps its full size.
+                            .frame(width: 36, height: 36)
                             .background(
                                 model.canSubmit ? MurmurTheme.ink : MurmurTheme.rule,
-                                in: RoundedRectangle(cornerRadius: 10)
+                                in: Circle()
                             )
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(MurmurPressStyle())
                     .disabled(!model.canSubmit)
                     .accessibilityLabel("发送这一刻")
                     .accessibilityIdentifier("send-moment")
                 }
-                .padding(.horizontal, 6)
-                .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 12))
-                .overlay { RoundedRectangle(cornerRadius: 12).stroke(MurmurTheme.rule, lineWidth: 1) }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 4)
+                .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 26))
+                .overlay { RoundedRectangle(cornerRadius: 26).stroke(MurmurTheme.rule, lineWidth: 1) }
             }
         }
         .frame(maxWidth: MurmurTheme.contentWidth)
