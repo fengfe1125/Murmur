@@ -372,7 +372,7 @@ transport，不碰网络。计划外多做的一件事：
 - 吊销列表（`GoogleAttestationStatus`）带 1 小时缓存，只在 enrollment 查；
   取不到时默认拒绝注册，`MURMUR_APP_ATTEST_REVOCATION_FAIL_OPEN=1` 才放行。
 
-**P4 · API 与配置接线** — 已完成（commit `f3b0e8a`）
+**P4 · API 与配置接线** — 已完成（commit `89994e5`）
 
 - `/v1/enrollments` 收 `platform`，**缺省 `ios`** —— 已发布的 iOS 客户端不带这个
   字段，必须不重新编译就继续能注册。取值不在 `{ios, android}` 里直接 400。
