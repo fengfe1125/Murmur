@@ -1,0 +1,2 @@
+// Copy to Release.local.xcconfig. Never put an App Attest or APNs key here.
+MURMUR_API_BASE_URL = https:/$()/murmur.example.com

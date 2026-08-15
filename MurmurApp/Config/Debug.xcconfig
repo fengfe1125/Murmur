@@ -1,0 +1,6 @@
+MURMUR_API_BASE_URL = http:/$()/127.0.0.1:8766
+MURMUR_DEVELOPMENT_TOKEN =
+#include? "Debug.local.xcconfig"
+
+INFOPLIST_KEY_MurmurAPIBaseURL = $(MURMUR_API_BASE_URL)
+INFOPLIST_KEY_MurmurDevelopmentToken = $(MURMUR_DEVELOPMENT_TOKEN)

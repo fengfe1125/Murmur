@@ -1,0 +1,3 @@
+// Copy to Debug.local.xcconfig. The real file is gitignored.
+MURMUR_API_BASE_URL = http:/$()/127.0.0.1:8766
+MURMUR_DEVELOPMENT_TOKEN = replace-with-a-local-development-token

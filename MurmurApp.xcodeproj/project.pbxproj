@@ -1,0 +1,326 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* MurmurApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* MurmurApp.swift */; };
+		A10000000000000000000002 /* MurmurChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* MurmurChatView.swift */; };
+		A10000000000000000000003 /* MurmurModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* MurmurModels.swift */; };
+		A10000000000000000000004 /* PhotoLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* PhotoLoader.swift */; };
+		A10000000000000000000005 /* MurmurSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* MurmurSecurity.swift */; };
+		A10000000000000000000006 /* MurmurAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* MurmurAPI.swift */; };
+		A10000000000000000000007 /* MurmurSessionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* MurmurSessionModel.swift */; };
+		A10000000000000000000008 /* MurmurEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* MurmurEnvironment.swift */; };
+		A10000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* Assets.xcassets */; };
+		A1000000000000000000000A /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001B /* PrivacyInfo.xcprivacy */; };
+		A1000000000000000000000B /* MurmurSessionModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001C /* MurmurSessionModelTests.swift */; };
+		A1000000000000000000000C /* PhotoLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001D /* PhotoLoaderTests.swift */; };
+		A1000000000000000000000D /* MurmurSecurityContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001E /* MurmurSecurityContractTests.swift */; };
+		A1000000000000000000000E /* MurmurUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F /* MurmurUITests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A10000000000000000000090 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000071 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000041;
+			remoteInfo = Murmur;
+		};
+		A10000000000000000000091 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000071 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000041;
+			remoteInfo = Murmur;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A10000000000000000000011 /* MurmurApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurApp.swift; sourceTree = "<group>"; };
+		A10000000000000000000012 /* MurmurChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurChatView.swift; sourceTree = "<group>"; };
+		A10000000000000000000013 /* MurmurModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurModels.swift; sourceTree = "<group>"; };
+		A10000000000000000000014 /* Murmur.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Murmur.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000015 /* PhotoLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLoader.swift; sourceTree = "<group>"; };
+		A10000000000000000000016 /* MurmurSecurity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurSecurity.swift; sourceTree = "<group>"; };
+		A10000000000000000000017 /* MurmurAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurAPI.swift; sourceTree = "<group>"; };
+		A10000000000000000000018 /* MurmurSessionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurSessionModel.swift; sourceTree = "<group>"; };
+		A10000000000000000000019 /* MurmurEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurEnvironment.swift; sourceTree = "<group>"; };
+		A1000000000000000000001A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A1000000000000000000001B /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		A1000000000000000000001C /* MurmurSessionModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurSessionModelTests.swift; sourceTree = "<group>"; };
+		A1000000000000000000001D /* PhotoLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLoaderTests.swift; sourceTree = "<group>"; };
+		A1000000000000000000001E /* MurmurSecurityContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurSecurityContractTests.swift; sourceTree = "<group>"; };
+		A1000000000000000000001F /* MurmurUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurUITests.swift; sourceTree = "<group>"; };
+		A10000000000000000000020 /* MurmurTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MurmurTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000022 /* MurmurUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MurmurUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000023 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
+		A10000000000000000000024 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
+		A10000000000000000000025 /* MurmurDebug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MurmurDebug.entitlements; sourceTree = "<group>"; };
+		A10000000000000000000026 /* MurmurRelease.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MurmurRelease.entitlements; sourceTree = "<group>"; };
+		A10000000000000000000027 /* Debug.local.xcconfig.example */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.local.xcconfig.example; sourceTree = "<group>"; };
+		A10000000000000000000028 /* Release.local.xcconfig.example */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.local.xcconfig.example; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000000000000000000021 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A100000000000000000000A1 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A100000000000000000000A2 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000000031 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000032 /* MurmurApp */,
+				A10000000000000000000033 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000032 /* MurmurApp */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000011 /* MurmurApp.swift */,
+				A10000000000000000000012 /* MurmurChatView.swift */,
+				A10000000000000000000013 /* MurmurModels.swift */,
+				A10000000000000000000018 /* MurmurSessionModel.swift */,
+				A10000000000000000000017 /* MurmurAPI.swift */,
+				A10000000000000000000016 /* MurmurSecurity.swift */,
+				A10000000000000000000015 /* PhotoLoader.swift */,
+				A10000000000000000000019 /* MurmurEnvironment.swift */,
+				A1000000000000000000001A /* Assets.xcassets */,
+				A1000000000000000000001B /* PrivacyInfo.xcprivacy */,
+				A10000000000000000000034 /* Config */,
+				A10000000000000000000035 /* Tests */,
+				A10000000000000000000036 /* UITests */,
+			);
+			path = MurmurApp;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000033 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000014 /* Murmur.app */,
+				A10000000000000000000020 /* MurmurTests.xctest */,
+				A10000000000000000000022 /* MurmurUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000034 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000023 /* Debug.xcconfig */,
+				A10000000000000000000024 /* Release.xcconfig */,
+				A10000000000000000000025 /* MurmurDebug.entitlements */,
+				A10000000000000000000026 /* MurmurRelease.entitlements */,
+				A10000000000000000000027 /* Debug.local.xcconfig.example */,
+				A10000000000000000000028 /* Release.local.xcconfig.example */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000035 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				A1000000000000000000001C /* MurmurSessionModelTests.swift */,
+				A1000000000000000000001D /* PhotoLoaderTests.swift */,
+				A1000000000000000000001E /* MurmurSecurityContractTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000036 /* UITests */ = {
+			isa = PBXGroup;
+			children = (A1000000000000000000001F /* MurmurUITests.swift */);
+			path = UITests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000000000000000000041 /* Murmur */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000051 /* Build configuration list for PBXNativeTarget "Murmur" */;
+			buildPhases = (A10000000000000000000061 /* Sources */, A10000000000000000000021 /* Frameworks */, A10000000000000000000062 /* Resources */);
+			buildRules = ();
+			dependencies = ();
+			name = Murmur;
+			productName = Murmur;
+			productReference = A10000000000000000000014 /* Murmur.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A10000000000000000000042 /* MurmurTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000052 /* Build configuration list for PBXNativeTarget "MurmurTests" */;
+			buildPhases = (A100000000000000000000A3 /* Sources */, A100000000000000000000A1 /* Frameworks */, A100000000000000000000A4 /* Resources */);
+			buildRules = ();
+			dependencies = (A10000000000000000000092 /* PBXTargetDependency */);
+			name = MurmurTests;
+			productName = MurmurTests;
+			productReference = A10000000000000000000020 /* MurmurTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		A10000000000000000000043 /* MurmurUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000053 /* Build configuration list for PBXNativeTarget "MurmurUITests" */;
+			buildPhases = (A100000000000000000000A5 /* Sources */, A100000000000000000000A2 /* Frameworks */, A100000000000000000000A6 /* Resources */);
+			buildRules = ();
+			dependencies = (A10000000000000000000093 /* PBXTargetDependency */);
+			name = MurmurUITests;
+			productName = MurmurUITests;
+			productReference = A10000000000000000000022 /* MurmurUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000071 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					A10000000000000000000041 = {CreatedOnToolsVersion = 26.6; };
+					A10000000000000000000042 = {CreatedOnToolsVersion = 26.6; TestTargetID = A10000000000000000000041; };
+					A10000000000000000000043 = {CreatedOnToolsVersion = 26.6; TestTargetID = A10000000000000000000041; };
+				};
+			};
+			buildConfigurationList = A10000000000000000000072 /* Build configuration list for PBXProject "MurmurApp" */;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = A10000000000000000000031;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A10000000000000000000033 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A10000000000000000000041 /* Murmur */, A10000000000000000000042 /* MurmurTests */, A10000000000000000000043 /* MurmurUITests */);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A10000000000000000000062 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009 /* Assets.xcassets in Resources */, A1000000000000000000000A /* PrivacyInfo.xcprivacy in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+		A100000000000000000000A4 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A100000000000000000000A6 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000000061 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* MurmurApp.swift in Sources */,
+				A10000000000000000000002 /* MurmurChatView.swift in Sources */,
+				A10000000000000000000003 /* MurmurModels.swift in Sources */,
+				A10000000000000000000004 /* PhotoLoader.swift in Sources */,
+				A10000000000000000000005 /* MurmurSecurity.swift in Sources */,
+				A10000000000000000000006 /* MurmurAPI.swift in Sources */,
+				A10000000000000000000007 /* MurmurSessionModel.swift in Sources */,
+				A10000000000000000000008 /* MurmurEnvironment.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A100000000000000000000A3 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000B, A1000000000000000000000C, A1000000000000000000000D); runOnlyForDeploymentPostprocessing = 0; };
+		A100000000000000000000A5 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000E); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A10000000000000000000092 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A10000000000000000000041 /* Murmur */; targetProxy = A10000000000000000000090 /* PBXContainerItemProxy */; };
+		A10000000000000000000093 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A10000000000000000000041 /* Murmur */; targetProxy = A10000000000000000000091 /* PBXContainerItemProxy */; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		A10000000000000000000081 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; CLANG_WARN_DOCUMENTATION_COMMENTS = YES; COPY_PHASE_STRIP = NO; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_TESTABILITY = YES; GCC_C_LANGUAGE_STANDARD = gnu17; GCC_NO_COMMON_BLOCKS = YES; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; name = Debug; };
+		A10000000000000000000082 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; CLANG_WARN_DOCUMENTATION_COMMENTS = YES; COPY_PHASE_STRIP = YES; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; GCC_C_LANGUAGE_STANDARD = gnu17; GCC_NO_COMMON_BLOCKS = YES; SWIFT_COMPILATION_MODE = wholemodule; }; name = Release; };
+		A10000000000000000000083 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A10000000000000000000023 /* Debug.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = MurmurApp/Config/MurmurDebug.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Murmur;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Murmur 需要相机权限，让你拍下并发送眼前的一刻。";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Murmur 需要读取你选择的照片，用来回应这一刻。";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				"INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad" = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.sakura.Murmur;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A10000000000000000000084 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A10000000000000000000024 /* Release.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = MurmurApp/Config/MurmurRelease.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Murmur;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Murmur 需要相机权限，让你拍下并发送眼前的一刻。";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Murmur 需要读取你选择的照片，用来回应这一刻。";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				"INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad" = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.sakura.Murmur;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A10000000000000000000085 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; PRODUCT_BUNDLE_IDENTIFIER = com.sakura.MurmurTests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)"; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Murmur.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Murmur"; }; name = Debug; };
+		A10000000000000000000086 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; PRODUCT_BUNDLE_IDENTIFIER = com.sakura.MurmurTests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Murmur.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Murmur"; }; name = Release; };
+		A10000000000000000000087 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; PRODUCT_BUNDLE_IDENTIFIER = com.sakura.MurmurUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)"; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_TARGET_NAME = Murmur; }; name = Debug; };
+		A10000000000000000000088 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; PRODUCT_BUNDLE_IDENTIFIER = com.sakura.MurmurUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = "1,2"; TEST_TARGET_NAME = Murmur; }; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000000000000000000051 /* Build configuration list for PBXNativeTarget "Murmur" */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000083 /* Debug */, A10000000000000000000084 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A10000000000000000000052 /* Build configuration list for PBXNativeTarget "MurmurTests" */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000085 /* Debug */, A10000000000000000000086 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A10000000000000000000053 /* Build configuration list for PBXNativeTarget "MurmurUITests" */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000087 /* Debug */, A10000000000000000000088 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A10000000000000000000072 /* Build configuration list for PBXProject "MurmurApp" */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000081 /* Debug */, A10000000000000000000082 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = A10000000000000000000071 /* Project object */;
+}
