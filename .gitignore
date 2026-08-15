@@ -29,3 +29,9 @@ wechat/
 .env.dev-app
 .build/
 .hallmark/
+.cache/
+.ssh/
+botpy.log
+manifest.txt
+.rollback-commit
+.env.bak-*
