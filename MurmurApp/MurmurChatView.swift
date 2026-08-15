@@ -52,6 +52,9 @@ enum MurmurTheme {
             : UIColor(red: 0.42, green: 0.48, blue: 0.25, alpha: 1)
     })
 
+    /// One diameter for every standalone icon control, so the chrome reads
+    /// as one family: the toolbar mark, the gear, add-photo and send.
+    static let disc: CGFloat = 36
     static let pageInset: CGFloat = 20
     static let contentWidth: CGFloat = 1_080
     static let corner: CGFloat = 18
@@ -107,9 +110,13 @@ struct MurmurChatView: View {
                             Button {
                                 showSettings = true
                             } label: {
+                                // Same 32pt content box as MurmurMark, so the
+                                // system glass wraps both toolbar items into
+                                // circles of one diameter instead of a circle
+                                // beside a wider capsule.
                                 Image(systemName: "gearshape")
-                                    .font(.system(size: 17, weight: .regular))
-                                    .frame(width: 44, height: 44)
+                                    .font(.system(size: 18, weight: .regular))
+                                    .frame(width: 32, height: 32)
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(MurmurPressStyle())
@@ -282,10 +289,25 @@ private struct EnrollmentView: View {
 private struct MomentWorkbench: View {
     @ObservedObject var model: MurmurSessionModel
     @Binding var showCamera: Bool
+    @State private var showPhotoSource = false
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
         MurmurTranscriptView(model: model)
+            // A tap anywhere off the menu closes it, the way a popover does.
+            .overlay {
+                if showPhotoSource {
+                    MurmurTheme.ink.opacity(0.08)
+                        .ignoresSafeArea()
+                        .transition(.opacity)
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                                showPhotoSource = false
+                            }
+                        }
+                        .accessibilityLabel("关闭添加照片菜单")
+                }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     // The draft photo still needs somewhere to show itself
@@ -309,7 +331,11 @@ private struct MomentWorkbench: View {
                         .padding(.bottom, 10)
                         .frame(maxWidth: .infinity)
                     }
-                    MomentComposer(model: model, showCamera: $showCamera)
+                    MomentComposer(
+                        model: model,
+                        showCamera: $showCamera,
+                        showPhotoSource: $showPhotoSource
+                    )
                 }
                 .background(MurmurTheme.paper)
             }
@@ -364,9 +390,10 @@ private struct MomentVisualPanel: View {
 private struct MomentComposer: View {
     @ObservedObject var model: MurmurSessionModel
     @Binding var showCamera: Bool
+    @Binding var showPhotoSource: Bool
     @State private var selectedItem: PhotosPickerItem?
     @State private var showLibrary = false
-    @State private var showPhotoSource = false
+    @State private var menuHeight: CGFloat = 0
     @FocusState private var textFocused: Bool
 
     var body: some View {
@@ -399,30 +426,29 @@ private struct MomentComposer: View {
                 .overlay { RoundedRectangle(cornerRadius: 12).stroke(MurmurTheme.rule, lineWidth: 1) }
             }
 
-            HStack(alignment: .bottom, spacing: 8) {
+            // Both controls live inside the field as equal discs, so the row is
+            // one container instead of a square button beside a taller pill.
+            HStack(alignment: .bottom, spacing: 6) {
                 Button {
-                    showPhotoSource = true
+                    textFocused = false
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+                        showPhotoSource.toggle()
+                    }
                 } label: {
                     Image(systemName: "plus")
+                        .rotationEffect(.degrees(showPhotoSource ? 45 : 0))
                         .font(.system(size: 17, weight: .semibold))
-                        .frame(width: 48, height: 48)
+                        .foregroundStyle(MurmurTheme.ink)
+                        .frame(width: MurmurTheme.disc, height: MurmurTheme.disc)
+                        .background(MurmurTheme.paper, in: Circle())
+                        .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(MurmurPressStyle())
-                .foregroundStyle(MurmurTheme.ink)
-                .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 12))
-                .overlay { RoundedRectangle(cornerRadius: 12).stroke(MurmurTheme.rule, lineWidth: 1) }
                 .disabled(model.phase.isBusy)
                 .accessibilityLabel("添加照片")
-                .confirmationDialog("添加照片", isPresented: $showPhotoSource) {
-                    Button("从照片中选择") { showLibrary = true }
-                    if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                        Button("拍照") { showCamera = true }
-                    }
-                }
                 .photosPicker(isPresented: $showLibrary, selection: $selectedItem, matching: .images)
 
-                HStack(alignment: .bottom, spacing: 6) {
                     TextField("发一张图，或说点什么", text: $model.draftText, axis: .vertical)
                         .font(MurmurTheme.body(.body))
                         .foregroundStyle(MurmurTheme.ink)
@@ -445,10 +471,9 @@ private struct MomentComposer: View {
                         Image(systemName: "arrow.up")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(model.canSubmit ? MurmurTheme.paper : MurmurTheme.secondaryInk)
-                            // The disc is inset from the 44pt hit area so it
-                            // sits inside the field instead of butting against
-                            // its border; the tap target keeps its full size.
-                            .frame(width: 36, height: 36)
+                            // Inset from the 44pt hit area so the disc sits
+                            // inside the field; the tap target keeps its size.
+                            .frame(width: MurmurTheme.disc, height: MurmurTheme.disc)
                             .background(
                                 model.canSubmit ? MurmurTheme.ink : MurmurTheme.rule,
                                 in: Circle()
@@ -460,11 +485,32 @@ private struct MomentComposer: View {
                     .disabled(!model.canSubmit)
                     .accessibilityLabel("发送这一刻")
                     .accessibilityIdentifier("send-moment")
+            }
+            .padding(.horizontal, 5)
+            .padding(.vertical, 4)
+            .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 26))
+            .overlay { RoundedRectangle(cornerRadius: 26).stroke(MurmurTheme.rule, lineWidth: 1) }
+            // Rising out of the field rather than dropping over it: the menu's
+            // own bottom is pinned just above the pill, so it grows upward from
+            // the button that opened it.
+            .overlay(alignment: .topLeading) {
+                if showPhotoSource {
+                    PhotoSourceMenu(
+                        onLibrary: { showLibrary = true },
+                        onCamera: { showCamera = true },
+                        onDismiss: { closePhotoSource() }
+                    )
+                    // Lift by its own measured height so the card's bottom
+                    // rests just above the pill, whatever rows it ends up with.
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        menuHeight = $0
+                    }
+                    .offset(y: -(menuHeight + 10))
+                    .transition(
+                        .scale(scale: 0.86, anchor: .bottomLeading)
+                        .combined(with: .opacity)
+                    )
                 }
-                .padding(.horizontal, 5)
-                .padding(.vertical, 4)
-                .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 26))
-                .overlay { RoundedRectangle(cornerRadius: 26).stroke(MurmurTheme.rule, lineWidth: 1) }
             }
         }
         .frame(maxWidth: MurmurTheme.contentWidth)
@@ -490,6 +536,12 @@ private struct MomentComposer: View {
                     model.failPhotoSelection()
                 }
             }
+        }
+    }
+
+    private func closePhotoSource() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            showPhotoSource = false
         }
     }
 
@@ -707,6 +759,61 @@ private struct MurmurSettingsView: View {
     private func openSystemSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+}
+
+/// The add-photo menu, drawn in the app's own paper instead of system chrome
+/// so it belongs to the composer it rises out of.
+private struct PhotoSourceMenu: View {
+    let onLibrary: () -> Void
+    let onCamera: () -> Void
+    let onDismiss: () -> Void
+
+    private var hasCamera: Bool {
+        UIImagePickerController.isSourceTypeAvailable(.camera)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            row("从照片中选择", icon: "photo.on.rectangle") {
+                onDismiss()
+                onLibrary()
+            }
+            if hasCamera {
+                Rectangle()
+                    .fill(MurmurTheme.rule)
+                    .frame(height: 1)
+                    .padding(.leading, 48)
+                row("拍照", icon: "camera") {
+                    onDismiss()
+                    onCamera()
+                }
+            }
+        }
+        .frame(width: 210)
+        .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 16))
+        .overlay { RoundedRectangle(cornerRadius: 16).stroke(MurmurTheme.rule, lineWidth: 1) }
+        .shadow(color: MurmurTheme.ink.opacity(0.14), radius: 16, y: 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("photo-source-menu")
+    }
+
+    private func row(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(width: 20)
+                Text(title)
+                    .font(MurmurTheme.body(.subheadline))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(MurmurTheme.ink)
+            .padding(.horizontal, 14)
+            .frame(height: 48)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MurmurPressStyle())
     }
 }
 
