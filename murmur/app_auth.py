@@ -380,6 +380,10 @@ class AppAuthenticator:
                 environment="production",
                 root_path=settings.attest_root_path,
             )
+        if getattr(settings, "android_enabled", False) and "android" not in registry:
+            from .app_attest_android import AndroidKeyAttestor
+
+            registry["android"] = AndroidKeyAttestor.from_settings(settings)
         self.attestors = registry
 
     def _attestor(self, platform: str) -> DeviceAttestor:

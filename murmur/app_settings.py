@@ -18,6 +18,25 @@ def _path(value: str | None, default: Path) -> Path:
     return Path(value).expanduser() if value else default
 
 
+def _digests(value: str | None) -> tuple[bytes, ...]:
+    """Parse comma-separated SHA-256 hex digests, colons and spacing tolerated."""
+    if not value:
+        return ()
+    digests = []
+    for item in value.replace(":", "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            raw = bytes.fromhex(item)
+        except ValueError as exc:
+            raise RuntimeError(f"invalid signing certificate digest: {item!r}") from exc
+        if len(raw) != 32:
+            raise RuntimeError("signing certificate digests must be SHA-256")
+        digests.append(raw)
+    return tuple(digests)
+
+
 @dataclass(frozen=True)
 class AppSettings:
     db_path: Path
@@ -38,6 +57,11 @@ class AppSettings:
     apns_environment: str
     fcm_project_id: str | None = None
     fcm_service_account_path: Path | None = None
+    android_enabled: bool = False
+    android_package: str | None = None
+    android_signature_digests: tuple[bytes, ...] = ()
+    attest_google_root_path: Path | None = None
+    attest_revocation_fail_open: bool = False
     max_image_bytes: int = 25 * 1024 * 1024
     max_body_bytes: int = 26 * 1024 * 1024
     max_json_body_bytes: int = 256 * 1024
@@ -77,6 +101,7 @@ class AppSettings:
         root_override = os.getenv("MURMUR_APP_ATTEST_ROOT_CA")
         apns_path = os.getenv("MURMUR_APP_APNS_KEY_PATH")
         fcm_account = os.getenv("MURMUR_APP_FCM_SERVICE_ACCOUNT_PATH")
+        google_root = os.getenv("MURMUR_APP_ATTEST_GOOGLE_ROOT_CA")
         attest_mode = os.getenv("MURMUR_APP_ATTEST_MODE", "production").strip().lower()
         tz = getattr(cfg, "tz", None) or ZoneInfo(
             os.getenv("MURMUR_APP_TIMEZONE", "Asia/Shanghai")
@@ -101,6 +126,17 @@ class AppSettings:
             fcm_project_id=os.getenv("MURMUR_APP_FCM_PROJECT_ID") or None,
             fcm_service_account_path=(
                 Path(fcm_account).expanduser() if fcm_account else None
+            ),
+            android_enabled=_bool(os.getenv("MURMUR_APP_ANDROID_ENABLED")),
+            android_package=os.getenv("MURMUR_APP_ANDROID_PACKAGE") or None,
+            android_signature_digests=_digests(
+                os.getenv("MURMUR_APP_ANDROID_SIGNING_DIGESTS")
+            ),
+            attest_google_root_path=(
+                Path(google_root).expanduser() if google_root else None
+            ),
+            attest_revocation_fail_open=_bool(
+                os.getenv("MURMUR_APP_ATTEST_REVOCATION_FAIL_OPEN")
             ),
             max_image_bytes=int(os.getenv("MURMUR_APP_MAX_IMAGE_BYTES", 25 * 1024 * 1024)),
             max_body_bytes=int(os.getenv("MURMUR_APP_MAX_BODY_BYTES", 26 * 1024 * 1024)),
@@ -171,6 +207,19 @@ class AppSettings:
             raise RuntimeError("App image pixel limit must accept 48MP photos")
         if self.requests_per_minute < 1 or self.rate_limit_max_keys < 128:
             raise RuntimeError("invalid App API rate limiter settings")
+
+    def validate_android(self) -> None:
+        missing = [
+            name for name, value in (
+                ("MURMUR_APP_ANDROID_PACKAGE", self.android_package),
+                ("MURMUR_APP_ANDROID_SIGNING_DIGESTS", self.android_signature_digests),
+                ("MURMUR_APP_ATTEST_GOOGLE_ROOT_CA", self.attest_google_root_path),
+            ) if not value
+        ]
+        if missing:
+            raise RuntimeError("Android attestation missing: " + ", ".join(missing))
+        if not self.attest_google_root_path or not self.attest_google_root_path.is_file():
+            raise RuntimeError("Android attestation root certificate does not exist")
 
     @property
     def fcm_configured(self) -> bool:

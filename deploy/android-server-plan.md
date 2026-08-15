@@ -351,10 +351,26 @@ transport，不碰网络。计划外多做的一件事：
   ——那文件里是 RSA 私钥，等同于 APNs 的 `.p8`，原本没被挡住。
 - worker 里 FCM 是 opt-in：没配就只跑 iOS，Android 投递挂起重试而不判死。
 
-**P3 · Android attestor**
-`app_attest_android.py` + 测试。`tests/test_app_attest.py:118` 已经在用
-`x509.CertificateBuilder` 造合成 Apple 证书链，Android 侧照此造带
-`1.3.6.1.4.1.11129.2.1.17` 扩展的合成链，同样不需要真设备。
+**P3 · Android attestor** — 已完成（commit `d0c1e64`）
+
+`app_attest_android.py`（`AndroidKeyAttestor`）+ 21 条测试，全部用合成证书链，
+不需要真设备也不碰网络。与计划的出入：
+
+- **不内嵌 Google 根证书。** 计划里写的是"缺省用内嵌根证书"，实现改成必须由
+  `MURMUR_APP_ATTEST_GOOGLE_ROOT_CA` 提供，缺了就拒绝构造。烧进源码里的信任锚
+  等于部署方从没核对过的信任锚。
+- `_der_primitive_values` **不能复用**。它是个拍平的遍历器，而
+  `AuthorizationList` 的字段靠 context tag 编号区分，且 702/704/709 都超过 30、
+  必须走 high-tag-number 编码。写了个约 80 行的最小 DER 解析器，只认
+  SEQUENCE/INTEGER/ENUMERATED/OCTET STRING/BOOLEAN/SET 和 EXPLICIT context tag。
+- attestation 的 wire 格式定为 **SEQUENCE OF OCTET STRING**（leaf 在前），
+  正好是 Android 端 `KeyStore.getCertificateChain()` 每项 `getEncoded()` 的结果。
+- `environment` 的判定改成 **fail closed**：production 模式下硬件级别不是
+  TEE/StrongBox、或 verifiedBootState 不是 Verified、或 bootloader 未锁，
+  直接拒绝，而不是降级成 `development` 放进库里。这与
+  `AppleAppAttestVerifier` 拒绝 AAGUID 不匹配的行为一致。
+- 吊销列表（`GoogleAttestationStatus`）带 1 小时缓存，只在 enrollment 查；
+  取不到时默认拒绝注册，`MURMUR_APP_ATTEST_REVOCATION_FAIL_OPEN=1` 才放行。
 
 **P4 · API 与配置接线**
 enroll 的 `platform` 字段、`/v1/device` 的 token 校验分支、settings 与 validate。
