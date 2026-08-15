@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Only the keys Xcode cannot generate for us.
+
+  INFOPLIST_KEY_* build settings are honoured for Apple's own keys and dropped
+  for anything else, so the two Murmur keys never reached the bundle and the
+  base-URL override in Debug.local/Release.local.xcconfig quietly did nothing.
+  GENERATE_INFOPLIST_FILE still merges the generated keys on top of this file.
+-->
+<plist version="1.0">
+<dict>
+	<key>MurmurAPIBaseURL</key>
+	<string>$(MURMUR_API_BASE_URL)</string>
+	<key>MurmurDevelopmentToken</key>
+	<string>$(MURMUR_DEVELOPMENT_TOKEN)</string>
+</dict>
+</plist>

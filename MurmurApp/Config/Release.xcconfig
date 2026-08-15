@@ -1,5 +1,5 @@
 MURMUR_API_BASE_URL =
 #include? "Release.local.xcconfig"
 
-INFOPLIST_KEY_MurmurAPIBaseURL = $(MURMUR_API_BASE_URL)
-INFOPLIST_KEY_MurmurDevelopmentToken =
+// Custom keys only; GENERATE_INFOPLIST_FILE merges Apple's on top.
+INFOPLIST_FILE = MurmurApp/Config/Info.plist
