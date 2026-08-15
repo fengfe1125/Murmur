@@ -140,5 +140,49 @@ for f in ("murmur/dingtalk.py", "murmur/wechat.py"):
     check(f"{f} 最长睡 {worst:.0f} 秒 < 300 秒阈值", worst < 300,
           "贴着阈值的话，什么都没出错也会被误杀")
 
+print("\n── 空闲不等于卡死 " + "─" * 40)
+# 2026-08-14：QQ 只在入站消息回调里 beat()，于是看门狗量的是"有没有人说话"
+# 而不是"循环还活着"。没人发消息 → 每 5 分 42 秒自杀一次，一天四百多轮。
+rc, out = run("""
+    import asyncio
+    from murmur import qq
+
+    async def main():
+        asyncio.create_task(qq.beat_forever(interval=0.4))
+        await asyncio.sleep(6)      # 全程零入站消息，纯空闲
+        print("SURVIVED")
+
+    watchdog.start("QQ", stale_after=2)
+    asyncio.run(main())
+""")
+check("空闲 6 秒（阈值 2 秒）不被杀", rc == 0 and "SURVIVED" in out,
+      f"退出码 {rc}｜{out[-300:]}")
+check("没有误判卡死", "判定卡死" not in out)
+
+# 反证：拿掉心跳任务就必须被杀，否则上面那条测试是空的
+rc, out = run("""
+    import asyncio
+
+    async def main():
+        await asyncio.sleep(6)      # 修复前的行为：没人说话就没人喂
+        print("NOT_KILLED")
+
+    watchdog.start("QQ", stale_after=2)
+    asyncio.run(main())
+""")
+check("反证：没有心跳任务时确实会被杀", rc == 75 and "NOT_KILLED" not in out,
+      f"实际 {rc}")
+
+print("\n── 每个机器人都得有驻留在事件循环上的心跳 " + "─" * 16)
+# 光有 watchdog.start() 不算数：喂心跳的东西必须跟被监控的循环同生共死。
+_LOOP_FED = {
+    "murmur/bot.py": "run_repeating(_heartbeat",   # PTB JobQueue，跑在循环上
+    "murmur/qq.py": "create_task(beat_forever",    # asyncio 任务，跑在循环上
+}
+for f, needle in _LOOP_FED.items():
+    src = (ROOT / f).read_text()
+    check(f"{f} 有周期心跳（{needle}…）", needle in src,
+          "只在消息回调里 beat() 的话，空闲就会被当成卡死")
+
 print(f"\n{'─' * 60}\n通过 {ok}，失败 {fail}")
 sys.exit(1 if fail else 0)

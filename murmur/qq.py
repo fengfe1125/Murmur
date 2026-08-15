@@ -75,6 +75,20 @@ def create_gateway_client(client_class, intents, *, sandbox: bool):
     )
 
 
+async def beat_forever(interval: float = 60.0) -> None:
+    """定期给看门狗报平安。必须跑在网关自己的事件循环上。
+
+    只靠入站消息回调喂心跳的话，量到的是"有没有人说话"而不是"循环还活着"，
+    空闲超过 STALE_AFTER 就会被判定卡死：2026-08-14 QQ 上线后就这么每
+    5 分 42 秒自杀一次，一天四百多轮，期间一条消息都没收到过。
+
+    挪到独立线程里喂也不行——那样循环真卡死时看门狗照样报平安，检查等于废掉。
+    """
+    while True:
+        await asyncio.sleep(interval)
+        watchdog.beat()
+
+
 def _bypass_proxy_for_qq() -> str:
     current = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
     parts = [p.strip() for p in current.split(",") if p.strip()]
@@ -562,9 +576,15 @@ def run() -> None:
     handler = Handler(cfg, mem, http)
 
     class Client(botpy.Client):
+        # 外层 while 每次重连都新建一个 Client，心跳任务跟着旧循环一起消失，
+        # 所以挂在实例上，每次 on_ready 重新起一个。
+        _hb: asyncio.Task | None = None
+
         async def on_ready(self):
             log.info("QQ 网关已就绪")
             watchdog.beat()
+            if self._hb is None or self._hb.done():
+                self._hb = asyncio.create_task(beat_forever())
 
         async def on_c2c_message_create(self, message: C2CMessage):
             watchdog.beat()
