@@ -55,13 +55,6 @@ enum MurmurTheme {
     }
 }
 
-enum MurmurWorkbenchLayout {
-    static func usesTwoColumns(isRegularWidth: Bool, width: CGFloat, isLandscape: Bool) -> Bool {
-        if isRegularWidth { return width >= 720 }
-        return isLandscape && width >= 640
-    }
-}
-
 struct MurmurChatView: View {
     @ObservedObject var model: MurmurSessionModel
     @EnvironmentObject private var notifications: MurmurNotificationBridge
@@ -253,7 +246,7 @@ private struct EnrollmentView: View {
                 .opacity(inviteCode.isEmpty ? 0.55 : 1)
                 .accessibilityIdentifier("enroll-button")
 
-                Text("Murmur 不会在这台设备里保存聊天列表。服务端的私有记忆只用于延续它对你的理解。")
+                Text("聊天记录只留在这台设备上，删除 App 就一并消失。服务端保存的是私有记忆，不是对话本身。")
                     .font(MurmurTheme.body(.footnote))
                     .foregroundStyle(MurmurTheme.secondaryInk)
                     .padding(.top, 10)
@@ -278,188 +271,35 @@ private struct MomentWorkbench: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
-        GeometryReader { geometry in
-            let twoColumns = MurmurWorkbenchLayout.usesTwoColumns(
-                isRegularWidth: horizontalSizeClass == .regular,
-                width: geometry.size.width,
-                isLandscape: geometry.size.width > geometry.size.height
-            )
-            ScrollView {
-                Group {
-                    if twoColumns {
-                        HStack(alignment: .top, spacing: 28) {
-                            MomentVisualPanel(model: model)
-                                .frame(maxWidth: .infinity)
-                            MomentResponsePanel(model: model)
-                                .frame(maxWidth: .infinity)
-                        }
-                    } else {
-                        VStack(alignment: .leading, spacing: 22) {
-                            MomentResponsePanel(model: model)
-                            if model.currentPhoto != nil || model.draftPhoto != nil || model.phase == .preparingPhoto {
-                                MomentVisualPanel(model: model)
-                            }
-                        }
-                    }
-                }
-                .frame(maxWidth: MurmurTheme.contentWidth)
-                .padding(.horizontal, MurmurTheme.pageInset)
-                .padding(.top, 24)
-                .padding(.bottom, 28)
-                .frame(maxWidth: .infinity)
-            }
-            .scrollDismissesKeyboard(.interactively)
+        MurmurTranscriptView(model: model)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
-                    MurmurStatusStrip(model: model)
+                    // The draft photo still needs somewhere to show itself
+                    // before it is sent; once sent it lives in the transcript.
+                    if model.draftPhoto != nil || model.phase == .preparingPhoto {
+                        MomentVisualPanel(model: model)
+                            .frame(maxWidth: MurmurTheme.contentWidth)
+                            .padding(.horizontal, MurmurTheme.pageInset)
+                            .padding(.bottom, 10)
+                            .frame(maxWidth: .infinity)
+                    }
+                    if model.phase == .error, let failure = model.failure {
+                        MurmurNotice(
+                            message: failure.message,
+                            retryTitle: failure.retryable ? "再试一次" : nil,
+                            identifier: "moment-error",
+                            onRetry: { model.retry() }
+                        )
+                        .frame(maxWidth: MurmurTheme.contentWidth)
+                        .padding(.horizontal, MurmurTheme.pageInset)
+                        .padding(.bottom, 10)
+                        .frame(maxWidth: .infinity)
+                    }
                     MomentComposer(model: model, showCamera: $showCamera)
                 }
                 .background(MurmurTheme.paper)
             }
-        }
-    }
-}
-
-private struct MomentResponsePanel: View {
-    @ObservedObject var model: MurmurSessionModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("此刻")
-                    .font(MurmurTheme.body(.caption, weight: .semibold))
-                    .textCase(.uppercase)
-                    .tracking(1.4)
-                    .foregroundStyle(MurmurTheme.olive)
-                Spacer()
-                if model.hasCurrentMoment {
-                    Button("清空", systemImage: "xmark") { model.clearCurrent() }
-                        .labelStyle(.titleAndIcon)
-                        .font(MurmurTheme.body(.caption, weight: .medium))
-                        .foregroundStyle(MurmurTheme.secondaryInk)
-                        .frame(minHeight: 44)
-                        .buttonStyle(MurmurPressStyle())
-                }
-            }
-
-            if !model.hasCurrentMoment {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("发来眼前的一刻。")
-                        .font(MurmurTheme.display(.largeTitle))
-                        .foregroundStyle(MurmurTheme.ink)
-                        .accessibilityIdentifier("empty-moment")
-                    Text("可以是一张照片，也可以只说一句。Murmur 会回应，但这里不会长成聊天记录。")
-                        .font(MurmurTheme.body(.body))
-                        .foregroundStyle(MurmurTheme.secondaryInk)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.vertical, 18)
-            } else {
-                if !model.currentNote.isEmpty {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("你发来的")
-                            .font(MurmurTheme.body(.caption, weight: .semibold))
-                            .foregroundStyle(MurmurTheme.secondaryInk)
-                        Text(model.currentNote)
-                            .font(MurmurTheme.body(.body))
-                            .foregroundStyle(MurmurTheme.ink)
-                            .textSelection(.enabled)
-                    }
-                    .padding(.bottom, 4)
-                }
-
-                Rectangle()
-                    .fill(MurmurTheme.rule)
-                    .frame(height: 1)
-
-                if model.bubbles.isEmpty {
-                    WorkingOrQuietState(model: model)
-                } else {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(model.bubbles.enumerated()), id: \.element.id) { index, bubble in
-                            Text(bubble.text)
-                                .font(MurmurTheme.display(.title2))
-                                .foregroundStyle(MurmurTheme.ink)
-                                .lineSpacing(5)
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .padding(.vertical, 18)
-                                .accessibilityIdentifier("murmur-bubble-\(index)")
-                            if index < model.bubbles.count - 1 {
-                                Rectangle().fill(MurmurTheme.rule).frame(height: 1)
-                            }
-                        }
-                    }
-                }
-
-                if model.phase == .error, let failure = model.failure, !model.bubbles.isEmpty {
-                    MurmurNotice(
-                        message: failure.message,
-                        retryTitle: failure.retryable ? "再试一次" : nil,
-                        identifier: "moment-error",
-                        onRetry: { model.retry() }
-                    )
-                    .padding(.top, 8)
-                }
-
-                if let scene = model.scene, !scene.isEmpty {
-                    Text(scene)
-                        .font(MurmurTheme.body(.footnote))
-                        .foregroundStyle(MurmurTheme.secondaryInk)
-                        .padding(.top, 4)
-                }
-            }
-        }
-        .padding(22)
-        .background(MurmurTheme.raisedPaper)
-        .overlay {
-            RoundedRectangle(cornerRadius: MurmurTheme.corner)
-                .stroke(MurmurTheme.rule, lineWidth: 1)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: MurmurTheme.corner))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("response-panel")
-        .accessibilityLabel("当前回应区域")
-        .accessibilitySortPriority(2)
-    }
-}
-
-private struct WorkingOrQuietState: View {
-    @ObservedObject var model: MurmurSessionModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            switch model.phase {
-            case .uploading, .responding, .preparingPhoto:
-                HStack(spacing: 12) {
-                    ProgressView().tint(MurmurTheme.olive)
-                    Text(model.statusText)
-                        .font(MurmurTheme.body(.body))
-                        .foregroundStyle(MurmurTheme.secondaryInk)
-                }
-                Button("取消") { model.cancelCurrentOperation() }
-                    .font(MurmurTheme.body(.subheadline, weight: .semibold))
-                    .frame(minHeight: 44)
-                    .buttonStyle(MurmurPressStyle())
-            case .quiet:
-                Text("这一次，Murmur 没有打断这一刻。")
-                    .font(MurmurTheme.display(.title2))
-                    .foregroundStyle(MurmurTheme.ink)
-            case .error:
-                MurmurNotice(
-                    message: model.failure?.message ?? "没有送达。",
-                    retryTitle: model.failure?.retryable == true ? "再试一次" : nil,
-                    identifier: "moment-error",
-                    onRetry: { model.retry() }
-                )
-            default:
-                Text(model.statusText)
-                    .font(MurmurTheme.body(.body))
-                    .foregroundStyle(MurmurTheme.secondaryInk)
-            }
-        }
-        .frame(minHeight: 92, alignment: .topLeading)
-        .padding(.vertical, 16)
+            .task { await model.loadTranscript() }
     }
 }
 
@@ -504,25 +344,6 @@ private struct MomentVisualPanel: View {
         .accessibilityIdentifier("visual-panel")
         .accessibilityLabel("图片预览区域")
         .accessibilitySortPriority(1)
-    }
-}
-
-private struct MurmurStatusStrip: View {
-    @ObservedObject var model: MurmurSessionModel
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Rectangle().fill(MurmurTheme.rule).frame(height: 1)
-            Text(model.statusText)
-                .font(MurmurTheme.body(.caption2, weight: .medium))
-                .foregroundStyle(MurmurTheme.secondaryInk)
-                .lineLimit(1)
-                .accessibilityIdentifier("moment-status")
-            Rectangle().fill(MurmurTheme.rule).frame(height: 1)
-        }
-        .padding(.horizontal, MurmurTheme.pageInset)
-        .padding(.top, 8)
-        .accessibilityElement(children: .combine)
     }
 }
 

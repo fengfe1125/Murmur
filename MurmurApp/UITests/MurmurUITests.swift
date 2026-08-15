@@ -152,7 +152,9 @@ final class MurmurUITests: XCTestCase {
     }
 
     private func bubble(in app: XCUIApplication) -> XCUIElement {
-        let identified = app.descendants(matching: .any)["murmur-bubble-0"].firstMatch
+        // The transcript numbers every row, so Murmur's first reply is the row
+        // after the outgoing message rather than a bubble index of its own.
+        let identified = app.descendants(matching: .any)["murmur-message-1"].firstMatch
         if identified.exists { return identified }
         return app.staticTexts["这一刻，我收到了。"]
     }

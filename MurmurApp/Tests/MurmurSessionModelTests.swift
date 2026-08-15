@@ -5,12 +5,44 @@ import XCTest
 
 @MainActor
 final class MurmurSessionModelTests: XCTestCase {
-    func testWorkbenchLayoutCollapsesAtSplitViewSeam() {
-        XCTAssertFalse(MurmurWorkbenchLayout.usesTwoColumns(isRegularWidth: true, width: 719, isLandscape: false))
-        XCTAssertTrue(MurmurWorkbenchLayout.usesTwoColumns(isRegularWidth: true, width: 720, isLandscape: false))
-        XCTAssertFalse(MurmurWorkbenchLayout.usesTwoColumns(isRegularWidth: false, width: 1_024, isLandscape: false))
-        XCTAssertTrue(MurmurWorkbenchLayout.usesTwoColumns(isRegularWidth: false, width: 852, isLandscape: true))
-        XCTAssertFalse(MurmurWorkbenchLayout.usesTwoColumns(isRegularWidth: false, width: 568, isLandscape: true))
+    func testTranscriptSurvivesAReloadAndMarksInterruptedSendsFailed() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+
+        await store.save([
+            .init(author: .you, text: "在吗", delivery: .answered),
+            .init(author: .murmur, text: "在呢"),
+            .init(author: .you, text: "这条没发出去", delivery: .sending),
+        ])
+
+        let reloaded = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertEqual(reloaded.map(\.text), ["在吗", "在呢", "这条没发出去"])
+        XCTAssertEqual(reloaded.map(\.author), [.you, .murmur, .you])
+        // A send interrupted by a crash never reached the server, so it must
+        // not come back still spinning.
+        XCTAssertEqual(reloaded[2].delivery, .failed)
+        XCTAssertEqual(reloaded[0].delivery, .answered)
+
+        await store.clear()
+        let cleared = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertTrue(cleared.isEmpty)
+    }
+
+    func testTranscriptKeepsOnlyTheMostRecentHistory() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+
+        let overflow = MurmurTranscriptStore.historyLimit + 40
+        await store.save((0..<overflow).map { .init(author: .you, text: "m\($0)") })
+
+        let reloaded = await store.load()
+        XCTAssertEqual(reloaded.count, MurmurTranscriptStore.historyLimit)
+        XCTAssertEqual(reloaded.first?.text, "m40")
+        XCTAssertEqual(reloaded.last?.text, "m\(overflow - 1)")
     }
 
     func testColdBootstrapIsEmptyAndDoesNotFetchProactive() async throws {

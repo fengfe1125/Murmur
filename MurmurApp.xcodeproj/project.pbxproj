@@ -13,6 +13,8 @@
 		A10000000000000000000005 /* MurmurSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* MurmurSecurity.swift */; };
 		A10000000000000000000006 /* MurmurAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* MurmurAPI.swift */; };
 		A10000000000000000000007 /* MurmurSessionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* MurmurSessionModel.swift */; };
+		A1000000000000000000000F /* MurmurTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000029 /* MurmurTranscript.swift */; };
+		A10000000000000000000010 /* MurmurTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002A /* MurmurTranscriptView.swift */; };
 		A10000000000000000000008 /* MurmurEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* MurmurEnvironment.swift */; };
 		A10000000000000000000009 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* Assets.xcassets */; };
 		A1000000000000000000000A /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001B /* PrivacyInfo.xcprivacy */; };
@@ -48,6 +50,8 @@
 		A10000000000000000000016 /* MurmurSecurity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurSecurity.swift; sourceTree = "<group>"; };
 		A10000000000000000000017 /* MurmurAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurAPI.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* MurmurSessionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurSessionModel.swift; sourceTree = "<group>"; };
+		A10000000000000000000029 /* MurmurTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurTranscript.swift; sourceTree = "<group>"; };
+		A1000000000000000000002A /* MurmurTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurTranscriptView.swift; sourceTree = "<group>"; };
 		A10000000000000000000019 /* MurmurEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurEnvironment.swift; sourceTree = "<group>"; };
 		A1000000000000000000001A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000000000000000000001B /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
@@ -91,6 +95,8 @@
 				A10000000000000000000016 /* MurmurSecurity.swift */,
 				A10000000000000000000015 /* PhotoLoader.swift */,
 				A10000000000000000000019 /* MurmurEnvironment.swift */,
+				A10000000000000000000029 /* MurmurTranscript.swift */,
+				A1000000000000000000002A /* MurmurTranscriptView.swift */,
 				A1000000000000000000001A /* Assets.xcassets */,
 				A1000000000000000000001B /* PrivacyInfo.xcprivacy */,
 				A10000000000000000000034 /* Config */,
@@ -224,6 +230,8 @@
 				A10000000000000000000006 /* MurmurAPI.swift in Sources */,
 				A10000000000000000000007 /* MurmurSessionModel.swift in Sources */,
 				A10000000000000000000008 /* MurmurEnvironment.swift in Sources */,
+				A1000000000000000000000F /* MurmurTranscript.swift in Sources */,
+				A10000000000000000000010 /* MurmurTranscriptView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -21,11 +21,17 @@ final class MurmurSessionModel: ObservableObject {
     @Published private(set) var settingsMessage: String?
     @Published private(set) var notificationPromptRequested = false
     @Published private(set) var requiresDeviceReconnect = false
+    /// The scrollback the person reads.  Held here rather than derived from
+    /// `bubbles`, which only ever describes the moment in flight.
+    @Published private(set) var messages: [MurmurMessage] = []
 
+    let transcriptStore: MurmurTranscriptStore
     private let api: any MurmurAPIClient
     private let photoLoader: PhotoLoader
     private let requestTimeoutSeconds: TimeInterval
     private let uploadTimeoutSeconds: TimeInterval
+    /// Index of the outgoing message whose ticks the running moment drives.
+    private var pendingMessageID: String?
     private var operationTask: Task<Void, Never>?
     private var photoTask: Task<Void, Never>?
     private var lastSubmission: Submission?
@@ -40,12 +46,44 @@ final class MurmurSessionModel: ObservableObject {
         api: any MurmurAPIClient,
         photoLoader: PhotoLoader = PhotoLoader(),
         requestTimeoutSeconds: TimeInterval = 45,
-        uploadTimeoutSeconds: TimeInterval = 300
+        uploadTimeoutSeconds: TimeInterval = 300,
+        transcriptStore: MurmurTranscriptStore = MurmurTranscriptStore()
     ) {
         self.api = api
         self.photoLoader = photoLoader
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.uploadTimeoutSeconds = uploadTimeoutSeconds
+        self.transcriptStore = transcriptStore
+    }
+
+    // ---- Transcript ---------------------------------------------------------
+
+    func loadTranscript() async {
+        guard messages.isEmpty else { return }
+        messages = await transcriptStore.load()
+    }
+
+    func clearTranscript() async {
+        messages = []
+        pendingMessageID = nil
+        await transcriptStore.clear()
+    }
+
+    private func persistTranscript() {
+        let snapshot = messages
+        Task { [transcriptStore] in await transcriptStore.save(snapshot) }
+    }
+
+    private func append(_ message: MurmurMessage) {
+        messages.append(message)
+        persistTranscript()
+    }
+
+    private func updatePending(_ mutate: (inout MurmurMessage) -> Void) {
+        guard let id = pendingMessageID,
+              let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&messages[index])
+        persistTranscript()
     }
 
     var canSubmit: Bool {
@@ -388,6 +426,31 @@ final class MurmurSessionModel: ObservableObject {
         }
         lastSubmission = submission
         phase = .uploading
+
+        // The outgoing turn joins the transcript before the network is touched,
+        // so the bubble is on screen while it is still being delivered.
+        let outgoing = MurmurMessage(
+            author: .you,
+            text: submission.note ?? "",
+            sentAt: Date(),
+            delivery: .sending
+        )
+        pendingMessageID = outgoing.id
+        append(outgoing)
+        if let photo = submission.photo {
+            let id = outgoing.id
+            Task { [transcriptStore] in
+                let name = await transcriptStore.adoptImage(at: photo.originalURL, id: id)
+                await MainActor.run {
+                    guard let name,
+                          let index = self.messages.firstIndex(where: { $0.id == id })
+                    else { return }
+                    self.messages[index].imageFile = name
+                    self.persistTranscript()
+                }
+            }
+        }
+
         operationTask = Task { [weak self] in
             await self?.run(submission)
         }
@@ -412,6 +475,11 @@ final class MurmurSessionModel: ObservableObject {
             currentMomentID = receipt.momentID
             connection = .connected
             phase = .responding
+            // One tick: the server has the moment.
+            updatePending {
+                $0.delivery = .sent
+                $0.momentID = receipt.momentID
+            }
 
             var lastEventID: String?
             var retries = 0
@@ -432,9 +500,18 @@ final class MurmurSessionModel: ObservableObject {
                         switch event {
                         case .accepted:
                             phase = .responding
+                            // Two ticks: Murmur has started composing.
+                            updatePending { $0.delivery = .answered }
                         case let .bubble(_, text):
                             if !text.isEmpty {
-                                bubbles.append(.init(id: eventID ?? UUID().uuidString, text: text))
+                                let id = eventID ?? UUID().uuidString
+                                bubbles.append(.init(id: id, text: text))
+                                append(.init(
+                                    id: "\(receipt.momentID)-\(id)",
+                                    author: .murmur,
+                                    text: text,
+                                    momentID: receipt.momentID
+                                ))
                             }
                         case .quiet:
                             wasQuiet = true
@@ -458,6 +535,7 @@ final class MurmurSessionModel: ObservableObject {
                 }
             }
             await photoLoader.discard(submission.photo)
+            pendingMessageID = nil
             if !bubbles.isEmpty && !didRequestNotificationPrompt {
                 didRequestNotificationPrompt = true
                 notificationPromptRequested = true
@@ -465,6 +543,8 @@ final class MurmurSessionModel: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
+            updatePending { $0.delivery = .failed }
+            pendingMessageID = nil
             failure = MurmurFailure.from(error)
             requiresDeviceReconnect = failure?.requiresDeviceReconnect == true
             if failure?.retryable == false {
