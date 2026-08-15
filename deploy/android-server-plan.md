@@ -372,10 +372,36 @@ transport，不碰网络。计划外多做的一件事：
 - 吊销列表（`GoogleAttestationStatus`）带 1 小时缓存，只在 enrollment 查；
   取不到时默认拒绝注册，`MURMUR_APP_ATTEST_REVOCATION_FAIL_OPEN=1` 才放行。
 
-**P4 · API 与配置接线**
-enroll 的 `platform` 字段、`/v1/device` 的 token 校验分支、settings 与 validate。
+**P4 · API 与配置接线** — 已完成（commit `f3b0e8a`）
 
-P2 与 P3 之间没有依赖，可以并行。P4 依赖两者。
+- `/v1/enrollments` 收 `platform`，**缺省 `ios`** —— 已发布的 iOS 客户端不带这个
+  字段，必须不重新编译就继续能注册。取值不在 `{ios, android}` 里直接 400。
+- `/v1/device` 的 token 校验按平台分流：iOS 仍是 hex 32–256；Android 是
+  `[A-Za-z0-9_:.-]` 64–512。字段名接受 `push_token`，同时保留 `apns_token`
+  作为别名 —— 同样是为了不动已发布的客户端。
+- **判定用哪套规则的平台，取自注册时存的 key，不取自请求体。** 请求里塞
+  `"platform": "android"` 不会放宽 iOS 设备的 token 规则，有测试盯着这条。
+- `app_devices` 的两个查询把 `platform` 一起返回，客户端能确认自己被认成了什么。
+- `AppSettings.validate()` 在 production + `android_enabled` 时同时要求
+  `validate_android()` 和 `validate_fcm()` 通过：只配一半会变成"能注册但永远收不到
+  推送"或者"能收推送但验不了注册"。
+
+新增 7 条 wire 契约测试（`PlatformWireTests`），其中两条是防回归的：不带
+`platform` 的注册仍然记成 iOS，`apns_token` 这个老字段名仍然能用。
+
+---
+
+四步全部完成。服务端现在可以接受 Android 客户端注册、逐请求验签、并通过 FCM 投递。
+剩下的是 Android 客户端本身（不在本文档范围）。客户端需要对上的契约：
+
+| 项 | 值 |
+|---|---|
+| 注册 attestation | `SEQUENCE OF OCTET STRING`，leaf 在前，每项是 `Certificate.getEncoded()` |
+| `key_id` | `base64url(sha256(SPKI))`，去掉 padding |
+| 每请求 assertion | 裸 ECDSA/SHA-256 签名，签的是 `client_data_hash` |
+| `client_data_hash` | `sha256(challenge ‖ METHOD ‖ path ‖ sha256(body))` |
+| 请求头 | `X-Murmur-Key-Id` / `X-Murmur-Challenge-Id` / `X-Murmur-Assertion`（与 iOS 同名） |
+| Keystore 密钥要求 | P-256、purpose 含 SIGN、digest 含 SHA-256、非导入 |
 
 ---
 

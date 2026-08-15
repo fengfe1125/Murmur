@@ -53,6 +53,23 @@ from .memory import Memory, thread_key
 
 log = logging.getLogger("murmur.app_api")
 
+PLATFORMS = ("ios", "android")
+
+# APNs hands out a hex device token; FCM hands out a much longer opaque string
+# built from the URL-safe base64 alphabet with a ':' separating its two halves.
+PUSH_TOKEN_RULES = {
+    "ios": (re.compile(r"[0-9A-Fa-f]+"), 32, 256),
+    "android": (re.compile(r"[A-Za-z0-9_:.\-]+"), 64, 512),
+}
+
+
+def _valid_push_token(token, platform: str) -> bool:
+    rule = PUSH_TOKEN_RULES.get(platform)
+    if rule is None or not isinstance(token, str):
+        return False
+    pattern, low, high = rule
+    return low <= len(token) <= high and pattern.fullmatch(token) is not None
+
 
 class APIError(RuntimeError):
     def __init__(self, status: int, code: str, message: str, *, retryable: bool = False):
@@ -515,12 +532,17 @@ def create_app(
         environment = data.get("environment")
         if environment not in {"development", "production"}:
             raise APIError(400, "validation_error", "environment 无效。")
+        # Absent means iOS: the shipped client predates a second platform and
+        # must keep enrolling without being rebuilt.
+        platform = data.get("platform", "ios")
+        if platform not in PLATFORMS:
+            raise APIError(400, "validation_error", "platform 无效。")
         result = authenticator.enroll(
             challenge_id=challenge_id,
             key_id=key_id,
             attestation_b64=data.get("attestation"),
             development_token=request.headers.get("x-murmur-development-token"),
-            platform="ios",
+            platform=platform,
         )
         if environment != result.environment:
             raise APIError(401, "invalid_attestation", "验证环境不匹配。")
@@ -708,15 +730,17 @@ def create_app(
         environment = data.get("environment")
         if environment not in {"development", "production"}:
             raise APIError(400, "validation_error", "environment 无效。")
-        if environment != store.auth_key(auth.key_id).environment:
+        key = store.auth_key(auth.key_id)
+        if environment != key.environment:
             raise APIError(400, "validation_error", "设备环境与注册环境不匹配。")
-        token = data.get("apns_token")
-        if token is not None and (
-            not isinstance(token, str)
-            or not 32 <= len(token) <= 256
-            or re.fullmatch(r"[0-9A-Fa-f]+", token) is None
-        ):
-            raise APIError(400, "validation_error", "APNs token 无效。")
+        # `apns_token` is the name the shipped iOS client sends; `push_token` is
+        # the platform-neutral spelling.  The value is graded against the
+        # platform recorded at enrolment, never against one the caller supplies.
+        token = data.get("push_token")
+        if token is None:
+            token = data.get("apns_token")
+        if token is not None and not _valid_push_token(token, key.platform):
+            raise APIError(400, "validation_error", "push token 无效。")
         timezone = str(data.get("timezone") or "Asia/Shanghai")
         if len(timezone) > 80:
             raise APIError(400, "validation_error", "timezone 无效。")

@@ -1086,7 +1086,7 @@ class AppStore:
     ) -> dict:
         with self._tx() as db:
             if push_token:
-                # APNs tokens may rotate or move during a restore.  Transfer the
+                # Push tokens may rotate or move during a restore.  Transfer the
                 # token atomically instead of surfacing the UNIQUE constraint.
                 db.execute(
                     "UPDATE app_devices SET push_token=NULL WHERE push_token=? AND key_id<>?",
@@ -1120,7 +1120,8 @@ class AppStore:
                     (device["id"], now, now, now, device["user_id"]),
                 )
         row = self.conn.execute(
-            "SELECT id,user_id,environment,timezone,device_name,push_token IS NOT NULL AS push_enabled "
+            "SELECT id,user_id,environment,platform,timezone,device_name,"
+            "push_token IS NOT NULL AS push_enabled "
             "FROM app_devices WHERE key_id=?", (key_id,),
         ).fetchone()
         result = dict(row)
@@ -1129,7 +1130,7 @@ class AppStore:
 
     def devices(self, user_id: str) -> list[dict]:
         devices = [dict(row) for row in self.conn.execute(
-            "SELECT id,key_id,environment,timezone,device_name,"
+            "SELECT id,key_id,environment,platform,timezone,device_name,"
             "push_token IS NOT NULL AS push_enabled,last_seen_at,created_at "
             "FROM app_devices WHERE user_id=? AND active=1 ORDER BY created_at",
             (user_id,),

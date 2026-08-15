@@ -526,5 +526,119 @@ class AppAPITests(unittest.TestCase):
         validate_bind_host(self.settings, "0.0.0.0")
 
 
+class PlatformWireTests(unittest.TestCase):
+    """The wire contract for a second client platform, in development mode."""
+
+    FCM_TOKEN = "cZx1kQ_gTb2:APA91bH" + "z" * 140
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.settings = settings(self.root)
+        self.cfg = make_config(self.settings.memory_db_path)
+        self.store = AppStore(self.settings.db_path)
+        self.app = create_app(self.settings, cfg=self.cfg, store=self.store)
+        self.client = TestClient(self.app)
+        self.dev_headers = {
+            "X-Murmur-Development-Token": self.settings.development_token
+        }
+
+    def tearDown(self):
+        self.client.close()
+        self.store.close()
+        self.tmp.cleanup()
+
+    def enroll(self, key_id, **extra):
+        invite = self.store.create_invite()
+        challenge = self.client.post(
+            "/v1/auth/challenges", json={"purpose": "enrollment"}
+        ).json()
+        return self.client.post(
+            "/v1/enrollments", headers=self.dev_headers,
+            json={"challenge_id": challenge["challenge_id"], "invite_code": invite,
+                  "key_id": key_id, "environment": "development", **extra},
+        )
+
+    def headers_for(self, key_id):
+        response = self.client.post(
+            "/v1/auth/challenges", headers=self.dev_headers,
+            json={"purpose": "request", "key_id": key_id},
+        )
+        return {**self.dev_headers, "X-Murmur-Key-ID": key_id,
+                "X-Murmur-Challenge-ID": response.json()["challenge_id"]}
+
+    def test_enrolment_without_a_platform_is_still_ios(self):
+        """The shipped iOS client sends no platform field and must keep working."""
+        response = self.enroll("dev-legacy-phone")
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(
+            self.store.auth_key(response.json()["key_id"]).platform, "ios"
+        )
+
+    def test_android_enrolment_is_recorded_as_android(self):
+        response = self.enroll("dev-droid", platform="android")
+        self.assertEqual(response.status_code, 201, response.text)
+        key_id = response.json()["key_id"]
+        self.assertEqual(self.store.auth_key(key_id).platform, "android")
+        device = self.client.get(
+            "/v1/devices", headers=self.headers_for(key_id)
+        ).json()["devices"][0]
+        self.assertEqual(device["platform"], "android")
+
+    def test_an_unknown_platform_is_refused(self):
+        response = self.enroll("dev-weird", platform="symbian")
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["error"]["code"], "validation_error")
+
+    def test_fcm_token_is_accepted_for_android_and_refused_for_ios(self):
+        droid = self.enroll("dev-droid-token", platform="android").json()["key_id"]
+        accepted = self.client.put(
+            "/v1/device", headers=self.headers_for(droid),
+            json={"push_token": self.FCM_TOKEN, "environment": "development",
+                  "timezone": "Asia/Shanghai", "device_name": "Pixel"},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertTrue(accepted.json()["push_enabled"])
+        self.assertEqual(accepted.json()["platform"], "android")
+
+        phone = self.enroll("dev-ios-token").json()["key_id"]
+        refused = self.client.put(
+            "/v1/device", headers=self.headers_for(phone),
+            json={"push_token": self.FCM_TOKEN, "environment": "development",
+                  "timezone": "Asia/Shanghai", "device_name": "iPhone"},
+        )
+        self.assertEqual(refused.status_code, 400, refused.text)
+
+    def test_ios_client_may_still_spell_the_field_apns_token(self):
+        phone = self.enroll("dev-legacy-field").json()["key_id"]
+        response = self.client.put(
+            "/v1/device", headers=self.headers_for(phone),
+            json={"apns_token": "a" * 64, "environment": "development",
+                  "timezone": "Asia/Shanghai", "device_name": "iPhone"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["push_enabled"])
+
+    def test_a_short_or_malformed_android_token_is_refused(self):
+        droid = self.enroll("dev-droid-bad", platform="android").json()["key_id"]
+        for bad in ("short", "!" * 200, "a" * 600):
+            response = self.client.put(
+                "/v1/device", headers=self.headers_for(droid),
+                json={"push_token": bad, "environment": "development",
+                      "timezone": "Asia/Shanghai", "device_name": "Pixel"},
+            )
+            self.assertEqual(response.status_code, 400, bad)
+
+    def test_the_platform_comes_from_the_key_not_the_request(self):
+        """A caller cannot widen its own token rules by claiming a platform."""
+        phone = self.enroll("dev-claimer").json()["key_id"]
+        response = self.client.put(
+            "/v1/device", headers=self.headers_for(phone),
+            json={"push_token": self.FCM_TOKEN, "platform": "android",
+                  "environment": "development", "timezone": "Asia/Shanghai"},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

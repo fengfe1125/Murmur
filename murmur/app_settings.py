@@ -185,6 +185,11 @@ class AppSettings:
                 raise RuntimeError("production App API requires an HTTPS public base URL")
             if self.apns_environment != "production":
                 raise RuntimeError("production App API cannot use the APNs sandbox")
+            if self.android_enabled:
+                # Half-configured Android would accept enrolments it cannot
+                # verify, or verify devices it can never notify.
+                self.validate_android()
+                self.validate_fcm()
         else:
             if not self.allow_development:
                 raise RuntimeError("development mode must be explicitly enabled")
