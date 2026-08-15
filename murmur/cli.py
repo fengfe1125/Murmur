@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import replace
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from .config import Config
 from .engine import build_context, respond
@@ -94,6 +97,8 @@ def cmd_poke(args) -> int:
     from .memory import thread_key
 
     cfg = Config.load()
+    if not args.dry_run:
+        cfg.require_test_bot("平台主动消息")
     if args.model:
         cfg = replace(cfg, model=args.model)
 
@@ -149,6 +154,7 @@ def cmd_poke(args) -> int:
 
 
 def cmd_bot(args) -> int:
+    Config.load().require_test_bot("Telegram Bot")
     from .bot import run
 
     run()
@@ -156,6 +162,7 @@ def cmd_bot(args) -> int:
 
 
 def cmd_dingtalk(args) -> int:
+    Config.load().require_test_bot("钉钉 Bot")
     from .dingtalk import run
 
     run()
@@ -163,6 +170,7 @@ def cmd_dingtalk(args) -> int:
 
 
 def cmd_wechat(args) -> int:
+    Config.load().require_test_bot("微信 Bot")
     from .wechat import run
 
     run()
@@ -170,6 +178,7 @@ def cmd_wechat(args) -> int:
 
 
 def cmd_qq(args) -> int:
+    Config.load().require_test_bot("QQ Bot")
     from .qq import run
 
     run()
@@ -184,7 +193,120 @@ def cmd_web(args) -> int:
     return 0
 
 
+def cmd_app_api(args) -> int:
+    """Run the loopback-only HTTPS upstream for the first-party App."""
+    from .app_api import run
+
+    run(host=args.host, port=args.port)
+    return 0
+
+
+def cmd_app_worker(_args) -> int:
+    """Run the durable moment and proactive-message worker."""
+    from .app_worker import run
+
+    run()
+    return 0
+
+
+def _app_store():
+    """Open the administrative App store without weakening startup checks.
+
+    Invite creation only needs the database path.  The public API and worker
+    still call ``AppSettings.validate()`` and therefore fail closed when a
+    production App Attest or HTTPS setting is missing.
+    """
+    from .app_settings import AppSettings
+    from .app_store import AppStore
+
+    cfg = Config.load()
+    settings = AppSettings.from_env(cfg)
+    return AppStore(settings.db_path)
+
+
+def cmd_app_invite(args) -> int:
+    """Print an invitation for a new App user: seven-day single-use by default."""
+    from datetime import timedelta
+
+    with _app_store() as store:
+        code = store.create_invite(
+            kind="user",
+            alias=args.alias,
+            ttl=timedelta(days=args.days),
+            max_uses=None if args.reusable else args.max_uses,
+            permanent=args.permanent,
+        )
+    print(code)
+    if args.permanent or args.reusable:
+        print(
+            "注意：这个邀请码长期有效，每次兑换都会新建一个用户。"
+            "泄露等于把注册入口交出去，用 `app-invite-revoke <id>` 可以随时停用。",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def cmd_app_device_code(args) -> int:
+    """Print one 30-minute, single-use code for an existing user's device."""
+    from datetime import timedelta
+
+    with _app_store() as store:
+        code = store.create_invite(
+            kind="device", user_id=args.user_id, ttl=timedelta(minutes=30)
+        )
+    print(code)
+    return 0
+
+
+def cmd_app_users(_args) -> int:
+    """List active App identities without exposing message or device secrets."""
+    with _app_store() as store:
+        users = store.active_users()
+    if not users:
+        print("（还没有 App 用户）")
+        return 0
+    for user in users:
+        print(user["id"])
+    return 0
+
+
+def cmd_app_invites(_args) -> int:
+    """List unused invite/device codes without revealing the plaintext code."""
+    with _app_store() as store:
+        invites = store.list_invites()
+    if not invites:
+        print("（没有未使用的邀请码）")
+        return 0
+    for invite in invites:
+        cap = "∞" if invite["max_uses"] is None else invite["max_uses"]
+        expiry = "永不过期" if invite["expires_at"].startswith("9999-") else invite["expires_at"]
+        print(
+            f"{invite['id']}  {invite['kind']}  {invite['alias'] or '-'}  "
+            f"{expiry}  用量 {invite['use_count']}/{cap}"
+        )
+    return 0
+
+
+def cmd_app_invite_revoke(args) -> int:
+    """Revoke an unused invite or device code by id."""
+    with _app_store() as store:
+        if not store.revoke_invite(args.invite_id):
+            raise ValueError("没有找到可撤销的邀请码")
+    print("已撤销")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    # 配置文件按命令选，不能让隔离测试 Bot 从生产 .env 补齐缺失凭据。
+    # systemd 已通过 EnvironmentFile 注入；override=False 保留显式环境值。
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    command = raw_argv[0] if raw_argv else ""
+    env_file = Path(".env.test-bots" if command in {
+        "bot", "dingtalk", "wechat", "qq", "poke"
+    } else ".env")
+    if env_file.is_file():
+        load_dotenv(env_file, override=False)
+
     p = argparse.ArgumentParser(prog="murmur", description="发一张图，它回你一句。")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -206,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("--chat", type=int, default=0, help="Telegram chat id，CLI 是 0")
     lg.set_defaults(func=cmd_log)
 
-    b = sub.add_parser("bot", help="启动 Telegram bot")
+    b = sub.add_parser("bot", help="启动 Telegram 测试 bot（需显式开启测试通道）")
     b.set_defaults(func=cmd_bot)
 
     pk = sub.add_parser("poke", help="手动触发一条主动消息（测试用）")
@@ -219,13 +341,13 @@ def main(argv: list[str] | None = None) -> int:
     pk.add_argument("--dry-run", action="store_true", help="只打印不发送")
     pk.set_defaults(func=cmd_poke)
 
-    dt = sub.add_parser("dingtalk", help="启动钉钉机器人（Stream 模式，不需要公网 IP）")
+    dt = sub.add_parser("dingtalk", help="启动钉钉测试 bot（需显式开启测试通道）")
     dt.set_defaults(func=cmd_dingtalk)
 
-    wx = sub.add_parser("wechat", help="启动微信机器人（腾讯官方 ClawBot 通道）")
+    wx = sub.add_parser("wechat", help="启动微信测试 bot（需显式开启测试通道）")
     wx.set_defaults(func=cmd_wechat)
 
-    qq = sub.add_parser("qq", help="启动 QQ 机器人（腾讯官方 Bot API）")
+    qq = sub.add_parser("qq", help="启动 QQ 测试 bot（需显式开启测试通道）")
     qq.set_defaults(func=cmd_qq)
 
     wb = sub.add_parser("web", help="打开看板：状态、额度、每个人的聊天窗口和记忆")
@@ -234,6 +356,43 @@ def main(argv: list[str] | None = None) -> int:
     wb.add_argument("--port", type=int, default=8765)
     wb.add_argument("--no-open", action="store_true", help="不要自动打开浏览器")
     wb.set_defaults(func=cmd_web)
+
+    api = sub.add_parser("app-api", help="启动正式 App API（默认仅监听本机）")
+    api.add_argument("--host", default="127.0.0.1")
+    api.add_argument("--port", type=int, default=8766)
+    api.set_defaults(func=cmd_app_api)
+
+    worker = sub.add_parser("app-worker", help="启动正式 App 的持久化后台 Worker")
+    worker.set_defaults(func=cmd_app_worker)
+
+    invite = sub.add_parser("app-invite", help="创建 App 用户邀请码（默认 7 天、一次性）")
+    invite.add_argument("--alias", help="可选的管理侧备注，不会发给 App")
+    invite.add_argument("--days", type=int, default=7, help="有效天数，默认 7")
+    invite.add_argument("--max-uses", type=int, default=1, help="可兑换次数，默认 1")
+    invite.add_argument(
+        "--reusable", action="store_true", help="不限兑换次数（仍受 --days 限制）"
+    )
+    invite.add_argument(
+        "--permanent", action="store_true",
+        help="永不过期；配合 --reusable 即为一直可用的邀请码",
+    )
+    invite.set_defaults(func=cmd_app_invite)
+
+    device_code = sub.add_parser(
+        "app-device-code", help="为既有 App 用户创建 30 分钟有效的新设备码"
+    )
+    device_code.add_argument("user_id", help="既有 App user_id")
+    device_code.set_defaults(func=cmd_app_device_code)
+
+    users = sub.add_parser("app-users", help="列出可签发新设备码的 App user_id")
+    users.set_defaults(func=cmd_app_users)
+
+    invites = sub.add_parser("app-invites", help="列出未使用的邀请码和设备码（不含明文）")
+    invites.set_defaults(func=cmd_app_invites)
+
+    revoke = sub.add_parser("app-invite-revoke", help="撤销未使用的邀请码或设备码")
+    revoke.add_argument("invite_id", help="app-invites 列出的 id")
+    revoke.set_defaults(func=cmd_app_invite_revoke)
 
     args = p.parse_args(argv)
     try:

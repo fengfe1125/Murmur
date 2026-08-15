@@ -86,7 +86,11 @@ class Dossier:
         return d
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            self.path.parent.chmod(0o700)
+        except OSError:
+            pass
         meta = json.dumps(
             {"updated_at": self.updated_at, "covered_upto": self.covered_upto},
             ensure_ascii=False,
@@ -102,6 +106,10 @@ class Dossier:
             body = (self.blocks.get(name) or "").strip() or "（还不知道）"
             parts += [f"## {name}", "", body, ""]
         self.path.write_text("\n".join(parts), encoding="utf-8")
+        try:
+            self.path.chmod(0o600)
+        except OSError:
+            pass
 
     # ---------- 给提示词用 ----------
 
@@ -227,7 +235,7 @@ def refresh(
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        log.error("整理记忆失败，模型没返回 JSON：%s", raw[:200])
+        log.error("整理记忆失败，模型没返回 JSON（响应长度=%d）", len(raw))
         return None
 
     for name, (_, limit) in BLOCKS.items():

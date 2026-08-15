@@ -115,11 +115,12 @@ _LAST_ENTRY: dict[int, int] = {}
 
 
 def _allowed(cfg: Config, chat_id: int) -> bool:
-    # 没配白名单就只在日志里提醒，不拦——方便你第一次拿 chat id。
-    # 开了自动入册就一律放行，新人由 ensure_greeted 记进名册。
+    # 安全默认：关掉自动入册时必须显式命中白名单；空白名单不是“所有人”。
+    # /start 仍可告诉测试者自己的 chat id，但不会调用模型或写入记忆。
+    # 开了自动入册才一律放行，新人由 ensure_greeted 记进名册。
     # 注意 Telegram 的 bot 链接是公开的，这条和钉钉/微信不一样：
     # 那两边的人来自你的组织和通讯录，这边可能是任何搜到 bot 的人。
-    return cfg.auto_enroll or not cfg.allowed_chat_ids or chat_id in cfg.allowed_chat_ids
+    return cfg.auto_enroll or chat_id in cfg.allowed_chat_ids
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -128,11 +129,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "拍到什么随手发我。\n"
         "我不一定每张都接话——没什么好说的时候我就不说了。\n\n"
         f"你的 chat id 是 {chat_id}，"
-        "把它填进 .env 的 MURMUR_ALLOWED_CHAT_IDS 就只有你能用这个 bot。"
+        "把它填进 .env.test-bots 的 MURMUR_ALLOWED_CHAT_IDS 并重启后才能使用。"
     )
 
 
 async def cmd_log(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    cfg: Config = ctx.application.bot_data["cfg"]
+    if not _allowed(cfg, update.effective_chat.id):
+        return
     mem: Memory = ctx.application.bot_data["mem"]
     entries = mem.recent(_thread(update)[0], limit=10)
     if not entries:
@@ -406,12 +410,13 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def run() -> None:
+    cfg = Config.load()
+    cfg.require_test_bot("Telegram")
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s"
     )
-    cfg = Config.load()
     if not cfg.telegram_token:
-        raise RuntimeError("没有 TELEGRAM_BOT_TOKEN。找 @BotFather 要一个填进 .env。")
+        raise RuntimeError("没有 TELEGRAM_BOT_TOKEN。找 @BotFather 要一个填进 .env.test-bots。")
     if not cfg.api_key:
         raise RuntimeError("没有 OPENCODE_API_KEY。")
 
@@ -440,12 +445,12 @@ def run() -> None:
         # 名册里的人是每天 05:05 重排时才会被排上的，
         # 今天刚认识的人不该等到明天——每小时补排一次。
         jq.run_repeating(_schedule_day, interval=3600, first=3600, data="newcomers")
-        log.info("主动消息已启用，.env 指定的收件人 %s（名册里的人另算）",
+        log.info("主动消息已启用，.env.test-bots 指定的收件人 %s（名册里的人另算）",
                  sorted(cfg.allowed_chat_ids) or "（无）")
     else:
         log.warning("没配白名单且关了自动入册，主动消息不启用（不知道该找谁）")
 
     log.info("模型 %s @ %s", cfg.model, cfg.base_url)
-    if not cfg.allowed_chat_ids:
-        log.warning("没配白名单，任何人找到这个 bot 都能用你的额度。发 /start 拿 chat id。")
+    if not cfg.allowed_chat_ids and not cfg.auto_enroll:
+        log.warning("没配白名单且自动入册已关闭：除 /start 外不会处理任何用户消息。")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

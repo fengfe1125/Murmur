@@ -136,7 +136,10 @@ def qq_msg(text, mid="m1"):
 
 
 with tempfile.TemporaryDirectory() as d:
-    cfg = make_config(Path(d) / "m.db", qq_app_id="1", qq_client_secret="s")
+    cfg = make_config(
+        Path(d) / "m.db", qq_app_id="1", qq_client_secret="s",
+        qq_allowed_users={"u1"},
+    )
     mem = Memory(cfg.db_path)
     http = FakeHttp()
     h = qq.Handler(cfg, mem, http)
@@ -173,7 +176,10 @@ def slow_reply(bubbles, **kw):
 qq.respond = lambda *a, **k: slow_reply(["回"])
 
 with tempfile.TemporaryDirectory() as d:
-    cfg = make_config(Path(d) / "m.db", qq_app_id="1", qq_client_secret="s")
+    cfg = make_config(
+        Path(d) / "m.db", qq_app_id="1", qq_client_secret="s",
+        qq_allowed_users={"u1"},
+    )
     mem = Memory(cfg.db_path)
     http = FakeHttp()
     h = qq.Handler(cfg, mem, http)

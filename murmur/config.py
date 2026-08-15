@@ -7,10 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 # OpenCode 的两个目录：Go 订阅走 /zen/go/v1，完整 Zen 目录走 /zen/v1
 # （后者是按量计费，Go 的 key 调它会返回 CreditsError）。
 DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
@@ -18,6 +14,35 @@ DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 # 实测下来最合适的：中文自然、不把思考过程写进正文、便宜。
 # 备选见 README 的"换模型"。
 DEFAULT_MODEL = "qwen3.7-plus"
+
+CHANNEL_MODES = frozenset({"transition", "app_only"})
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _parse_bool(name: str, *, default: bool) -> bool:
+    """读取安全相关布尔值；拼错时拒绝启动，而不是猜一个方向。"""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{name} 只能是 1/0、true/false、yes/no 或 on/off，收到：{raw!r}"
+    )
+
+
+def _parse_channel_mode() -> str:
+    value = os.getenv("MURMUR_CHANNEL_MODE", "transition").strip().lower()
+    if value not in CHANNEL_MODES:
+        choices = " | ".join(sorted(CHANNEL_MODES))
+        raise ValueError(
+            f"MURMUR_CHANNEL_MODE 只能是 {choices}，收到：{value!r}"
+        )
+    return value
 
 
 def _parse_identities(raw: str) -> list[list[str]]:
@@ -64,8 +89,12 @@ class Config:
     qq_allowed_users: set[str]
     qq_initiative: bool
     qq_sandbox: bool
+    # 正式渠道切换：transition 允许显式启动测试 bot；app_only 永久拒绝它们。
+    channel_mode: str
+    # Telegram / 钉钉 / 微信 / QQ 都是测试通道，必须明确打开才可启动。
+    enable_test_bots: bool
     # 新人自动入册：第一次说话就建上下文、建记忆文件、打招呼、排上主动消息，
-    # 不用改 .env 也不用重启。关掉就退回"只有白名单里的人能用"。
+    # 默认关闭；只有明确打开才允许陌生平台账号进入。
     auto_enroll: bool
     # 看板访问令牌。看板默认只绑 127.0.0.1，但 --host 0.0.0.0 时
     # 零认证 = 聊天原文和记忆文件裸奔。配了这个就要求
@@ -87,6 +116,22 @@ class Config:
             if user_id in group:
                 return group[0]
         return user_id
+
+    @property
+    def test_bots_allowed(self) -> bool:
+        return self.channel_mode == "transition" and self.enable_test_bots
+
+    def require_test_bot(self, label: str) -> None:
+        """旧平台只作为隔离测试通道存在；所有入口统一从这里失败关闭。"""
+        if self.channel_mode == "app_only":
+            raise RuntimeError(
+                f"{label} 已停用：MURMUR_CHANNEL_MODE=app_only，正式渠道只允许 App"
+            )
+        if not self.enable_test_bots:
+            raise RuntimeError(
+                f"{label} 是测试通道；请在隔离的测试环境中显式设置 "
+                "MURMUR_ENABLE_TEST_BOTS=1"
+            )
 
     @classmethod
     def load(cls) -> Config:
@@ -142,8 +187,11 @@ class Config:
             not in ("0", "false", "no", "off"),
             qq_sandbox=os.getenv("QQ_SANDBOX", "").strip().lower()
             in ("1", "true", "yes", "on"),
-            auto_enroll=os.getenv("MURMUR_AUTO_ENROLL", "1").strip().lower()
-            not in ("0", "false", "no", "off"),
+            channel_mode=_parse_channel_mode(),
+            enable_test_bots=_parse_bool(
+                "MURMUR_ENABLE_TEST_BOTS", default=False
+            ),
+            auto_enroll=_parse_bool("MURMUR_AUTO_ENROLL", default=False),
             web_token=os.getenv("MURMUR_WEB_TOKEN") or None,
             db_path=db_path,
             log_dir=log_dir,

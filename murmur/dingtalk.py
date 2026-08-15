@@ -168,7 +168,7 @@ def _initiative_loop(cfg: Config, mem: Memory) -> None:
     from .engine import initiate
     from .initiative import pick_intent, plan_day, should_hold, split_due
 
-    log.info("钉钉主动消息已启用，.env 里指定的收件人 %s", cfg.dingtalk_initiative or "（无）")
+    log.info("钉钉主动消息已启用，.env.test-bots 里指定的收件人 %s", cfg.dingtalk_initiative or "（无）")
     planned_for: dict[str, str] = {}   # user -> 已排过的日期
     queue: list[tuple[datetime, str]] = []
     seen: set[str] = set()
@@ -321,7 +321,7 @@ class MurmurHandler(ChatbotHandler):
             or incoming.sender_id in self.cfg.allowed_dingtalk_users
         )
         if not known:
-            if not self.cfg.auto_enroll and self.cfg.allowed_dingtalk_users:
+            if not self.cfg.auto_enroll:
                 # 日志要能直接照着加白名单。钉钉在群聊/外部联系人场景下
                 # 不给 staffId，只给一个加密的 senderId——只打 staff_id=None
                 # 等于什么都没说，不知道该把谁加进来。
@@ -453,15 +453,16 @@ class MurmurHandler(ChatbotHandler):
 
 
 def run() -> None:
+    cfg = Config.load()
+    cfg.require_test_bot("钉钉")
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s"
     )
     log.info("钉钉直连（绕过代理）：%s", _bypass_proxy_for_dingtalk())
-    cfg = Config.load()
     if not (cfg.dingtalk_client_id and cfg.dingtalk_client_secret):
         raise RuntimeError(
             "没有 DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET。"
-            "去 open-dev.dingtalk.com 建个企业内部应用，把 AppKey/AppSecret 填进 .env。"
+            "去 open-dev.dingtalk.com 建个企业内部应用，把 AppKey/AppSecret 填进 .env.test-bots。"
         )
     if not cfg.api_key:
         raise RuntimeError("没有 OPENCODE_API_KEY。")
@@ -474,8 +475,8 @@ def run() -> None:
         ChatbotMessage.TOPIC, MurmurHandler(cfg, mem)
     )
     log.info("模型 %s @ %s", cfg.model, cfg.base_url)
-    if not cfg.allowed_dingtalk_users:
-        log.warning("没配白名单，企业里任何人都能用你的额度。")
+    if not cfg.allowed_dingtalk_users and not cfg.auto_enroll:
+        log.warning("没配白名单且自动入册已关闭：不会处理任何用户消息。")
     # 主动消息跑在独立线程里，和 Stream 长连接互不干扰
     threading.Thread(
         target=_initiative_loop, args=(cfg, Memory(cfg.db_path)),

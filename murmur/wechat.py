@@ -621,7 +621,7 @@ class Handler:
         key, label = wechat_thread(uid)
 
         if uid not in self.cfg.wechat_allowed_users:
-            if not self.cfg.auto_enroll and self.cfg.wechat_allowed_users:
+            if not self.cfg.auto_enroll:
                 log.info(
                     "已忽略非白名单用户｜openId=%s｜要放行就把它加进 WECHAT_ALLOWED_USERS",
                     uid,
@@ -828,11 +828,12 @@ def _initiative_loop(cfg: Config, mem: Memory, client: WeChatClient) -> None:
 # ---------------------------------------------------------------------------
 
 def run() -> None:
+    cfg = Config.load()
+    cfg.require_test_bot("微信")
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s"
     )
     log.info("微信直连（绕过代理）：%s", _bypass_proxy_for_wechat())
-    cfg = Config.load()
     if not cfg.api_key:
         raise RuntimeError("没有 OPENCODE_API_KEY。")
 
@@ -846,8 +847,8 @@ def run() -> None:
     handler = Handler(cfg, mem, client)
 
     log.info("微信账号 %s，模型 %s @ %s", account_id, cfg.model, cfg.base_url)
-    if not cfg.wechat_allowed_users:
-        log.warning("没配 WECHAT_ALLOWED_USERS，任何加了你的人都能用你的额度。")
+    if not cfg.wechat_allowed_users and not cfg.auto_enroll:
+        log.warning("没配 WECHAT_ALLOWED_USERS 且自动入册已关闭：不会处理任何用户消息。")
 
     if cfg.wechat_initiative:
         threading.Thread(

@@ -93,6 +93,9 @@ def msg(uid="u1@im.wechat", text=None, image=False, ctx="CTX-1", **kw):
 
 def setup(tmp: Path, **cfgkw):
     """装一套 Handler，模型和图片解码都换成假的。"""
+    # 功能测试也必须显式授权测试用户；空白名单的安全语义
+    # 由 test_channel_gate.py 单独锁住。
+    cfgkw.setdefault("wechat_allowed_users", {"u1@im.wechat"})
     cfg = make_cfg(tmp, **cfgkw)
     client = FakeClient(tmp / "wx")
     mem = Memory(cfg.db_path)
@@ -223,7 +226,9 @@ with tempfile.TemporaryDirectory() as d:
 print("\n── 两个人互不串线 " + "─" * 39)
 with tempfile.TemporaryDirectory() as d:
     tmp = Path(d)
-    cfg, client, mem, h = setup(tmp)
+    cfg, client, mem, h = setup(
+        tmp, wechat_allowed_users={"a@im.wechat", "b@im.wechat"}
+    )
     for u in ("a@im.wechat", "b@im.wechat"):
         mem.mark_greeted(*wechat.wechat_thread(u))
     h.handle(msg(uid="a@im.wechat", text="我的事", ctx="CTX-A"))

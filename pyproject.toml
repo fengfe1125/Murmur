@@ -13,6 +13,11 @@ dependencies = [
     "requests>=2.31",            # 钉钉 / 微信 / QQ 的 HTTP 调用
     "cryptography>=42.0",        # 微信 CDN 的图是 AES-128-ECB 加密的
     "qq-botpy>=1.2",             # QQ 官方机器人 WebSocket 网关
+    "fastapi>=0.115",            # iOS 官方渠道 API / SSE
+    "uvicorn>=0.30",             # App API 的 ASGI 进程
+    "python-multipart>=0.0.9",   # 安全解析文字 + 图片上传
+    "cbor2>=5.6",                # Apple App Attest attestation object
+    "httpx[http2]>=0.27",        # APNs provider 必须使用 HTTP/2
 ]
 
 [project.scripts]

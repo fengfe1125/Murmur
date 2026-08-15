@@ -333,7 +333,7 @@ class Handler:
     def _handle(self, uid: str, key: int, label: str, message,
                 *, group: bool, target: str) -> None:
         if uid not in self.cfg.qq_allowed_users:
-            if not self.cfg.auto_enroll and self.cfg.qq_allowed_users:
+            if not self.cfg.auto_enroll:
                 log.info(
                     "已忽略非白名单用户｜openid=%s｜要放行就把它加进 QQ_ALLOWED_USERS",
                     uid,
@@ -539,6 +539,8 @@ def _initiative_loop(cfg: Config, mem: Memory, http: QqHttp) -> None:
 
 
 def run() -> None:
+    cfg = Config.load()
+    cfg.require_test_bot("QQ")
     import botpy
     from botpy.message import C2CMessage, GroupMessage
 
@@ -546,11 +548,10 @@ def run() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s"
     )
     log.info("QQ 直连（绕过代理）：%s", _bypass_proxy_for_qq())
-    cfg = Config.load()
     if not (cfg.qq_app_id and cfg.qq_client_secret):
         raise RuntimeError(
             "没有 QQ_APP_ID / QQ_CLIENT_SECRET。"
-            "去 q.qq.com 创建一个机器人，把 AppID 和 AppSecret 填进 .env。"
+            "去 q.qq.com 创建一个机器人，把 AppID 和 AppSecret 填进 .env.test-bots。"
         )
     if not cfg.api_key:
         raise RuntimeError("没有 OPENCODE_API_KEY。")
@@ -576,8 +577,8 @@ def run() -> None:
     log.info("QQ 机器人 %s，模型 %s @ %s", cfg.qq_app_id, cfg.model, cfg.base_url)
     if cfg.qq_sandbox:
         log.info("走沙箱环境（正式上线后设 QQ_SANDBOX=0）")
-    if not cfg.qq_allowed_users:
-        log.warning("没配 QQ_ALLOWED_USERS，任何加了这个机器人的人都能用你的额度。")
+    if not cfg.qq_allowed_users and not cfg.auto_enroll:
+        log.warning("没配 QQ_ALLOWED_USERS 且自动入册已关闭：不会处理任何用户消息。")
 
     if cfg.qq_initiative:
         threading.Thread(
