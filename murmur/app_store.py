@@ -96,6 +96,7 @@ class AuthKey:
     public_key: bytes | None
     counter: int
     environment: str
+    platform: str
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,7 @@ CREATE TABLE IF NOT EXISTS app_attest_keys (
     receipt      BLOB,
     counter      INTEGER NOT NULL DEFAULT 0,
     environment  TEXT NOT NULL,
+    platform     TEXT NOT NULL DEFAULT 'ios',
     active       INTEGER NOT NULL DEFAULT 1,
     created_at   TEXT NOT NULL
 );
@@ -154,8 +156,11 @@ CREATE TABLE IF NOT EXISTS app_devices (
     id           TEXT PRIMARY KEY,
     user_id      TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
     key_id       TEXT NOT NULL UNIQUE REFERENCES app_attest_keys(key_id) ON DELETE CASCADE,
-    apns_token   TEXT UNIQUE,
+    push_token   TEXT UNIQUE,
     environment  TEXT NOT NULL,
+    -- Denormalised from app_attest_keys: push delivery scans app_devices alone
+    -- and must not pay for a join on its hot path.  Written once at enrolment.
+    platform     TEXT NOT NULL DEFAULT 'ios',
     timezone     TEXT NOT NULL DEFAULT 'Asia/Shanghai',
     device_name  TEXT,
     active       INTEGER NOT NULL DEFAULT 1,
@@ -318,6 +323,26 @@ class AppStore:
             self.conn.execute(
                 "ALTER TABLE app_moments ADD COLUMN failure_retryable INTEGER"
             )
+        # Every row that predates a second client platform is an iOS row, so the
+        # column default backfills them correctly and no data migration is due.
+        key_columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(app_attest_keys)")
+        }
+        if "platform" not in key_columns:
+            self.conn.execute(
+                "ALTER TABLE app_attest_keys ADD COLUMN platform TEXT NOT NULL DEFAULT 'ios'"
+            )
+        device_columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(app_devices)")
+        }
+        if "platform" not in device_columns:
+            self.conn.execute(
+                "ALTER TABLE app_devices ADD COLUMN platform TEXT NOT NULL DEFAULT 'ios'"
+            )
+        if "push_token" not in device_columns and "apns_token" in device_columns:
+            self.conn.execute(
+                "ALTER TABLE app_devices RENAME COLUMN apns_token TO push_token"
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -420,6 +445,7 @@ class AppStore:
         receipt: bytes | None,
         counter: int,
         environment: str,
+        platform: str = "ios",
         device_name: str | None = None,
         max_devices: int = 3,
     ) -> Enrollment:
@@ -470,15 +496,17 @@ class AppStore:
             device_id = str(uuid.uuid4())
             db.execute(
                 "INSERT INTO app_attest_keys"
-                "(key_id,user_id,public_key,receipt,counter,environment,created_at) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (key_id, user_id, public_key, receipt, counter, environment, _iso(now)),
+                "(key_id,user_id,public_key,receipt,counter,environment,platform,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (key_id, user_id, public_key, receipt, counter, environment, platform,
+                 _iso(now)),
             )
             db.execute(
                 "INSERT INTO app_devices"
-                "(id,user_id,key_id,environment,device_name,last_seen_at,created_at) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (device_id, user_id, key_id, environment, device_name, _iso(now), _iso(now)),
+                "(id,user_id,key_id,environment,platform,device_name,last_seen_at,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (device_id, user_id, key_id, environment, platform, device_name,
+                 _iso(now), _iso(now)),
             )
             # redeemed_at/redeemed_device record the most recent redemption; the
             # counter is what actually governs whether the code still works.
@@ -505,7 +533,7 @@ class AppStore:
         return AuthKey(
             key_id=row["key_id"], user_id=row["user_id"], device_id=row["device_id"],
             public_key=row["public_key"], counter=int(row["counter"]),
-            environment=row["environment"],
+            environment=row["environment"], platform=row["platform"],
         )
 
     def enrollment_for_key(self, key_id: str) -> Enrollment:
@@ -985,7 +1013,7 @@ class AppStore:
                 "INSERT INTO app_push_deliveries"
                 "(moment_id,device_id,next_attempt_at,created_at,updated_at) "
                 "SELECT ?,id,?,?,? FROM app_devices WHERE user_id=? AND active=1 "
-                "AND apns_token IS NOT NULL",
+                "AND push_token IS NOT NULL",
                 (moment_id, now_text, now_text, now_text, user_id),
             )
         return moment_id
@@ -1051,27 +1079,27 @@ class AppStore:
         self,
         key_id: str,
         *,
-        apns_token: str | None,
+        push_token: str | None,
         environment: str,
         timezone: str,
         device_name: str | None,
     ) -> dict:
         with self._tx() as db:
-            if apns_token:
+            if push_token:
                 # APNs tokens may rotate or move during a restore.  Transfer the
                 # token atomically instead of surfacing the UNIQUE constraint.
                 db.execute(
-                    "UPDATE app_devices SET apns_token=NULL WHERE apns_token=? AND key_id<>?",
-                    (apns_token, key_id),
+                    "UPDATE app_devices SET push_token=NULL WHERE push_token=? AND key_id<>?",
+                    (push_token, key_id),
                 )
             cur = db.execute(
-                "UPDATE app_devices SET apns_token=?,environment=?,timezone=?,device_name=?,"
+                "UPDATE app_devices SET push_token=?,environment=?,timezone=?,device_name=?,"
                 "last_seen_at=? WHERE key_id=? AND active=1",
-                (apns_token, environment, timezone, device_name, _iso(), key_id),
+                (push_token, environment, timezone, device_name, _iso(), key_id),
             )
             if cur.rowcount != 1:
                 raise NotFound("device not found")
-            if apns_token:
+            if push_token:
                 device = db.execute(
                     "SELECT id,user_id FROM app_devices WHERE key_id=?", (key_id,)
                 ).fetchone()
@@ -1092,7 +1120,7 @@ class AppStore:
                     (device["id"], now, now, now, device["user_id"]),
                 )
         row = self.conn.execute(
-            "SELECT id,user_id,environment,timezone,device_name,apns_token IS NOT NULL AS push_enabled "
+            "SELECT id,user_id,environment,timezone,device_name,push_token IS NOT NULL AS push_enabled "
             "FROM app_devices WHERE key_id=?", (key_id,),
         ).fetchone()
         result = dict(row)
@@ -1102,7 +1130,7 @@ class AppStore:
     def devices(self, user_id: str) -> list[dict]:
         devices = [dict(row) for row in self.conn.execute(
             "SELECT id,key_id,environment,timezone,device_name,"
-            "apns_token IS NOT NULL AS push_enabled,last_seen_at,created_at "
+            "push_token IS NOT NULL AS push_enabled,last_seen_at,created_at "
             "FROM app_devices WHERE user_id=? AND active=1 ORDER BY created_at",
             (user_id,),
         ).fetchall()]
@@ -1125,7 +1153,7 @@ class AppStore:
             if count <= 1:
                 raise LastDevice("delete the account instead of its last device")
             db.execute(
-                "UPDATE app_devices SET active=0,apns_token=NULL WHERE id=?", (device_id,)
+                "UPDATE app_devices SET active=0,push_token=NULL WHERE id=?", (device_id,)
             )
             db.execute(
                 "UPDATE app_push_deliveries SET status='dead',updated_at=? "
@@ -1140,12 +1168,12 @@ class AppStore:
             )
             return True
 
-    def invalidate_apns_token(self, token: str) -> None:
+    def invalidate_push_token(self, token: str) -> None:
         with self._tx() as db:
             devices = db.execute(
-                "SELECT id FROM app_devices WHERE apns_token=?", (token,)
+                "SELECT id FROM app_devices WHERE push_token=?", (token,)
             ).fetchall()
-            db.execute("UPDATE app_devices SET apns_token=NULL WHERE apns_token=?", (token,))
+            db.execute("UPDATE app_devices SET push_token=NULL WHERE push_token=?", (token,))
             for device in devices:
                 db.execute(
                     "UPDATE app_push_deliveries SET status='dead',updated_at=? "
@@ -1158,13 +1186,13 @@ class AppStore:
     ) -> list[dict]:
         now = now or _now()
         return [dict(row) for row in self.conn.execute(
-            "SELECT q.moment_id,q.device_id,q.attempts,d.apns_token,m.push_preview,m.user_id "
-            "FROM app_push_deliveries q "
+            "SELECT q.moment_id,q.device_id,q.attempts,d.push_token,d.platform,"
+            "m.push_preview,m.user_id FROM app_push_deliveries q "
             "JOIN app_devices d ON d.id=q.device_id "
             "JOIN app_moments m ON m.id=q.moment_id "
             "JOIN app_users u ON u.id=m.user_id "
             "WHERE q.status='pending' AND q.next_attempt_at<=? "
-            "AND d.active=1 AND d.apns_token IS NOT NULL "
+            "AND d.active=1 AND d.push_token IS NOT NULL "
             "AND m.source='proactive' AND m.status='complete' AND m.acked=0 "
             "AND u.active=1 AND u.deleting=0 "
             "ORDER BY q.next_attempt_at LIMIT ?",
@@ -1177,13 +1205,13 @@ class AppStore:
         now = now or _now()
         with self._lock:
             row = self.conn.execute(
-                "SELECT q.moment_id,q.device_id,q.attempts,d.apns_token,"
+                "SELECT q.moment_id,q.device_id,q.attempts,d.push_token,d.platform,"
                 "m.push_preview,m.user_id FROM app_push_deliveries q "
                 "JOIN app_devices d ON d.id=q.device_id "
                 "JOIN app_moments m ON m.id=q.moment_id "
                 "JOIN app_users u ON u.id=m.user_id "
                 "WHERE q.moment_id=? AND q.device_id=? AND q.status='pending' "
-                "AND q.next_attempt_at<=? AND d.active=1 AND d.apns_token IS NOT NULL "
+                "AND q.next_attempt_at<=? AND d.active=1 AND d.push_token IS NOT NULL "
                 "AND m.acked=0 AND u.active=1 AND u.deleting=0",
                 (moment_id, device_id, _iso(now)),
             ).fetchone()
@@ -1238,7 +1266,7 @@ class AppStore:
 
     def push_devices(self, user_id: str) -> list[dict]:
         return [dict(r) for r in self.conn.execute(
-            "SELECT * FROM app_devices WHERE user_id=? AND active=1 AND apns_token IS NOT NULL",
+            "SELECT * FROM app_devices WHERE user_id=? AND active=1 AND push_token IS NOT NULL",
             (user_id,),
         ).fetchall()]
 
@@ -1266,7 +1294,7 @@ class AppStore:
             "AND EXISTS(SELECT 1 FROM app_moments m WHERE m.user_id=u.id "
             "AND m.source='inbound' AND m.status='complete') "
             "AND EXISTS(SELECT 1 FROM app_devices pd WHERE pd.user_id=u.id "
-            "AND pd.active=1 AND pd.apns_token IS NOT NULL)"
+            "AND pd.active=1 AND pd.push_token IS NOT NULL)"
         ).fetchall()]
 
     def expire_stale_proactive(
@@ -1318,7 +1346,7 @@ class AppStore:
             "AND EXISTS(SELECT 1 FROM app_moments m WHERE m.user_id=s.user_id "
             "AND m.source='inbound' AND m.status='complete') "
             "AND EXISTS(SELECT 1 FROM app_devices pd WHERE pd.user_id=s.user_id "
-            "AND pd.active=1 AND pd.apns_token IS NOT NULL) ORDER BY s.slot_at", (_iso(now),),
+            "AND pd.active=1 AND pd.push_token IS NOT NULL) ORDER BY s.slot_at", (_iso(now),),
         ).fetchall()]
 
     def mark_slot_delivered(self, user_id: str, slot_at: str) -> None:

@@ -177,10 +177,14 @@ class ProactiveScheduler:
 ```python
 provider = self.providers.get(item["platform"])
 if provider is None:
-    self.store.mark_push_dead(item["moment_id"], item["device_id"], status=0)
+    self.store.retry_push(item["moment_id"], item["device_id"], now=now)
     continue
 result = provider.send(item["push_token"], ...)
 ```
+
+没有对应 provider 时走 **retry 而不是 mark_push_dead**：那是运维配置缺失，不是设备
+失效，判死会让补上配置后的历史投递永远发不出去。`retry_push` 的退避封顶 1 小时，
+且 24 小时的 proactive 过期会兜底清理，所以重试是有界的。
 
 store 的三个查询要把 `platform` 和 `push_token` 一起 SELECT 出来
 （`due_push_deliveries` / `pending_push_delivery` / `push_devices`）。
@@ -309,11 +313,26 @@ self.store.expire_stale_proactive(now=now)
 
 后续四步，每步结束时测试全绿、iOS 行为不变。
 
-**P1 · 纯重构，零新功能**
+**P1 · 纯重构，零新功能** — 已完成（commit `abaf2a2`）
+
 platform 列 + `push_token` 改名 + `DeviceAttestor`/`PushProvider` Protocol 提取 +
-scheduler 收 providers 映射。此时注册表里仍只有 iOS 一个实现。
-验收：`tests/test_app_{auth,attest,push,api,store}.py` 全部原样通过（只改
-`FakeVerifier` 加一行 `platform`）。这一步是可独立提交、可独立回滚的。
+scheduler 收 providers 映射。注册表里仍只有 iOS 一个实现，wire 协议逐字未变。
+
+实测下来与原计划的三处出入：
+
+- `FakeVerifier` **不用改**。`AppAuthenticator` 用
+  `getattr(verifier, "platform", "ios")` 归类传入的 verifier，老测试原样通过。
+- `AuthKey` 多一个 `platform` 字段，`authenticate()` 用它选 attestor；
+  `advance_counter` 加了 `counter > key.counter` 的前置判断，好让 Android 侧
+  "不推进计数器"的实现不会写回一个没变的值。
+- 补了两类原本没有的测试：`SchemaMigrationTests` 建一个旧 schema 的库、灌入数据、
+  用新 `AppStore` 打开，断言 platform 回填为 `ios`、`push_token` 保住原值、
+  **counter 不丢**（丢了等于放行一次重放），以及重开库是幂等的；
+  `test_app_push.py` 两条覆盖平台路由和"缺 provider 走重试"。
+
+验收：16 个测试文件全部通过（`python tests/test_xxx.py` 逐个跑 —— 见 pyproject
+第 28 行，测试是自包含脚本，`unittest discover` 会因为 `_helpers` 的导入方式
+报 9 个 loader 错，那是跑法不对，不是回归）。
 
 **P2 · FCM provider**
 `app_push_fcm.py` + 测试。`tests/test_app_push.py:37` 的 `Transport` 假实现

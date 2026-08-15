@@ -8,7 +8,7 @@ import json
 import logging
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -68,6 +68,14 @@ class PushResult:
     reason: str | None = None
 
 
+class PushProvider(Protocol):
+    """One platform's notification transport.  The scheduler routes on this."""
+
+    platform: str
+
+    def send(self, device_token: str, *, moment_id: str, preview: str) -> PushResult: ...
+
+
 @dataclass(frozen=True)
 class GeneratedProactive:
     bubbles: list[str]
@@ -78,6 +86,8 @@ class GeneratedProactive:
 
 class APNsProvider:
     """Token-authenticated APNs HTTP/2 provider with a 50-minute JWT cache."""
+
+    platform = "ios"
 
     def __init__(
         self,
@@ -274,12 +284,14 @@ class ProactiveScheduler:
     def __init__(
         self,
         store: AppStore,
-        provider: APNsProvider,
+        providers: Mapping[str, PushProvider] | PushProvider,
         generator: Callable[[str], tuple[list[str], str] | tuple[list[str], str, int | None]],
         *,
         lock_root: Path | None = None,
     ):
-        self.store, self.provider, self.generator = store, provider, generator
+        if not isinstance(providers, Mapping):
+            providers = {getattr(providers, "platform", "ios"): providers}
+        self.store, self.providers, self.generator = store, dict(providers), generator
         self.lock_root = lock_root
 
     def ensure_schedules(self, now: datetime | None = None) -> None:
@@ -321,9 +333,21 @@ class ProactiveScheduler:
                     )
                     if item is None:
                         continue
+                    provider = self.providers.get(item["platform"])
+                    if provider is None:
+                        # A platform with no configured provider is an operator
+                        # problem, not a dead device: back off and let the 24h
+                        # proactive expiry retire it if the gap is never closed.
+                        log.warning(
+                            "no push provider configured platform=%s", item["platform"]
+                        )
+                        self.store.retry_push(
+                            item["moment_id"], item["device_id"], now=now
+                        )
+                        continue
                     try:
-                        result = self.provider.send(
-                            item["apns_token"], moment_id=item["moment_id"],
+                        result = provider.send(
+                            item["push_token"], moment_id=item["moment_id"],
                             preview=item["push_preview"] or "Murmur",
                         )
                     except Exception as error:

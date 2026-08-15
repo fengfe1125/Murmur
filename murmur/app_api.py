@@ -520,6 +520,7 @@ def create_app(
             key_id=key_id,
             attestation_b64=data.get("attestation"),
             development_token=request.headers.get("x-murmur-development-token"),
+            platform="ios",
         )
         if environment != result.environment:
             raise APIError(401, "invalid_attestation", "验证环境不匹配。")
@@ -530,6 +531,7 @@ def create_app(
             receipt=result.receipt,
             counter=result.counter,
             environment=result.environment,
+            platform=result.platform,
             device_name=(str(data.get("device_name"))[:120]
                          if data.get("device_name") else None),
         )
@@ -724,7 +726,7 @@ def create_app(
             raise APIError(400, "validation_error", "timezone 无效。") from exc
         device = store.update_device(
             auth.key_id,
-            apns_token=token,
+            push_token=token,
             environment=environment,
             timezone=timezone,
             device_name=(str(data.get("device_name"))[:120]

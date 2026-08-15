@@ -11,6 +11,7 @@ import binascii
 import hashlib
 import hmac
 import struct
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,6 +69,7 @@ class AttestationResult:
     receipt: bytes | None
     counter: int
     environment: str
+    platform: str = "ios"
 
 
 @dataclass(frozen=True)
@@ -77,7 +79,15 @@ class AuthContext:
     key_id: str
 
 
-class AppAttestVerifier(Protocol):
+class DeviceAttestor(Protocol):
+    """One client platform's hardware-attestation scheme.
+
+    Apple splits into attestation-then-assertion; Android's Key Attestation and
+    Keystore signatures land on the same two steps, so the shape is shared.
+    """
+
+    platform: str
+
     def verify_attestation(
         self, attestation: bytes, *, key_id: str, client_data_hash: bytes
     ) -> AttestationResult: ...
@@ -173,6 +183,8 @@ def _der_primitive_values(data: bytes) -> list[bytes]:
 
 class AppleAppAttestVerifier:
     """Verifier for Apple's ``apple-appattest`` WebAuthn-shaped objects."""
+
+    platform = "ios"
 
     def __init__(
         self,
@@ -316,7 +328,9 @@ class AppleAppAttestVerifier:
         receipt = statement.get("receipt")
         if receipt is not None and not isinstance(receipt, bytes):
             raise InvalidAttestation("invalid App Attest receipt")
-        return AttestationResult(spki, receipt, sign_count, self.environment)
+        return AttestationResult(
+            spki, receipt, sign_count, self.environment, self.platform
+        )
 
     def verify_assertion(
         self, assertion: bytes, *, public_key: bytes, client_data_hash: bytes,
@@ -350,19 +364,29 @@ class AppleAppAttestVerifier:
 class AppAuthenticator:
     def __init__(
         self, settings: AppSettings, store: AppStore,
-        verifier: AppAttestVerifier | None = None,
+        verifier: DeviceAttestor | None = None,
+        *,
+        attestors: Mapping[str, DeviceAttestor] | None = None,
     ):
         self.settings = settings
         self.store = store
-        if settings.production:
-            if verifier is None:
-                AppleAppAttestVerifier.ensure_available()
-                verifier = AppleAppAttestVerifier(
-                    app_id=settings.app_id,
-                    environment="production",
-                    root_path=settings.attest_root_path,
-                )
-        self.verifier = verifier
+        registry: dict[str, DeviceAttestor] = dict(attestors or {})
+        if verifier is not None:
+            registry.setdefault(getattr(verifier, "platform", "ios"), verifier)
+        if settings.production and "ios" not in registry:
+            AppleAppAttestVerifier.ensure_available()
+            registry["ios"] = AppleAppAttestVerifier(
+                app_id=settings.app_id,
+                environment="production",
+                root_path=settings.attest_root_path,
+            )
+        self.attestors = registry
+
+    def _attestor(self, platform: str) -> DeviceAttestor:
+        attestor = self.attestors.get(platform)
+        if attestor is None:
+            raise AttestationRequired(f"no attestor is configured for {platform}")
+        return attestor
 
     def _check_development_token(self, supplied: str | None) -> None:
         expected = self.settings.development_token
@@ -378,20 +402,23 @@ class AppAuthenticator:
         key_id: str,
         attestation_b64: str | None,
         development_token: str | None,
+        platform: str = "ios",
     ) -> AttestationResult:
         challenge = self.store.consume_challenge(challenge_id, "enrollment", key_id=None)
         client_data_hash = hashlib.sha256(challenge).digest()
         if self.settings.production:
-            if not self.verifier or not attestation_b64:
-                raise AttestationRequired("App Attest attestation is required")
-            return self.verifier.verify_attestation(
+            if not attestation_b64:
+                raise AttestationRequired("a device attestation is required")
+            # The client declares its platform only here.  Declaring the wrong
+            # one fails closed: the chain will not verify against that root.
+            return self._attestor(platform).verify_attestation(
                 _b64decode(attestation_b64), key_id=key_id,
                 client_data_hash=client_data_hash,
             )
         self._check_development_token(development_token)
         if not key_id.startswith("dev-") or not 8 <= len(key_id) <= 180:
             raise AppAuthError("development key ID must start with dev-")
-        return AttestationResult(b"", None, 0, "development")
+        return AttestationResult(b"", None, 0, "development", platform)
 
     @staticmethod
     def request_client_data_hash(
@@ -435,13 +462,16 @@ class AppAuthenticator:
             challenge, method, path, body, body_digest=body_digest
         )
         if self.settings.production:
-            if not self.verifier or not assertion_b64 or not key.public_key:
-                raise AttestationRequired("App Attest assertion is required")
-            counter = self.verifier.verify_assertion(
+            if not assertion_b64 or not key.public_key:
+                raise AttestationRequired("a device assertion is required")
+            # The platform comes from the enrolled key, never from the request.
+            # Letting a caller pick its own verifier here would be a downgrade.
+            counter = self._attestor(key.platform).verify_assertion(
                 _b64decode(assertion_b64), public_key=key.public_key,
                 client_data_hash=client_hash, previous_counter=key.counter,
             )
-            self.store.advance_counter(key_id, key.counter, counter)
+            if counter > key.counter:
+                self.store.advance_counter(key_id, key.counter, counter)
         else:
             self._check_development_token(development_token)
         return AuthContext(key.user_id, key.device_id, key.key_id)

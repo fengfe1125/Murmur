@@ -129,7 +129,7 @@ class APNsTests(unittest.TestCase):
                 counter=0, environment="development",
             )
             store.update_device(
-                enrolled.key_id, apns_token="d" * 64, environment="development",
+                enrolled.key_id, push_token="d" * 64, environment="development",
                 timezone="Asia/Shanghai", device_name="phone",
             )
             transport = Transport([Response()])
@@ -177,7 +177,7 @@ class APNsTests(unittest.TestCase):
                 counter=0, environment="development",
             )
             store.update_device(
-                enrolled.key_id, apns_token=token, environment="development",
+                enrolled.key_id, push_token=token, environment="development",
                 timezone="Asia/Shanghai", device_name=None,
             )
             store.create_moment(
@@ -201,6 +201,73 @@ class APNsTests(unittest.TestCase):
         finally:
             store.close()
 
+    def enrolled_device_on(self, store, platform, *, token, key_id):
+        """Enrol one device on ``platform`` with a proactive moment already due."""
+        invite = store.create_invite()
+        enrolled = store.redeem_invite(
+            code=invite, key_id=key_id, public_key=None, receipt=None,
+            counter=0, environment="development", platform=platform,
+        )
+        store.update_device(
+            enrolled.key_id, push_token=token, environment="development",
+            timezone="Asia/Shanghai", device_name=platform,
+        )
+        store.create_moment(
+            user_id=enrolled.user_id, note="hello", image_path=None,
+            idempotency_key=f"inbound-{platform}", request_digest=platform,
+        )
+        job = store.claim_job("test")
+        store.finish_job(job, scene="", move="speak", memory_entry_id=1,
+                         preview_path=None)
+        return enrolled
+
+    def test_delivery_routes_on_the_platform_recorded_at_enrolment(self):
+        store = AppStore(self.root / "routed.db")
+        now = datetime(2026, 8, 14, 12, tzinfo=UTC)
+        try:
+            ios = self.enrolled_device_on(
+                store, "ios", token="a" * 64, key_id="dev-ios"
+            )
+            store.replace_slots(ios.user_id, now.date(), [now - timedelta(seconds=1)])
+            apns = Transport([Response(200)])
+            android = Transport([Response(200)])
+            android_provider = self.provider(android)
+            android_provider.platform = "android"
+            scheduler = ProactiveScheduler(
+                store,
+                {"ios": self.provider(apns), "android": android_provider},
+                lambda _user: (["routed"], "scene"),
+            )
+            self.assertEqual(scheduler.run_once(now), 1)
+            self.assertEqual(len(apns.calls), 1)
+            self.assertEqual(len(android.calls), 0)
+        finally:
+            store.close()
+
+    def test_platform_without_a_provider_is_retried_not_buried(self):
+        store = AppStore(self.root / "unrouted.db")
+        now = datetime(2026, 8, 14, 12, tzinfo=UTC)
+        try:
+            droid = self.enrolled_device_on(
+                store, "android", token="fcm-" + "z" * 60, key_id="dev-droid"
+            )
+            store.replace_slots(droid.user_id, now.date(), [now - timedelta(seconds=1)])
+            apns = Transport([Response(200)])
+            # Only iOS is configured, so the Android delivery has nowhere to go.
+            scheduler = ProactiveScheduler(
+                store, {"ios": self.provider(apns)}, lambda _user: (["stranded"], "scene")
+            )
+            self.assertEqual(scheduler.run_once(now), 1)
+            self.assertEqual(len(apns.calls), 0)
+            # Missing configuration is an operator problem: the delivery stays
+            # pending so it flows the moment a provider is added.
+            row = store.conn.execute(
+                "SELECT status,attempts FROM app_push_deliveries"
+            ).fetchone()
+            self.assertEqual(tuple(row), ("pending", 1))
+        finally:
+            store.close()
+
     def test_transient_push_failure_is_durable_and_replayed_after_restart(self):
         db_path = self.root / "durable-push.db"
         now = datetime(2026, 8, 14, 12, tzinfo=UTC)
@@ -212,7 +279,7 @@ class APNsTests(unittest.TestCase):
                 counter=0, environment="development",
             )
             store.update_device(
-                enrolled.key_id, apns_token="a" * 64, environment="development",
+                enrolled.key_id, push_token="a" * 64, environment="development",
                 timezone="Asia/Shanghai", device_name="phone",
             )
             store.create_moment(
@@ -270,7 +337,7 @@ class APNsTests(unittest.TestCase):
                 receipt=None, counter=0, environment="development",
             )
             store.update_device(
-                enrolled.key_id, apns_token=old_token, environment="development",
+                enrolled.key_id, push_token=old_token, environment="development",
                 timezone="Asia/Shanghai", device_name="phone",
             )
             store.create_moment(
@@ -286,7 +353,7 @@ class APNsTests(unittest.TestCase):
             invalid_transport = Transport([Response(410, "Unregistered")])
             scheduler = ProactiveScheduler(
                 store,
-                self.provider(invalid_transport, store.invalidate_apns_token),
+                self.provider(invalid_transport, store.invalidate_push_token),
                 lambda _user: (["rotate me"], "scene"),
             )
             self.assertEqual(scheduler.run_once(now), 1)
@@ -297,7 +364,7 @@ class APNsTests(unittest.TestCase):
             self.assertFalse(store.devices(enrolled.user_id)[0]["push_enabled"])
 
             store.update_device(
-                enrolled.key_id, apns_token=new_token, environment="development",
+                enrolled.key_id, push_token=new_token, environment="development",
                 timezone="Asia/Shanghai", device_name="phone",
             )
             delivery = store.conn.execute(

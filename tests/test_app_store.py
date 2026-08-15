@@ -5,6 +5,7 @@ Run directly: ``python tests/test_app_store.py``.
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -377,7 +378,7 @@ class AppStoreTests(unittest.TestCase):
 
     def test_proactive_timezone_follows_last_seen_device(self):
         self.store.update_device(
-            self.enrollment.key_id, apns_token="a" * 64,
+            self.enrollment.key_id, push_token="a" * 64,
             environment="development", timezone="Asia/Shanghai", device_name="old",
         )
         code = self.store.create_invite(kind="device", user_id=self.enrollment.user_id)
@@ -386,7 +387,7 @@ class AppStoreTests(unittest.TestCase):
             counter=0, environment="development",
         )
         self.store.update_device(
-            second.key_id, apns_token="b" * 64, environment="development",
+            second.key_id, push_token="b" * 64, environment="development",
             timezone="America/Los_Angeles", device_name="new",
         )
         users = {user["id"]: user for user in self.store.active_users()}
@@ -422,6 +423,81 @@ class AppStoreTests(unittest.TestCase):
         ):
             count = self.store.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             self.assertEqual(count, 0, table)
+
+
+class SchemaMigrationTests(unittest.TestCase):
+    """A database written before Android support must open unchanged."""
+
+    OLD_SCHEMA = """
+    CREATE TABLE app_users (
+        id TEXT PRIMARY KEY, alias TEXT, active INTEGER NOT NULL DEFAULT 1,
+        deleting INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+    CREATE TABLE app_attest_keys (
+        key_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+        public_key BLOB, receipt BLOB, counter INTEGER NOT NULL DEFAULT 0,
+        environment TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL);
+    CREATE TABLE app_devices (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+        key_id TEXT NOT NULL UNIQUE REFERENCES app_attest_keys(key_id) ON DELETE CASCADE,
+        apns_token TEXT UNIQUE, environment TEXT NOT NULL,
+        timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai', device_name TEXT,
+        active INTEGER NOT NULL DEFAULT 1, last_seen_at TEXT NOT NULL,
+        created_at TEXT NOT NULL);
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "legacy.db"
+        stamp = "2026-01-01T00:00:00+00:00"
+        conn = sqlite3.connect(self.path)
+        conn.executescript(self.OLD_SCHEMA)
+        conn.execute("INSERT INTO app_users VALUES('u1','sakura',1,0,?)", (stamp,))
+        conn.execute(
+            "INSERT INTO app_attest_keys"
+            "(key_id,user_id,public_key,counter,environment,created_at)"
+            " VALUES('k1','u1',X'AABB',7,'production',?)", (stamp,)
+        )
+        conn.execute(
+            "INSERT INTO app_devices"
+            "(id,user_id,key_id,apns_token,environment,last_seen_at,created_at)"
+            " VALUES('d1','u1','k1','ff00','production',?,?)", (stamp, stamp)
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_legacy_rows_become_ios_rows_and_keep_their_token(self):
+        with AppStore(self.path) as store:
+            key = store.auth_key("k1")
+            self.assertEqual(key.platform, "ios")
+            # The counter is the App Attest replay guard; losing it in a
+            # migration would let a captured assertion be replayed once.
+            self.assertEqual(key.counter, 7)
+            device = store.conn.execute(
+                "SELECT * FROM app_devices WHERE id='d1'"
+            ).fetchone()
+            self.assertEqual(device["platform"], "ios")
+            self.assertEqual(device["push_token"], "ff00")
+            columns = {
+                row["name"] for row in store.conn.execute("PRAGMA table_info(app_devices)")
+            }
+            self.assertNotIn("apns_token", columns)
+
+    def test_reopening_a_migrated_database_is_a_no_op(self):
+        with AppStore(self.path) as store:
+            store.conn.execute("UPDATE app_devices SET platform='android' WHERE id='d1'")
+            store.conn.commit()
+        with AppStore(self.path) as store:
+            self.assertEqual(store.auth_key("k1").device_id, "d1")
+            device = store.conn.execute(
+                "SELECT platform FROM app_devices WHERE id='d1'"
+            ).fetchone()
+            self.assertEqual(device["platform"], "android")
 
 
 if __name__ == "__main__":

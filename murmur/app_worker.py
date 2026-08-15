@@ -547,10 +547,10 @@ def run() -> None:
             from .app_push import APNsProvider, EngineProactiveGenerator, ProactiveScheduler
 
             provider = APNsProvider.from_settings(
-                settings, on_invalid_token=store.invalidate_apns_token
+                settings, on_invalid_token=store.invalidate_push_token
             )
             scheduler = ProactiveScheduler(
-                store, provider, EngineProactiveGenerator(
+                store, {provider.platform: provider}, EngineProactiveGenerator(
                     cfg, data_root=settings.data_root,
                     memory_db_path=settings.memory_db_path,
                 ), lock_root=settings.data_root,
