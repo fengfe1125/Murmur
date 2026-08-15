@@ -313,7 +313,7 @@ self.store.expire_stale_proactive(now=now)
 
 后续四步，每步结束时测试全绿、iOS 行为不变。
 
-**P1 · 纯重构，零新功能** — 已完成（commit `abaf2a2`）
+**P1 · 纯重构，零新功能** — 已完成（commit `beed935`）
 
 platform 列 + `push_token` 改名 + `DeviceAttestor`/`PushProvider` Protocol 提取 +
 scheduler 收 providers 映射。注册表里仍只有 iOS 一个实现，wire 协议逐字未变。
