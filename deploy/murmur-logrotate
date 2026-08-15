@@ -8,3 +8,14 @@
     copytruncate
     su murmur murmur
 }
+
+/opt/murmur/test/logs/*.log {
+    daily
+    rotate 7
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su murmur murmur
+}

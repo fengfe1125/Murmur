@@ -1,168 +1,231 @@
-# 部署到云主机
+# 部署 Murmur 正式 App 服务
 
-## 先选对地方（这一步最关键）
+正式生产入口只有 iOS App。Telegram、钉钉、微信和 QQ 的代码继续保留用于回归测试，
+但凭据、SQLite、日志和 systemd 环境都必须与生产 App 隔离。任何脚本都不会因为发现
+平台凭据而自动启用 Bot。
 
-三个外部依赖，所在位置不一样：
+## 主机与端口
 
-| 依赖 | 位置 | 国内主机 | 境外主机 |
-|---|---|---|---|
-| Telegram API | 境外 | ❌ 被墙，必须挂代理 | ✅ 直连 |
-| OpenCode 网关 | 境外 | ❌ 需要代理 | ✅ 直连 |
-| 钉钉 API | 国内 | ✅ 最快 | ✅ 能用，多几十毫秒 |
+- `murmur-app-api`：仅监听 `127.0.0.1:8766`，由 Caddy 暴露 HTTPS。
+- `murmur-app-worker`：领取 SQLite 中的 moment/推送作业，不监听公网端口。
+- `murmur-web`：只读看板，仅监听 `127.0.0.1:8765`，通过 SSH 隧道查看。
+- Caddy：唯一公网入口，监听 80/443，TLS 终止后反代 App API。
 
-**结论：买境外的**，香港 / 新加坡 / 东京都行。三个依赖里两个必须境外直连，
-钉钉从境外访问只是慢一点点，完全不影响体感。
+1 核 1G 可用于邀请制初期。主机必须能直连模型网关和 Apple APNs；App Attest 与 APNs
+真机联调还需要 Apple Developer 账号、注册的 App ID 和 APNs 密钥。
 
-买国内主机的话得给 Telegram 和 OpenCode 挂代理——就是你现在笔记本上的情况，
-而那个代理正是今天所有断线的根源。别重复这个坑。
-
-## 配置
-
-1 核 1G 足够。这服务是纯 I/O：图片处理 23ms，其余时间都在等模型返回。
-磁盘几 G 就行（SQLite + 日志）。
-
-## 步骤
+## 初次安装
 
 ```bash
-# —— 服务器上 ——
 sudo useradd -r -m -d /opt/murmur -s /bin/bash murmur
-sudo apt update && sudo apt install -y python3-venv git
-
-# 传代码（本地执行）
-# *.db* 把 murmur.db 连同 -wal/-shm 一起排除：WAL 里是最近的聊天记录
-rsync -av --exclude .venv --exclude .git --exclude '*.db*' --exclude logs \
-  ~/Murmur/ user@你的服务器:/tmp/murmur/
+sudo apt update
+sudo apt install -y python3-venv git caddy
+sudo install -d -o murmur -g murmur -m 0750 /opt/murmur/logs
 ```
 
+把代码放到 `/opt/murmur` 后安装依赖并生成生产 `.env`：
+
 ```bash
-# —— 服务器上 ——
-sudo mv /tmp/murmur/* /opt/murmur/ && sudo chown -R murmur:murmur /opt/murmur
-sudo install -d -o murmur -g murmur -m 0750 /opt/murmur/logs
-sudo -u murmur bash -c '
+sudo chown -R murmur:murmur /opt/murmur
+sudo -u murmur -H bash -c '
   cd /opt/murmur
   python3 -m venv .venv
   .venv/bin/pip install -e .
-'
-
-# 不传本机 .env：在服务器上重新输入密钥，旧电脑不必把凭据发到网络上。
-sudo -u murmur -H bash -c '
-  cd /opt/murmur
   ./scripts/setup-murmur.sh
 '
-# 向导会用隐藏输入写入 /opt/murmur/.env，且不会启动机器人。
+sudo chmod 600 /opt/murmur/.env
+```
 
-# 装服务
+生产 `.env` 必须至少保持以下门禁；验收完成前使用 `transition`：
+
+```dotenv
+MURMUR_CHANNEL_MODE=transition
+MURMUR_ENABLE_TEST_BOTS=0
+MURMUR_AUTO_ENROLL=0
+```
+
+### 暂无 Apple Developer 账号时
+
+正式 App Attest/APNs 不能假装完成。仅为模拟器和后端联调，可在隔离环境显式设置：
+
+```dotenv
+MURMUR_APP_ATTEST_MODE=development
+MURMUR_APP_ALLOW_DEVELOPMENT=1
+MURMUR_APP_DEVELOPMENT_TOKEN=<openssl rand -hex 32 的输出>
+MURMUR_APP_BASE_URL=http://127.0.0.1:8766
+```
+
+开发 token 至少 24 字符，只放 `.env`，不得写入代码、仓库或 Release App。生产切换时必须
+同时改为 `MURMUR_APP_ATTEST_MODE=production`、`MURMUR_APP_ALLOW_DEVELOPMENT=0`、清空
+开发 token，并配置 HTTPS、Team ID、App ID 与 APNs 密钥；服务会拒绝夹带开发绕过的
+production 配置。
+
+生产 APNs `.p8` 不跟代码或状态包迁移。先在服务器上单独安装，路径放在
+`/opt/murmur` 之外，避免发布目录切换时被移走：
+
+```bash
+sudo install -d -o root -g murmur -m 0750 /etc/murmur
+sudo install -o murmur -g murmur -m 0600 AuthKey_KEYID.p8 \
+  /etc/murmur/AuthKey_KEYID.p8
+# .env: MURMUR_APP_APNS_KEY_PATH=/etc/murmur/AuthKey_KEYID.p8
+```
+
+安装并启动正式服务：
+
+```bash
 sudo cp /opt/murmur/deploy/*.service /etc/systemd/system/
 sudo cp /opt/murmur/deploy/murmur-logrotate /etc/logrotate.d/murmur
 sudo systemctl daemon-reload
-sudo systemctl enable --now murmur-web
-
-# 只开启已在向导中配置的平台；先确认其状态，再进行切换（示例）。
-# sudo systemctl enable --now murmur-telegram
-# sudo systemctl enable --now murmur-dingtalk
-# sudo systemctl enable --now murmur-wechat
-# sudo systemctl enable --now murmur-qq
+sudo systemctl enable --now murmur-app-worker murmur-app-api murmur-web
+sudo systemctl --no-pager --full status \
+  murmur-app-worker murmur-app-api murmur-web
 ```
 
-### Google Cloud 浏览器 SSH 上传
-
-浏览器 SSH 的“上传文件”不能传目录。把项目压缩包上传到登录用户的家目录后，在服务器上执行：
+把 [`Caddyfile.example`](Caddyfile.example) 中的 `app.example.com` 替换成正式域名，
+将站点块合并进 `/etc/caddy/Caddyfile`，再验证并重载：
 
 ```bash
-sudo install -d -o murmur -g murmur -m 0750 /opt/murmur
-sudo tar -xzf ~/murmur-vps-deploy-YYYYMMDD.tar.gz \
-  -C /opt/murmur --strip-components=1 --no-same-owner
-sudo chown -R murmur:murmur /opt/murmur
-sudo install -d -o murmur -g murmur -m 0750 /opt/murmur/logs
-sudo -u murmur -H bash -c 'cd /opt/murmur && ./scripts/setup-murmur.sh'
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
 ```
 
-向导只收集模型和平台凭据、安装 Python 依赖与写入 `.env`；不会启动通道。确认
-`murmur-web` 正常后，再按一个平台一个平台地从旧电脑切换，避免同一 Token 被两个进程
-同时长轮询而重复回复或漏消息。
+DNS 必须先指向 VPS，80/443 必须可达。API 会流式读取请求并精确执行 26MiB 总 body
+上限（其中图片最大 25MiB）；Caddy 示例不使用仅 2.10+ 才有的实验性
+`request_body` 指令，避免系统仓库的旧版 Caddy 拒绝加载配置。SSE 使用
+`flush_interval -1`，避免第一条 bubble 被代理缓冲。不要把邀请码、assertion、APNs token
+或消息正文放进 URL 查询参数。示例刻意不启用 Caddy access log，避免结构化请求日志把
+认证 header 写盘；运维只使用 App API 自己脱敏后的指标和 service log。
 
-微信不在服务器上扫码。先在本地完成官方 OpenClaw 登录，再把凭据传过去：
+上传防护的生产基线记录在 `.env.example`：全局最多同时读取 2 个 body，总时限 180 秒、
+连续 15 秒无数据即中止，10 秒宽限后最低 16KiB/s；图片解码上限 80MP，小 JSON 上限
+256KiB，限流身份表最多 4096 项。部署时不要用更宽松的旧值覆盖这些默认值。
+
+## 邀请用户与新增设备
+
+管理员只通过服务器 CLI 创建一次性代码；代码仅在当前终端输出一次，数据库只保存哈希：
 
 ```bash
-# 本地执行；服务文件会把 OPENCLAW_STATE_DIR 指到这个位置
-ssh user@你的服务器 'sudo install -d -o murmur -g murmur -m 0700 \
-  /opt/murmur/openclaw/openclaw-weixin/accounts'
-scp ~/.openclaw/openclaw-weixin/accounts/*.json user@你的服务器:/tmp/
-ssh user@你的服务器 'sudo mv /tmp/*.json \
-  /opt/murmur/openclaw/openclaw-weixin/accounts/ && \
-  sudo chown murmur:murmur /opt/murmur/openclaw/openclaw-weixin/accounts/*.json && \
-  sudo chmod 600 /opt/murmur/openclaw/openclaw-weixin/accounts/*.json'
+# 新用户：7 天有效，可选备注只供管理员辨认
+sudo -u murmur -H bash -c \
+  'cd /opt/murmur && .venv/bin/dotenv -f .env run -- .venv/bin/murmur app-invite --alias "邀请备注"'
+
+# 先列出 user_id，再为该用户签发 30 分钟有效的新设备码
+sudo -u murmur -H bash -c \
+  'cd /opt/murmur && .venv/bin/dotenv -f .env run -- .venv/bin/murmur app-users'
+sudo -u murmur -H bash -c \
+  'cd /opt/murmur && .venv/bin/dotenv -f .env run -- .venv/bin/murmur app-device-code USER_ID'
 ```
 
-## 日常操作
+每位用户最多 3 台有效设备；第四台会由 API 拒绝。不要把邀请码或设备码写入工单、日志、
+命令历史以外的长期文件，使用后立即丢弃终端输出。
+
+## 测试 Bot 隔离
+
+测试 Bot 不读取生产 `/opt/murmur/.env`。它们只读取
+`/opt/murmur/.env.test-bots`，并只写 `/opt/murmur/test/`：
 
 ```bash
-systemctl status murmur-telegram murmur-dingtalk murmur-web  # 看状态
-tail -f /opt/murmur/logs/murmur_bot.log                       # 跟 Telegram 日志
-tail -n 200 /opt/murmur/logs/murmur_dingtalk.log              # 查钉钉历史
-sudo systemctl restart murmur-dingtalk             # 改完 persona.py 后重启
+sudo install -d -o murmur -g murmur -m 0750 /opt/murmur/test/logs
+sudo install -o murmur -g murmur -m 0600 \
+  /opt/murmur/deploy/test-bots.env.example \
+  /opt/murmur/.env.test-bots
+sudoedit /opt/murmur/.env.test-bots
 ```
 
-### 从 GitHub 更新（推荐）
+测试文件必须显式包含：
 
-VPS 首次关联私有 GitHub 仓库时，需要为它配置只读 Deploy Key。关联完成后，更新只要：
+```dotenv
+MURMUR_CHANNEL_MODE=transition
+MURMUR_ENABLE_TEST_BOTS=1
+MURMUR_AUTO_ENROLL=0
+MURMUR_DB=/opt/murmur/test/murmur.db
+MURMUR_LOGDIR=/opt/murmur/test/logs
+```
+
+只在测试主机上、只为需要的单个平台手动启动，例如：
+
+```bash
+sudo systemctl enable --now murmur-telegram
+```
+
+平台凭据和模型密钥存在不等于授权启动。缺少 `.env.test-bots`、测试开关未开启、
+或当前运行环境已是 `app_only` 时，CLI 会失败关闭。不要让测试 Bot 指向生产数据库；不要在
+生产 App 用户和测试平台账号之间复用 thread。
+
+## 分阶段切换
+
+### 1. transition 验收
+
+- 正式 `.env` 使用 `MURMUR_CHANNEL_MODE=transition` 和
+  `MURMUR_ENABLE_TEST_BOTS=0`。
+- App API/Worker 常驻；旧平台如确需对照，只在独立测试环境显式开启。
+- 真机验收文字、照片、SSE 首泡、主动推送、重放拒绝、第四台设备拒绝和无聊天记录。
+
+### 2. App-only 切换
+
+只有真机验收完成后才执行：
+
+```bash
+sudoedit /opt/murmur/.env
+# MURMUR_CHANNEL_MODE=app_only
+# MURMUR_ENABLE_TEST_BOTS=0
+# MURMUR_AUTO_ENROLL=0
+sudo systemctl restart murmur-app-worker murmur-app-api
+sudo systemctl disable --now \
+  murmur-telegram murmur-dingtalk murmur-wechat murmur-qq
+```
+
+确认 App 正常后，再到各平台后台人工撤销 Bot 凭据。撤销不可自动化，也不属于普通部署或
+更新流程。平台代码与离线测试保留；以后若做回归测试，应使用新的测试凭据和隔离数据库。
+
+## 更新与迁移
+
+`murmur-update` 只接受 `main` 的快进提交，安装依赖并运行全部
+`tests/test_*.py`。成功后只重启管理员已经 enable 的服务；失败会回滚代码，不会启用任何
+新服务，更不会根据平台凭据启用 Bot。
 
 ```bash
 sudo systemctl start murmur-update
 sudo systemctl status murmur-update --no-pager
 ```
 
-更新器只接受 `main` 的快进提交：拉取代码后会重新安装依赖，并运行所有 `tests/test_*.py`。
-测试通过才会重启已经启用的平台服务；失败会把代码还原到上一个提交，正在运行的机器人
-不会被重启。`.env`、SQLite 数据库、日志、档案与照片均被 Git 忽略，更新不会覆盖它们。
-
-首次绑定可在本机运行（会要求本机 SSH / gcloud 密钥口令）：
+首次关联私有 GitHub 仓库可使用：
 
 ```bash
 ./scripts/link-vps-to-github.sh --repo OWNER/REPO \
   --gcloud INSTANCE --zone ZONE --project PROJECT
 ```
 
-该脚本会生成仅限此仓库的**只读** Deploy Key，上传到 VPS 后立即删除本机临时私钥；
-Deploy Key 不具备 GitHub 写入权限。
+`scripts/migrate-to-vps.sh` 只有在输入 `CUTOVER` 后才替换远端目录和传输生产状态；它只
+自动启用 App API、Worker 和看板，并显式保持四个平台 Bot 为 disabled。测试 Bot 的
+`.env.test-bots` 不随生产迁移传输。
 
-改人格只需要重启，不用重装：
+迁移脚本是严格的单机切换工具，会在停机前后都失败关闭：
 
-```bash
-sudo -u murmur vim /opt/murmur/murmur/persona.py
-sudo systemctl restart murmur-telegram murmur-dingtalk
-```
+- `MURMUR_DB` / `MURMUR_APP_DB` / `MURMUR_APP_MEMORY_DB` 必须指向同一个
+  SQLite，`MURMUR_APP_DATA_ROOT` 必须是它的目录。非默认分库布局不会被猜测迁移。
+- 本机 `app-api` / `app-worker` / `web` 和旧 Bot 都必须完全停止，且
+  `queued/processing` moment 必须为 0。脚本不携带排队原图，因此队列未排空就拒绝快照。
+- 远端 Caddy 必须已经配好 `127.0.0.1:8766` 反代并能通过 `caddy validate`；
+  生产 APNs key 必须事先以 `0600` 放到 `.env` 所指的远端绝对路径。
+- 迁移包会把数据库路径规范为 `/opt/murmur`、移除生产 `.env` 中的四平台
+  凭据，并将 DB、dossier 和预览收紧为只有 `murmur` 用户可读。
+- 启动后会等待服务稳定，再经 `.env` 的 HTTPS 域名实际请求 challenge；
+  Worker 短暂启动后因密钥错误退出时，切换不会误报成功。
 
-## 要注意的
-
-**`.env` 不进 git，也不进 rsync。** 里面是活的 API key。
-`chmod 600` + `ProtectSystem=strict` 已经在 service 文件里配好了。
-
-**日志与看板。** 四个 bot 和看板都把日志写进 `/opt/murmur/logs/`，这样
-`murmur web` 可以展示脱敏后的日志尾巴和 24 小时重启次数。部署包同时安装
-`logrotate`，每天轮转、保留 14 天。看板本身以 `murmur-web.service` 常驻，
-默认只监听服务器的 `127.0.0.1:8765`。
-
-从本机看远程看板，优先用 SSH 隧道，不开放 8765：
+## 运维与数据
 
 ```bash
-ssh -N -L 8765:127.0.0.1:8765 user@你的服务器
-# 然后在本机浏览器打开 http://127.0.0.1:8765
+systemctl status murmur-app-api murmur-app-worker murmur-web
+tail -f /opt/murmur/logs/murmur_app_api.log
+tail -f /opt/murmur/logs/murmur_app_worker.log
+ssh -N -L 8765:127.0.0.1:8765 user@server
 ```
 
-**数据库。** `/opt/murmur/murmur.db` 是全部记忆。已开 WAL 模式，
-两个进程同时写没问题（实测并发 120 次写入零冲突）。
-想备份就 `sqlite3 murmur.db ".backup bak.db"`，别直接 cp（WAL 下会拿到不一致的快照）。
-
-**要不要把本地的记忆带过去。** 想接着用就把 `murmur.db` 一起传；
-想重新开始就别传，服务会自己建。注意 `thread` 键包含平台和会话 id，
-换机器不影响，同一个人还是同一条上下文。
-
-**代理相关。** 境外主机上不需要任何代理配置，
-[`dingtalk.py`](../murmur/dingtalk.py) 里那段绕过代理的逻辑会自动空转，无害。
-
-## Docker（可选）
-
-不建议为这个服务上 Docker——两个长驻进程 + 一个 SQLite 文件，
-systemd 更轻、日志更顺手、改人格重启更快。
-真要容器化的话注意把 `murmur.db` 挂成 volume，别放进镜像层。
+- `.env`、Apple 密钥、SQLite、日志、dossier、照片预览和测试环境文件都不得进 Git。
+- `/opt/murmur/murmur.db` 使用 WAL；备份用
+  `sqlite3 murmur.db ".backup backup.db"`，不要直接复制单个数据库文件。
+- Caddy 只代理 8766；8765 不开放公网。服务日志不得打印图片、正文、邀请码、assertion
+  或 APNs token。
+- App API/Worker 使用 `UMask=0077`、`ProtectSystem=strict` 和
+  `ReadWritePaths=/opt/murmur`；测试 Bot 只能写 `/opt/murmur/test`。

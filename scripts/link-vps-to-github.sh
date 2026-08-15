@@ -123,7 +123,7 @@ sudo -u murmur -H git -C "\$APP_DIR" remote remove origin 2>/dev/null || true
 sudo -u murmur -H git -C "\$APP_DIR" remote add origin "git@github.com:\$REPOSITORY.git"
 sudo -u murmur -H git -C "\$APP_DIR" fetch --prune origin "\$BRANCH"
 
-for service in murmur-web murmur-telegram murmur-dingtalk murmur-wechat murmur-qq; do
+for service in murmur-app-worker murmur-app-api murmur-web murmur-telegram murmur-dingtalk murmur-wechat murmur-qq; do
   systemctl stop "\$service" 2>/dev/null || true
 done
 sudo -u murmur -H git -C "\$APP_DIR" reset --hard "origin/\$BRANCH"
@@ -139,7 +139,7 @@ install -m 0644 "\$APP_DIR/deploy/murmur-update.service" /etc/systemd/system/mur
 install -m 0644 "\$APP_DIR/deploy/"*.service /etc/systemd/system/
 install -m 0644 "\$APP_DIR/deploy/murmur-logrotate" /etc/logrotate.d/murmur
 systemctl daemon-reload
-for service in murmur-web murmur-telegram murmur-dingtalk murmur-wechat murmur-qq; do
+for service in murmur-app-worker murmur-app-api murmur-web murmur-telegram murmur-dingtalk murmur-wechat murmur-qq; do
   if systemctl is-enabled --quiet "\$service"; then
     systemctl restart "\$service"
     systemctl is-active --quiet "\$service"

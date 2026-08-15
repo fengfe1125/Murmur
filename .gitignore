@@ -1,4 +1,14 @@
 .env
+.env.test-bots
+app-uploads/
+app-locks/
+openclaw/
+*.local.xcconfig
+*.p8
+*.p12
+*.mobileprovision
+xcuserdata/
+DerivedData/
 places.json
 *.db
 # WAL 模式下数据大部分躺在旁边这两个文件里，一样是私密聊天记录
@@ -16,3 +26,6 @@ dossiers/
 photos/
 # 微信官方通道的游标与上下文 token，等同于会话凭据，只留在部署机器。
 wechat/
+.env.dev-app
+.build/
+.hallmark/

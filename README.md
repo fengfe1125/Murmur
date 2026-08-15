@@ -2,6 +2,10 @@
 
 发一张图，它回你一句戳中的话。
 
+**正式入口是 iOS App。** Telegram、钉钉、微信和 QQ 只保留为隔离测试通道，
+不会因为仓库或服务器里存在旧凭据而自动启动。App 界面一次只展示当前 moment，
+不提供聊天记录；Murmur 的私有记忆仍留在服务端，用于保持人格和上下文。
+
 ```
 你 ▸ [一张等电梯的照片]
     18:47 周三
@@ -36,7 +40,7 @@
 
 ```bash
 uv venv && uv pip install -e .
-cp .env.example .env      # 填 OPENCODE_API_KEY 和 TELEGRAM_BOT_TOKEN
+cp .env.example .env      # 填模型与 App API 配置；不要在这里开启测试 Bot
 ```
 
 ### 交互式初始化（推荐）
@@ -47,21 +51,37 @@ cp .env.example .env      # 填 OPENCODE_API_KEY 和 TELEGRAM_BOT_TOKEN
 ./scripts/setup-murmur.sh
 ```
 
-向导会检查 Python 3.11+ / `venv`、创建 `.venv` 并安装依赖；然后用隐藏输入配置
-OpenCode（或其他 OpenAI 兼容网关）的 API Key，并按需接 Telegram、钉钉、个人微信
-ClawBot、QQ。它不会启动机器人、开放端口或把密钥提交到 Git。第一次可以只配模型，
-平台随时重新运行向导补上。
+向导会检查 Python 3.11+ / `venv`、创建 `.venv` 并安装依赖，然后用隐藏输入配置
+OpenCode（或其他 OpenAI 兼容网关）的 API Key。正式配置写入 `.env`；如果选择旧平台，
+它们的测试凭据会单独写入被 Git 忽略的 `.env.test-bots`，数据库和日志写入 `./test/`。
+向导不会启动服务或开放端口。
+
+后台分成两个正式进程：
+
+```bash
+murmur app-worker
+murmur app-api --host 127.0.0.1 --port 8766
+```
+
+管理员用 `murmur app-invite` 创建 7 天有效的新用户邀请码；已有用户新增设备时，先用
+`murmur app-users` 找到 user ID，再用 `murmur app-device-code USER_ID` 创建 30 分钟有效的
+一次性设备码。代码只在终端显示，数据库只保存哈希。
+
+默认 App Attest 模式是 `production`，缺 Team ID、App ID 或 HTTPS 时会拒绝启动。
+当前没有 Apple Developer 账号时，按 [`deploy/README.md`](deploy/README.md) 使用显式、
+仅限本地的 development token；该绕过不能进入 Release 或生产环境。
 
 各平台要准备的东西：Telegram 的 BotFather Token（首次 `/start` 后补 Chat ID）、钉钉
 企业内部应用的 Client ID / Client Secret、QQ 官方机器人的 AppID / AppSecret；个人微信
 需要安装 OpenClaw + Node.js 22+，向导会引导扫码，授权凭据保留在 `~/.openclaw`，不进
-`.env`。
+正式 `.env`。
 
 ### 迁移到 VPS（代码、凭据与记忆）
 
 准备替换电脑上正在运行的服务时，使用迁移脚本。它先把代码和依赖在远端测试通过；只有
 输入 `CUTOVER` 后，才停止本机 Murmur、制作 SQLite 一致性快照、传输 `.env`、
-`murmur.db`、`dossiers/` 与照片预览，并启动 VPS 上已配置的平台。
+`murmur.db`、`dossiers/` 与照片预览，并启动 VPS 上的 App API、Worker 和只读看板。
+脚本不会根据旧平台凭据 enable 任何 Bot。
 
 Google Cloud Compute Engine：
 
@@ -74,7 +94,7 @@ Google Cloud Compute Engine：
 
 普通 SSH 主机则使用 `--ssh user@host`。脚本需要本机已登录对应的 SSH 或 gcloud 账号；
 迁移过程不显示任何密钥。若电脑上的 Murmur 已手动停止，加 `--local-stopped` 后仍需输入
-`CUTOVER`，才会启动远端通道。
+`CUTOVER`，才会启动远端正式 App 服务。
 
 迁移完成并推送代码到私有 GitHub 仓库后，可用 `scripts/link-vps-to-github.sh` 给 VPS 设置
 只读 Deploy Key。以后在 VPS 执行 `sudo systemctl start murmur-update`，就会拉取、测试并重启
@@ -90,14 +110,31 @@ murmur reply ~/Photos/IMG_4821.HEIC --dry-run           # 只看 prompt，不花
 murmur log
 ```
 
-### 再挂上 Telegram
+### 旧平台测试通道
 
-1. 找 [@BotFather](https://t.me/BotFather) 发 `/newbot`，拿到 token 填进 `.env`
-2. `murmur bot`
+四个平台不是正式产品入口。启动条件必须同时满足：
+
+```dotenv
+# .env.test-bots
+MURMUR_CHANNEL_MODE=transition
+MURMUR_ENABLE_TEST_BOTS=1
+MURMUR_AUTO_ENROLL=0
+MURMUR_DB=./test/murmur.db
+MURMUR_LOGDIR=./test/logs
+```
+
+设置为 `MURMUR_CHANNEL_MODE=app_only` 后，即使误留
+`MURMUR_ENABLE_TEST_BOTS=1`，所有平台命令也会拒绝启动。配置值拼错同样会失败关闭。
+
+### 测试 Telegram
+
+1. 找 [@BotFather](https://t.me/BotFather) 发 `/newbot`，拿到 token 填进 `.env.test-bots`
+2. `.venv/bin/dotenv -f .env.test-bots run -- .venv/bin/murmur bot`
 3. 对 bot 发 `/start`，它会告诉你 chat id
-4. 把 chat id 填进 `.env` 的 `MURMUR_ALLOWED_CHAT_IDS`，重启
+4. 把 chat id 填进 `.env.test-bots` 的 `MURMUR_ALLOWED_CHAT_IDS`，重启
 
-**不填白名单的话，任何人找到这个 bot 都能用你的额度。**
+**`MURMUR_AUTO_ENROLL=0` 时，白名单为空会拒绝所有人的消息（只保留
+`/start` 用来回显 chat id）；必须先填入白名单才会调用模型。**
 
 bot 支持：
 
@@ -109,7 +146,7 @@ bot 支持：
 | 它说完你回一句 | 记进数据库，是调人格最有用的信号 |
 | `/log` | 看最近十条 |
 
-### 接微信
+### 测试微信
 
 微信 2026 年 3 月才开放官方 Bot API（腾讯 ClawBot，走 iLink 协议）。
 **是扫码授权个人微信，不是逆向网页版**，所以不封号——在这之前，个人微信没有能用的合法路子。
@@ -121,25 +158,26 @@ npx -y @tencent-weixin/openclaw-weixin-cli install
 openclaw channels login --channel openclaw-weixin        # 扫码
 openclaw config set plugins.entries.openclaw-weixin.enabled false
 openclaw gateway restart
-murmur wechat
+.venv/bin/dotenv -f .env.test-bots run -- .venv/bin/murmur wechat
 ```
 
 **第三步不能省。** `getUpdates` 是带游标的长轮询，一个微信号只能有一个进程在轮——
 不关掉插件的话，OpenClaw 网关和 Murmur 会互相把对方的消息取走。
 
-### 接 QQ
+### 测试 QQ
 
-官方 QQ 机器人是**独立账号**，不是扫码挂个人 QQ。去 [q.qq.com](https://q.qq.com/) 创建一个，把 AppID / AppSecret 填进 `.env`：
+官方 QQ 机器人是**独立账号**，不是扫码挂个人 QQ。去 [q.qq.com](https://q.qq.com/) 创建一个，把 AppID / AppSecret 填进 `.env.test-bots`：
 
 ```bash
-# .env
+# .env.test-bots
 QQ_APP_ID=...
 QQ_CLIENT_SECRET=...
 
-murmur qq
+.venv/bin/dotenv -f .env.test-bots run -- .venv/bin/murmur qq
 ```
 
-然后打开手机 QQ，在消息列表里找到这个机器人，发一句。日志会打出对方的 openId，要限人就把 openId 填进 `QQ_ALLOWED_USERS`。
+然后打开手机 QQ，在消息列表里找到这个机器人，发一句。第一次会在日志里看到
+被拒绝的 openId；把它填进 `.env.test-bots` 的 `QQ_ALLOWED_USERS` 并重启后才会回复。
 
 未过审的机器人只在沙箱里收得到消息，这时加 `QQ_SANDBOX=1`，并在开放平台里把自己加成沙箱用户。
 
@@ -245,14 +283,20 @@ murmur/
   moment.py    照片 → "此刻"（时段/星期/工作日）+ 匿名地点指纹
   memory.py    SQLite：按 chat 隔离、最近 N 条、同地点同时段来过几次
   engine.py    组装上下文 → 调网关 → 解析（能剥代码块和 <think>）
-  bot.py       Telegram：发图/发文件/附言/回话/白名单
-  dingtalk.py  钉钉：Stream 长连接，不需要公网 IP
-  wechat.py    微信：腾讯官方 ClawBot 通道，长轮询 + CDN 取图解密
-  qq.py        QQ：腾讯官方机器人，WebSocket 网关
+  app_api.py   正式 App HTTPS API、SSE 与请求校验
+  app_worker.py 持久化 moment 作业、Murmur 调用与主动推送
+  app_auth.py  邀请、App Attest / assertion 验证边界
+  app_store.py App 身份、设备、偏好、作业与短期事件表
+  app_push.py  APNs provider 与失效 token 清理
+  app_settings.py App API/Worker 的集中安全配置
+  bot.py       Telegram 测试通道
+  dingtalk.py  钉钉测试通道
+  wechat.py    微信测试通道
+  qq.py        QQ 测试通道
   web.py       只读看板：进程 / 端口 / 额度曲线 / 每人的聊天窗口和记忆
                （配 MURMUR_WEB_TOKEN 后支持开放访问）
   webui/       看板的前端，单个 HTML，没有构建步骤
-  cli.py       reply / inspect / log / bot / dingtalk / wechat / qq / web
+  cli.py       app-api / app-worker / 本地诊断 / 测试 Bot / web
 ```
 
 参考的开源项目见 [CREDITS.md](CREDITS.md)。
@@ -292,7 +336,7 @@ murmur/
 3. **成本分级（做了一半）。** 记忆整理已走便宜模型、图片已按比例分档；
    剩下的是"输入侧"分级：先用便宜模型判断这张值不值得深聊，再决定
    要不要上好模型。
-4. **主动性。** 现在它只会被动回应。真朋友会在你连着三天深夜发图之后主动问一句。
+4. **主动性。** App 用户默认每天最多 3 条，窗口 08:30–22:30；测试 Bot 仍走原来的 10–15 条排程。
 
 ## 测试
 

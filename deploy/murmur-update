@@ -7,7 +7,9 @@ set -euo pipefail
 APP_DIR=/opt/murmur
 SERVICE_USER=murmur
 BRANCH=${MURMUR_GIT_BRANCH:-main}
-SERVICES=(murmur-web murmur-telegram murmur-dingtalk murmur-wechat murmur-qq)
+# Updates may restart services that an operator already enabled. They never
+# enable a service, and platform bots still need their isolated env + CLI gate.
+SERVICES=(murmur-app-worker murmur-app-api murmur-web murmur-telegram murmur-dingtalk murmur-wechat murmur-qq)
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || {
   echo "Run as root: sudo murmur-update" >&2

@@ -79,6 +79,13 @@ _existing() {
   printf '%s' "${line#*=}"
 }
 
+_existing_from() {
+  local file="$1" key="$2" line
+  [[ -f "$file" ]] || return 1
+  line=$(grep -E "^${key}=" "$file" | tail -n1) || return 1
+  printf '%s' "${line#*=}"
+}
+
 ask() {
   local key="$1" prompt="$2" current input
   current=$(_existing "$key" || true)
@@ -245,14 +252,73 @@ write_env MURMUR_MODEL "${MURMUR_MODEL:-qwen3.7-plus}"
 ask MURMUR_MEMORY_MODEL "记忆整理模型（留空则跟随主模型；建议 mimo-v2.5）："
 write_env MURMUR_MEMORY_MODEL "$MURMUR_MEMORY_MODEL"
 
+# .env is the official App environment. Platform credentials alone must never
+# make a bot runnable, so keep its test switch off here even during transition.
+CURRENT_CHANNEL_MODE=$(_existing MURMUR_CHANNEL_MODE || true)
+case "$CURRENT_CHANNEL_MODE" in
+  transition|app_only) ;;
+  *) CURRENT_CHANNEL_MODE=transition ;;
+esac
+write_env MURMUR_CHANNEL_MODE "$CURRENT_CHANNEL_MODE"
+write_env MURMUR_ENABLE_TEST_BOTS "0"
+write_env MURMUR_AUTO_ENROLL "0"
+
 stage "Choose messaging platforms"
-say "可多选：1 Telegram  2 钉钉  3 个人微信 ClawBot  4 QQ。"
-say "示例：1,4。留空表示先只完成模型与本地命令行配置。"
+say "这些平台只作为隔离测试 Bot：1 Telegram  2 钉钉  3 个人微信  4 QQ。"
+say "示例：1,4。留空表示只配置正式 App；凭据不会写入生产 .env。"
 ask SELECTED_PLATFORMS "输入编号："
 SELECTED_PLATFORMS=${SELECTED_PLATFORMS// /}
 if [[ -n "$SELECTED_PLATFORMS" && ! "$SELECTED_PLATFORMS" =~ ^[1-4](,[1-4])*$ ]]; then
   warn "平台编号格式不正确。请使用如 1,3 或留空。"
   exit 2
+fi
+PRODUCTION_ENV_FILE="$ENV_FILE"
+TEST_BOT_ENV_FILE="$ROOT_DIR/.env.test-bots"
+PLATFORM_ENV_KEYS=(
+  TELEGRAM_BOT_TOKEN MURMUR_ALLOWED_CHAT_IDS
+  DINGTALK_CLIENT_ID DINGTALK_CLIENT_SECRET DINGTALK_ALLOWED_USERS
+  DINGTALK_INITIATIVE_USERS
+  WECHAT_TOKEN WECHAT_ACCOUNT_ID WECHAT_ALLOWED_USERS WECHAT_INITIATIVE
+  QQ_APP_ID QQ_CLIENT_SECRET QQ_ALLOWED_USERS QQ_INITIATIVE QQ_SANDBOX
+)
+
+# Older installations kept live platform credentials in the production file.
+# Move them to the isolated test file before asking any questions, without ever
+# printing their values.  The test switch stays closed unless the operator
+# explicitly selects at least one platform below.
+MIGRATED_PLATFORM_VALUES=0
+for key in "${PLATFORM_ENV_KEYS[@]}"; do
+  value=$(_existing_from "$PRODUCTION_ENV_FILE" "$key" || true)
+  if [[ -n "$value" ]]; then
+    ENV_FILE="$TEST_BOT_ENV_FILE"
+    write_env "$key" "$value"
+    MIGRATED_PLATFORM_VALUES=1
+  fi
+done
+if (( MIGRATED_PLATFORM_VALUES )); then
+  ENV_FILE="$TEST_BOT_ENV_FILE"
+  write_env MURMUR_CHANNEL_MODE "transition"
+  write_env MURMUR_ENABLE_TEST_BOTS "0"
+  write_env MURMUR_AUTO_ENROLL "0"
+  write_env MURMUR_DB "./test/murmur.db"
+  write_env MURMUR_LOGDIR "./test/logs"
+  chmod 600 "$TEST_BOT_ENV_FILE"
+  note "已把旧平台凭据移入隔离测试文件；测试开关仍保持关闭。"
+fi
+ENV_FILE="$PRODUCTION_ENV_FILE"
+if [[ -n "$SELECTED_PLATFORMS" ]]; then
+  ENV_FILE="$TEST_BOT_ENV_FILE"
+  write_env MURMUR_CHANNEL_MODE "transition"
+  write_env MURMUR_ENABLE_TEST_BOTS "1"
+  write_env MURMUR_AUTO_ENROLL "0"
+  write_env MURMUR_DB "./test/murmur.db"
+  write_env MURMUR_LOGDIR "./test/logs"
+  write_env MURMUR_TZ "Asia/Shanghai"
+  for key in OPENCODE_API_KEY MURMUR_API_KEY MURMUR_BASE_URL MURMUR_MODEL MURMUR_MEMORY_MODEL; do
+    write_env "$key" "$(_existing_from "$PRODUCTION_ENV_FILE" "$key" || true)"
+  done
+  chmod 600 "$TEST_BOT_ENV_FILE"
+  note "测试凭据写入独立的 $TEST_BOT_ENV_FILE；数据库和日志位于 ./test/。"
 fi
 
 stage "Telegram"
@@ -264,7 +330,7 @@ if has_platform 1; then
   write_env TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
   ask MURMUR_ALLOWED_CHAT_IDS "允许的 Chat ID（逗号分隔；暂不知道可留空）："
   write_env MURMUR_ALLOWED_CHAT_IDS "$MURMUR_ALLOWED_CHAT_IDS"
-  [[ -n "$MURMUR_ALLOWED_CHAT_IDS" ]] || warn "白名单为空时，任何人都可能消耗你的模型额度；首次 /start 后立刻补填。"
+  [[ -n "$MURMUR_ALLOWED_CHAT_IDS" ]] || warn "白名单为空时会拒绝所有消息（/start 只回显 chat id）；获取 id 后补填并重启。"
 else
   say "未选择 Telegram，跳过。"
 fi
@@ -283,7 +349,7 @@ if has_platform 2; then
   write_env DINGTALK_ALLOWED_USERS "$DINGTALK_ALLOWED_USERS"
   ask DINGTALK_INITIATIVE_USERS "允许被主动联系的 userId（留空=默认取白名单第一个）："
   write_env DINGTALK_INITIATIVE_USERS "$DINGTALK_INITIATIVE_USERS"
-  [[ -n "$DINGTALK_ALLOWED_USERS" ]] || warn "白名单为空时，企业内任何人都可能使用机器人。"
+  [[ -n "$DINGTALK_ALLOWED_USERS" ]] || warn "白名单为空时会拒绝所有消息；从忽略日志取 userId 后补填并重启。"
 else
   say "未选择 DingTalk，跳过。"
 fi
@@ -314,7 +380,7 @@ if has_platform 3; then
   ask WECHAT_ALLOWED_USERS "允许的微信 openId（暂不知道可留空）："
   write_env WECHAT_ALLOWED_USERS "$WECHAT_ALLOWED_USERS"
   write_env WECHAT_INITIATIVE "0"
-  [[ -n "$WECHAT_ALLOWED_USERS" ]] || warn "白名单为空时，任何加了你的人都可能使用机器人。"
+  [[ -n "$WECHAT_ALLOWED_USERS" ]] || warn "白名单为空时会拒绝所有消息；从忽略日志取 openId 后补填并重启。"
 else
   say "未选择微信，跳过。"
 fi
@@ -333,14 +399,87 @@ if has_platform 4; then
   write_env QQ_ALLOWED_USERS "$QQ_ALLOWED_USERS"
   ask QQ_SANDBOX "QQ 机器人尚未过审？输入 1 开启沙箱，否则留空："
   write_env QQ_SANDBOX "$QQ_SANDBOX"
-  [[ -n "$QQ_ALLOWED_USERS" ]] || warn "白名单为空时，任何加了这个机器人的人都可能使用它。"
+  [[ -n "$QQ_ALLOWED_USERS" ]] || warn "白名单为空时会拒绝所有消息；从忽略日志取 openId 后补填并重启。"
 else
   say "未选择 QQ，跳过。"
 fi
 
-stage "Dashboard and local data"
+# The remaining settings belong to the official App/dashboard environment.
+ENV_FILE="$PRODUCTION_ENV_FILE"
+"$PYTHON_BIN" "$ROOT_DIR/scripts/sanitize_production_env.py" "$PRODUCTION_ENV_FILE"
+note "生产 .env 已移除 Telegram / 钉钉 / 微信 / QQ 凭据。"
+
+stage "Official App API, dashboard and local data"
 ask MURMUR_TZ "时区（默认 Asia/Shanghai）："
 write_env MURMUR_TZ "${MURMUR_TZ:-Asia/Shanghai}"
+write_env MURMUR_APP_TIMEZONE "${MURMUR_TZ:-Asia/Shanghai}"
+
+say "App Attest 正式模式需要 Apple Developer 账号；没有账号时只能显式使用隔离开发模式。"
+ask APP_AUTH_CHOICE "输入 1 配置 production，2 配置 simulator development："
+case "${APP_AUTH_CHOICE:-1}" in
+  1)
+    ask MURMUR_APP_BASE_URL "App API 的 HTTPS 正式地址（例如 https://app.example.com）："
+    [[ "$MURMUR_APP_BASE_URL" == https://* ]] || {
+      warn "production App API 必须使用 HTTPS。"
+      exit 2
+    }
+    ask MURMUR_APP_TEAM_ID "Apple Team ID："
+    require_value "$MURMUR_APP_TEAM_ID" "MURMUR_APP_TEAM_ID"
+    ask MURMUR_APP_BUNDLE_ID "Bundle ID（默认 com.sakura.Murmur）："
+    MURMUR_APP_BUNDLE_ID=${MURMUR_APP_BUNDLE_ID:-com.sakura.Murmur}
+    ask MURMUR_APP_ID "完整 App ID（留空则自动使用 TEAM_ID.BUNDLE_ID）："
+    write_env MURMUR_APP_ATTEST_MODE "production"
+    write_env MURMUR_APP_ALLOW_DEVELOPMENT "0"
+    write_env MURMUR_APP_DEVELOPMENT_TOKEN ""
+    write_env MURMUR_APP_BASE_URL "$MURMUR_APP_BASE_URL"
+    write_env MURMUR_APP_TEAM_ID "$MURMUR_APP_TEAM_ID"
+    write_env MURMUR_APP_BUNDLE_ID "$MURMUR_APP_BUNDLE_ID"
+    write_env MURMUR_APP_ID "$MURMUR_APP_ID"
+    write_env MURMUR_APP_APNS_ENVIRONMENT "production"
+    ;;
+  2)
+    warn "development token 只允许模拟器/本地联调。迁移到 VPS 时 sanitize 会清掉它并强制 production。"
+    ask MURMUR_APP_BASE_URL "开发 App API 地址（默认 http://127.0.0.1:8766）："
+    MURMUR_APP_BASE_URL=${MURMUR_APP_BASE_URL:-http://127.0.0.1:8766}
+    ask MURMUR_APP_BUNDLE_ID "Bundle ID（默认 com.sakura.Murmur）："
+    MURMUR_APP_BUNDLE_ID=${MURMUR_APP_BUNDLE_ID:-com.sakura.Murmur}
+    MURMUR_APP_DEVELOPMENT_TOKEN=$(_existing MURMUR_APP_DEVELOPMENT_TOKEN || true)
+    if [[ ${#MURMUR_APP_DEVELOPMENT_TOKEN} -lt 24 ]]; then
+      if command -v openssl >/dev/null 2>&1; then
+        MURMUR_APP_DEVELOPMENT_TOKEN=$(openssl rand -hex 32)
+      else
+        MURMUR_APP_DEVELOPMENT_TOKEN=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(32))')
+      fi
+    fi
+    write_env MURMUR_APP_ATTEST_MODE "development"
+    write_env MURMUR_APP_ALLOW_DEVELOPMENT "1"
+    write_env MURMUR_APP_DEVELOPMENT_TOKEN "$MURMUR_APP_DEVELOPMENT_TOKEN"
+    write_env MURMUR_APP_BASE_URL "$MURMUR_APP_BASE_URL"
+    write_env MURMUR_APP_TEAM_ID ""
+    write_env MURMUR_APP_BUNDLE_ID "$MURMUR_APP_BUNDLE_ID"
+    write_env MURMUR_APP_ID ""
+    write_env MURMUR_APP_APNS_ENVIRONMENT "development"
+    ;;
+  *) warn "只支持 1 或 2。"; exit 2 ;;
+esac
+
+MURMUR_APP_DB=$(_existing MURMUR_APP_DB || true)
+MURMUR_APP_MEMORY_DB=$(_existing MURMUR_APP_MEMORY_DB || true)
+MURMUR_APP_DATA_ROOT=$(_existing MURMUR_APP_DATA_ROOT || true)
+MURMUR_APP_TEMP_DIR=$(_existing MURMUR_APP_TEMP_DIR || true)
+write_env MURMUR_APP_DB "${MURMUR_APP_DB:-./murmur.db}"
+write_env MURMUR_APP_MEMORY_DB "${MURMUR_APP_MEMORY_DB:-./murmur.db}"
+write_env MURMUR_APP_DATA_ROOT "${MURMUR_APP_DATA_ROOT:-.}"
+write_env MURMUR_APP_TEMP_DIR "${MURMUR_APP_TEMP_DIR:-./app-uploads}"
+
+ask MURMUR_APP_APNS_KEY_PATH "APNs .p8 密钥路径（还没有账号可留空）："
+write_env MURMUR_APP_APNS_KEY_PATH "$MURMUR_APP_APNS_KEY_PATH"
+ask MURMUR_APP_APNS_KEY_ID "APNs Key ID（可留空）："
+write_env MURMUR_APP_APNS_KEY_ID "$MURMUR_APP_APNS_KEY_ID"
+ask MURMUR_APP_APNS_TEAM_ID "APNs Team ID（留空则跟随 Apple Team ID）："
+write_env MURMUR_APP_APNS_TEAM_ID "$MURMUR_APP_APNS_TEAM_ID"
+write_env MURMUR_APP_APNS_TOPIC "${MURMUR_APP_BUNDLE_ID:-com.sakura.Murmur}"
+
 ask MURMUR_LOGDIR "日志目录（留空=项目下 logs/）："
 write_env MURMUR_LOGDIR "$MURMUR_LOGDIR"
 CURRENT_WEB_TOKEN=$(_existing MURMUR_WEB_TOKEN || true)
@@ -371,11 +510,24 @@ chmod 600 "$ENV_FILE"
 stage "Validation (does not start bots)"
 if [[ -x .venv/bin/murmur ]]; then
   .venv/bin/murmur --help >/dev/null
-  .venv/bin/python - <<'PY'
+  .venv/bin/python - "$ENV_FILE" <<'PY'
+import sys
+
+from dotenv import load_dotenv
+
+# Config no longer reads an ambient .env at import time. Validate exactly the
+# production file the wizard just wrote; do not inherit missing values from a
+# test-bot file or another working directory.
+load_dotenv(sys.argv[1], override=True)
+
 from murmur.config import Config
+from murmur.app_settings import AppSettings
 
 cfg = Config.load()
+app = AppSettings.from_env(cfg)
+app.validate()
 print("  ✓ model API configured" if cfg.api_key else "  ✗ missing model API key")
+print(f"  ✓ App API authentication: {app.attest_mode}")
 for label, ready in (
     ("Telegram", bool(cfg.telegram_token)),
     ("DingTalk", bool(cfg.dingtalk_client_id and cfg.dingtalk_client_secret)),
@@ -391,8 +543,9 @@ fi
 
 finish
 if [[ "$ROOT_DIR" == "/opt/murmur" ]]; then
-  say "Next: install the systemd units, then enable only the platforms you configured."
+  say "Next: install and enable murmur-app-worker, murmur-app-api and murmur-web."
 else
-  say "Next: ./run.sh <bot|dingtalk|wechat|qq>  — start only the platform you configured."
+  say "Next: run the official App API/worker; old platforms stay disabled by default."
 fi
-say "Server deployment: see deploy/README.md. The dashboard should stay behind an SSH tunnel."
+say "Test bots require .env.test-bots plus explicit enablement; see deploy/README.md."
+say "The dashboard should stay behind an SSH tunnel."

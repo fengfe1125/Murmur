@@ -1,0 +1,25 @@
+# Replace app.example.com before installing this block in /etc/caddy/Caddyfile.
+# Caddy obtains and renews the public TLS certificate automatically once DNS
+# points at this VPS and ports 80/443 are reachable.
+app.example.com {
+    # Do not enable encode here. gzip/zstd would buffer text/event-stream
+    # and hide the first bubble until a compression window fills.
+
+    reverse_proxy 127.0.0.1:8766 {
+        # Flush each SSE event immediately instead of buffering a response.
+        flush_interval -1
+        header_down X-Accel-Buffering "no"
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        -Server
+    }
+
+    # Deliberately no Caddy access log: the default structured request object
+    # can include authentication headers. Use the App API's redacted metrics
+    # and service log instead. Also never put secrets or message text in URLs.
+    # Body limits stay in the API: Caddy's request_body directive is experimental
+    # and would make this otherwise portable example depend on Caddy 2.10+.
+}
