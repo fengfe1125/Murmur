@@ -52,9 +52,11 @@ if [ -n "$SSH_TARGET" ]; then
   echo "→ 连接 $SSH_TARGET"
   remote true || { echo "SSH 连不上 $SSH_TARGET" >&2; exit 1; }
 
+  # cd must happen inside sudo: /opt/murmur is 0700 murmur:murmur, so the
+  # login user cannot even enter it.
   if [ "$WANT_INVITE" = 1 ]; then
-    remote "cd $REMOTE_DIR && sudo -u murmur $REMOTE_DIR/.venv/bin/murmur \
-      app-invite --reusable --permanent --alias 'vps dev'"
+    remote "sudo -u murmur bash -c 'cd $REMOTE_DIR && ./.venv/bin/murmur \
+      app-invite --reusable --permanent --alias \"vps dev\"'"
     exit 0
   fi
 
