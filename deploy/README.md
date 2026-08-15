@@ -184,6 +184,19 @@ sudo systemctl disable --now \
 `tests/test_*.py`。成功后只重启管理员已经 enable 的服务；失败会回滚代码，不会启用任何
 新服务，更不会根据平台凭据启用 Bot。
 
+更新不会把服务单元强推到布局不同的主机上。单元文件里写死了 env 文件和日志目录，
+仓库里的四个 Bot 单元指向隔离布局（`.env.test-bots`、`/opt/murmur/test/logs`）：
+更新只会安装本机已经具备这些路径的单元，其余原样保留并在结尾列出，例如
+
+```text
+Units left in place, repo copy needs paths this host lacks:
+  murmur-qq.service (this host has no /opt/murmur/.env.test-bots, …)
+```
+
+要采用隔离布局就按上面「测试 Bot 隔离」建好路径，下次更新会自动装上对应单元；
+在此之前旧单元继续读 `/opt/murmur/.env` 和 `/opt/murmur/logs/`，Bot 不会被改瘫。
+重启阶段也不再中途放弃：每个 enable 的服务都会重启，没起来的按名字列出并以非零码退出。
+
 ```bash
 sudo systemctl start murmur-update
 sudo systemctl status murmur-update --no-pager

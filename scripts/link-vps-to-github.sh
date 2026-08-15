@@ -136,15 +136,24 @@ sudo -u murmur -H bash -c '
 '
 install -m 0755 "\$APP_DIR/deploy/murmur-update" /usr/local/sbin/murmur-update
 install -m 0644 "\$APP_DIR/deploy/murmur-update.service" /etc/systemd/system/murmur-update.service
-install -m 0644 "\$APP_DIR/deploy/"*.service /etc/systemd/system/
 install -m 0644 "\$APP_DIR/deploy/murmur-logrotate" /etc/logrotate.d/murmur
+# Linking to GitHub does not re-lay-out the host. The service units already
+# installed here keep pointing at the env files and log directories this host
+# has; murmur-update adopts a repo unit once its paths exist.
 systemctl daemon-reload
+down=()
 for service in murmur-app-worker murmur-app-api murmur-web murmur-telegram murmur-dingtalk murmur-wechat murmur-qq; do
-  if systemctl is-enabled --quiet "\$service"; then
-    systemctl restart "\$service"
-    systemctl is-active --quiet "\$service"
+  if ! systemctl is-enabled --quiet "\$service"; then
+    continue
+  fi
+  if ! systemctl restart "\$service" || ! systemctl is-active --quiet "\$service"; then
+    down+=("\$service")
   fi
 done
+if ((\${#down[@]})); then
+  printf 'Linked, but these did not come back up: %s\n' "\${down[*]}" >&2
+  exit 1
+fi
 rm -f "\$KEY_FILE" "$REMOTE_BOOTSTRAP"
 echo "GitHub updates enabled: sudo systemctl start murmur-update"
 EOF

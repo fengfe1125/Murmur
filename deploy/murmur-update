@@ -28,6 +28,44 @@ git_murmur() {
   as_murmur git -C "$APP_DIR" "$@"
 }
 
+# Replace by rename. install(1) truncates in place, and this script overwrites
+# itself while bash is still reading it; a rename leaves that inode alone.
+install_self() {
+  install -m 0755 "$1" "$2.murmur-new"
+  mv -f "$2.murmur-new" "$2"
+}
+
+# Absolute paths a unit needs before it can start here. A leading "-" marks a
+# path systemd itself treats as optional, so it is not a requirement.
+unit_missing_paths() {
+  local line key value path
+  local -a paths
+  while IFS= read -r line; do
+    [[ "$line" == *=* ]] || continue
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      EnvironmentFile|ConditionPathExists)
+        paths=("$value")
+        ;;
+      ReadWritePaths)
+        read -r -a paths <<<"$value"
+        ;;
+      StandardOutput|StandardError)
+        [[ "$value" == append:* ]] || continue
+        paths=("$(dirname "${value#append:}")")
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    for path in ${paths[@]+"${paths[@]}"}; do
+      [[ "$path" == /* ]] || continue
+      [[ -e "$path" ]] || printf '%s\n' "$path"
+    done
+  done <"$1" | sort -u
+}
+
 [[ -z "$(git_murmur status --porcelain)" ]] || {
   echo "Refusing to update: $APP_DIR has uncommitted source changes." >&2
   exit 1
@@ -61,20 +99,65 @@ if ! as_murmur bash -c "
   exit 1
 fi
 
-# Let later releases improve this updater and the service units too.
-install -m 0755 "$APP_DIR/deploy/murmur-update" /usr/local/sbin/murmur-update
-install -m 0644 "$APP_DIR/deploy/murmur-update.service" /etc/systemd/system/murmur-update.service
-install -m 0644 "$APP_DIR/deploy/"*.service /etc/systemd/system/
+# Let later releases improve this updater. These three are host-independent.
+install_self "$APP_DIR/deploy/murmur-update" /usr/local/sbin/murmur-update
+install -m 0644 "$APP_DIR/deploy/murmur-update.service" \
+  /etc/systemd/system/murmur-update.service
 install -m 0644 "$APP_DIR/deploy/murmur-logrotate" /etc/logrotate.d/murmur
+
+# Service units are not host-independent: they name an env file and a log
+# directory, and the repo ships the isolated test-bot layout. Installing one
+# over a host that lacks those paths repoints a running service at nothing —
+# ConditionPathExists then skips it and the bot stays down. So an update only
+# installs a unit this host can actually satisfy, and reports the rest for an
+# operator to migrate deliberately.
+declare -a units_installed=() units_held=()
+for source_unit in "$APP_DIR/deploy/"*.service; do
+  unit=$(basename "$source_unit")
+  if [[ "$unit" == murmur-update.service ]]; then
+    continue
+  fi
+  if cmp -s "$source_unit" "/etc/systemd/system/$unit"; then
+    continue
+  fi
+  missing=$(unit_missing_paths "$source_unit")
+  if [[ -n "$missing" ]]; then
+    units_held+=("$unit (this host has no ${missing//$'\n'/, })")
+    continue
+  fi
+  install -m 0644 "$source_unit" "/etc/systemd/system/$unit"
+  units_installed+=("$unit")
+done
 systemctl daemon-reload
 
-restarted=()
+# Restart every enabled service before reporting: aborting part-way through
+# leaves the untouched ones on old code and says nothing about why.
+declare -a restarted=() failed=()
 for service in "${SERVICES[@]}"; do
-  if systemctl is-enabled --quiet "$service"; then
-    systemctl restart "$service"
-    systemctl is-active --quiet "$service"
+  if ! systemctl is-enabled --quiet "$service"; then
+    continue
+  fi
+  if systemctl restart "$service" && systemctl is-active --quiet "$service"; then
     restarted+=("$service")
+  elif [[ "$(systemctl show -p ConditionResult --value "$service")" == no ]]; then
+    failed+=("$service (start condition not met)")
+  else
+    failed+=("$service")
   fi
 done
 
 printf 'Updated and restarted: %s\n' "${restarted[*]:-no enabled services}"
+if ((${#units_installed[@]})); then
+  printf 'Installed units: %s\n' "${units_installed[*]}"
+fi
+if ((${#units_held[@]})); then
+  printf 'Units left in place, repo copy needs paths this host lacks:\n' >&2
+  printf '  %s\n' "${units_held[@]}" >&2
+  printf 'Create those paths (deploy/README.md, "测试 Bot 隔离") to adopt them.\n' >&2
+fi
+if ((${#failed[@]})); then
+  printf 'Did not come back up:\n' >&2
+  printf '  %s\n' "${failed[@]}" >&2
+  printf 'Code is at %s; inspect with: systemctl status <service>\n' "${target:0:12}" >&2
+  exit 1
+fi
