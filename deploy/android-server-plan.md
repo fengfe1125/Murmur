@@ -334,7 +334,7 @@ scheduler 收 providers 映射。注册表里仍只有 iOS 一个实现，wire �
 第 28 行，测试是自包含脚本，`unittest discover` 会因为 `_helpers` 的导入方式
 报 9 个 loader 错，那是跑法不对，不是回归）。
 
-**P2 · FCM provider** — 已完成（commit `8ab4b7c`）
+**P2 · FCM provider** — 已完成（commit `b42ab3c`）
 
 `app_push_fcm.py`（`FCMProvider`，`platform = "android"`）+ 14 条测试，全部用假
 transport，不碰网络。计划外多做的一件事：
