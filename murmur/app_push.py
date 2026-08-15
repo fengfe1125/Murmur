@@ -1,4 +1,9 @@
-"""APNs delivery and the restrained first-party proactive schedule."""
+"""Push delivery and the restrained first-party proactive schedule.
+
+APNs lives here; FCM lives in :mod:`murmur.app_push_fcm`.  The scheduler holds
+one provider per platform and never inspects a provider's status codes -- see
+:class:`PushResult`.
+"""
 
 from __future__ import annotations
 
@@ -38,23 +43,25 @@ def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
-class APNsResponse(Protocol):
+class PushResponse(Protocol):
     status_code: int
     text: str
 
     def json(self) -> dict: ...
 
 
-class APNsTransport(Protocol):
-    def post(self, url: str, *, headers: dict[str, str], content: bytes) -> APNsResponse: ...
+class PushTransport(Protocol):
+    def post(self, url: str, *, headers: dict[str, str], content: bytes) -> PushResponse: ...
 
 
-class HttpxAPNsTransport:
+class HttpxPushTransport:
+    """Shared by APNs and FCM: both want HTTP/2 and neither needs a session."""
+
     def __init__(self, timeout: float = 15.0):
         try:
             import httpx
         except ImportError as exc:
-            raise RuntimeError("APNs requires httpx[http2]>=0.27") from exc
+            raise RuntimeError("push delivery requires httpx[http2]>=0.27") from exc
         self.client = httpx.Client(http2=True, timeout=timeout)
 
     def post(self, url: str, *, headers: dict[str, str], content: bytes):
@@ -66,6 +73,11 @@ class PushResult:
     delivered: bool
     status: int
     reason: str | None = None
+    # Whether the token itself is finished, as opposed to the attempt.  Each
+    # provider renders this verdict in its own vocabulary -- APNs says 410
+    # BadDeviceToken where FCM says 404 UNREGISTERED -- so the scheduler must
+    # not try to read status codes it cannot know the dialect of.
+    permanent: bool = False
 
 
 class PushProvider(Protocol):
@@ -97,14 +109,14 @@ class APNsProvider:
         team_id: str,
         topic: str,
         environment: str,
-        transport: APNsTransport | None = None,
+        transport: PushTransport | None = None,
         on_invalid_token: Callable[[str], None] | None = None,
     ):
         if environment not in {"development", "production"}:
             raise ValueError("invalid APNs environment")
         self.key_id, self.team_id, self.topic = key_id, team_id, topic
         self.environment = environment
-        self.transport = transport or HttpxAPNsTransport()
+        self.transport = transport or HttpxPushTransport()
         self.on_invalid_token = on_invalid_token
         try:
             key = serialization.load_pem_private_key(Path(key_path).read_bytes(), password=None)
@@ -120,7 +132,7 @@ class APNsProvider:
 
     @classmethod
     def from_settings(
-        cls, settings: AppSettings, *, transport: APNsTransport | None = None,
+        cls, settings: AppSettings, *, transport: PushTransport | None = None,
         on_invalid_token: Callable[[str], None] | None = None,
     ) -> APNsProvider:
         settings.validate_apns()
@@ -195,10 +207,13 @@ class APNsProvider:
             if reason == "ExpiredProviderToken" and attempt == 0:
                 self._cached_token = None
                 continue
+            dead = response.status_code in {400, 410} or reason in {
+                "BadDeviceToken", "Unregistered",
+            }
             if response.status_code == 410 or reason in {"BadDeviceToken", "Unregistered"}:
                 if self.on_invalid_token:
                     self.on_invalid_token(device_token)
-            return PushResult(False, response.status_code, reason)
+            return PushResult(False, response.status_code, reason, permanent=dead)
         return PushResult(False, 403, "ExpiredProviderToken")
 
 
@@ -365,9 +380,7 @@ class ProactiveScheduler:
                             item["moment_id"], item["device_id"]
                         )
                         delivered += 1
-                    elif result.status in {400, 410} or result.reason in {
-                        "BadDeviceToken", "Unregistered",
-                    }:
+                    elif result.permanent:
                         self.store.mark_push_dead(
                             item["moment_id"], item["device_id"],
                             status=result.status,
@@ -377,7 +390,10 @@ class ProactiveScheduler:
                             item["moment_id"], item["device_id"],
                             status=result.status, now=now,
                         )
-                        log.warning("APNs delivery deferred status=%s", result.status)
+                        log.warning(
+                            "push delivery deferred platform=%s status=%s",
+                            item["platform"], result.status,
+                        )
             except (AccountDeleting, NotFound):
                 continue
         return delivered

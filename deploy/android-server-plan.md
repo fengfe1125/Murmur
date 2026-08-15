@@ -334,9 +334,22 @@ scheduler 收 providers 映射。注册表里仍只有 iOS 一个实现，wire �
 第 28 行，测试是自包含脚本，`unittest discover` 会因为 `_helpers` 的导入方式
 报 9 个 loader 错，那是跑法不对，不是回归）。
 
-**P2 · FCM provider**
-`app_push_fcm.py` + 测试。`tests/test_app_push.py:37` 的 `Transport` 假实现
-可直接复用，不需要真网络。
+**P2 · FCM provider** — 已完成（commit `8ab4b7c`）
+
+`app_push_fcm.py`（`FCMProvider`，`platform = "android"`）+ 14 条测试，全部用假
+transport，不碰网络。计划外多做的一件事：
+
+- **把"设备已死"的判定从 scheduler 移进 provider。** 原来 scheduler 靠
+  `result.status in {400, 410}` 嗅探 APNs 的方言，FCM 用 404 `UNREGISTERED`
+  表达同一件事，会被漏判成"可重试"而无限重投。现在 `PushResult` 多一个
+  `permanent` 字段由各 provider 自己填，scheduler 只看这个布尔量。
+- `APNsTransport`/`HttpxAPNsTransport` 改名 `PushTransport`/`HttpxPushTransport`，
+  两个 provider 共用。
+- access token 走 RS256 自签断言换 OAuth2，未引入 `google-auth`。缓存按响应里的
+  `expires_in` 提前 60 秒续期，测试覆盖了短寿命 token 的续期路径。
+- `.gitignore` 补了 `*service-account*.json` / `*firebase-adminsdk*.json`
+  ——那文件里是 RSA 私钥，等同于 APNs 的 `.p8`，原本没被挡住。
+- worker 里 FCM 是 opt-in：没配就只跑 iOS，Android 投递挂起重试而不判死。
 
 **P3 · Android attestor**
 `app_attest_android.py` + 测试。`tests/test_app_attest.py:118` 已经在用

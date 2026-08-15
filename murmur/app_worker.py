@@ -549,8 +549,20 @@ def run() -> None:
             provider = APNsProvider.from_settings(
                 settings, on_invalid_token=store.invalidate_push_token
             )
+            providers = {provider.platform: provider}
+            # Android is opt-in: without FCM configured the iOS half still runs,
+            # and any Android delivery stays pending rather than being buried.
+            if settings.fcm_configured:
+                from .app_push_fcm import FCMProvider
+
+                fcm = FCMProvider.from_settings(
+                    settings, on_invalid_token=store.invalidate_push_token
+                )
+                providers[fcm.platform] = fcm
+            else:
+                log.info("FCM not configured; Android push delivery is disabled")
             scheduler = ProactiveScheduler(
-                store, {provider.platform: provider}, EngineProactiveGenerator(
+                store, providers, EngineProactiveGenerator(
                     cfg, data_root=settings.data_root,
                     memory_db_path=settings.memory_db_path,
                 ), lock_root=settings.data_root,

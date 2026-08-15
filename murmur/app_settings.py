@@ -36,6 +36,8 @@ class AppSettings:
     apns_team_id: str | None
     apns_topic: str
     apns_environment: str
+    fcm_project_id: str | None = None
+    fcm_service_account_path: Path | None = None
     max_image_bytes: int = 25 * 1024 * 1024
     max_body_bytes: int = 26 * 1024 * 1024
     max_json_body_bytes: int = 256 * 1024
@@ -74,6 +76,7 @@ class AppSettings:
         )
         root_override = os.getenv("MURMUR_APP_ATTEST_ROOT_CA")
         apns_path = os.getenv("MURMUR_APP_APNS_KEY_PATH")
+        fcm_account = os.getenv("MURMUR_APP_FCM_SERVICE_ACCOUNT_PATH")
         attest_mode = os.getenv("MURMUR_APP_ATTEST_MODE", "production").strip().lower()
         tz = getattr(cfg, "tz", None) or ZoneInfo(
             os.getenv("MURMUR_APP_TIMEZONE", "Asia/Shanghai")
@@ -95,6 +98,10 @@ class AppSettings:
             apns_team_id=os.getenv("MURMUR_APP_APNS_TEAM_ID") or team_id or None,
             apns_topic=os.getenv("MURMUR_APP_APNS_TOPIC", bundle_id),
             apns_environment=os.getenv("MURMUR_APP_APNS_ENVIRONMENT", attest_mode).lower(),
+            fcm_project_id=os.getenv("MURMUR_APP_FCM_PROJECT_ID") or None,
+            fcm_service_account_path=(
+                Path(fcm_account).expanduser() if fcm_account else None
+            ),
             max_image_bytes=int(os.getenv("MURMUR_APP_MAX_IMAGE_BYTES", 25 * 1024 * 1024)),
             max_body_bytes=int(os.getenv("MURMUR_APP_MAX_BODY_BYTES", 26 * 1024 * 1024)),
             max_json_body_bytes=int(os.getenv(
@@ -164,6 +171,22 @@ class AppSettings:
             raise RuntimeError("App image pixel limit must accept 48MP photos")
         if self.requests_per_minute < 1 or self.rate_limit_max_keys < 128:
             raise RuntimeError("invalid App API rate limiter settings")
+
+    @property
+    def fcm_configured(self) -> bool:
+        return bool(self.fcm_project_id and self.fcm_service_account_path)
+
+    def validate_fcm(self) -> None:
+        missing = [
+            name for name, value in (
+                ("MURMUR_APP_FCM_PROJECT_ID", self.fcm_project_id),
+                ("MURMUR_APP_FCM_SERVICE_ACCOUNT_PATH", self.fcm_service_account_path),
+            ) if not value
+        ]
+        if missing:
+            raise RuntimeError("FCM configuration missing: " + ", ".join(missing))
+        if not self.fcm_service_account_path or not self.fcm_service_account_path.is_file():
+            raise RuntimeError("FCM service account file does not exist")
 
     def validate_apns(self) -> None:
         missing = [

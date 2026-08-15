@@ -7,6 +7,9 @@ openclaw/
 *.p8
 *.p12
 *.mobileprovision
+# FCM service account JSON 里带 RSA 私钥，泄露等同于泄露 APNs 的 .p8
+*service-account*.json
+*firebase-adminsdk*.json
 xcuserdata/
 DerivedData/
 places.json
