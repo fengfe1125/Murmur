@@ -204,7 +204,10 @@ actor AppAttestAuthenticator: MurmurAuthenticator {
     }
 }
 
-#if DEBUG && targetEnvironment(simulator)
+// Debug builds on a device need this too, not only the Simulator: without
+// a paid team's Team ID there is no way to verify a real App Attest
+// assertion, so the shared-token path is the only way onto a phone.
+#if DEBUG
 enum DevelopmentIdentity {
     static func makeKeyID() -> String {
         "dev-\(UUID().uuidString.lowercased())"

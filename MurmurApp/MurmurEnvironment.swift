@@ -29,15 +29,19 @@ enum MurmurEnvironment {
 #endif
 
         let authenticator: any MurmurAuthenticator
-#if DEBUG && targetEnvironment(simulator)
+#if DEBUG
+        // The bypass covers debug builds on a real device too, not just the
+        // Simulator.  App Attest can only be verified against a paid team's
+        // Team ID, so without one a device could not enrol at all.  The blast
+        // radius stays at debug builds: the `#if !DEBUG` block above refuses
+        // to launch a release build that carries a token, and release still
+        // demands HTTPS.
         let bundleToken = Bundle.main.object(forInfoDictionaryKey: "MurmurDevelopmentToken") as? String
         if let token = environment["MURMUR_DEV_BYPASS_TOKEN"] ?? bundleToken, !token.isEmpty {
             authenticator = DevelopmentAuthenticator(token: token)
         } else {
             authenticator = AppAttestAuthenticator(environment: "development")
         }
-#elseif DEBUG
-        authenticator = AppAttestAuthenticator(environment: "development")
 #else
         authenticator = AppAttestAuthenticator(environment: "production")
 #endif
