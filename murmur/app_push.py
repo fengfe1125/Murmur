@@ -360,7 +360,9 @@ class ProactiveScheduler:
 
     def run_once(self, now: datetime | None = None) -> int:
         now = now or datetime.now(UTC)
-        self.store.expire_stale_proactive()
+        # Every other step of run_once takes the injected clock; expiry reading
+        # the wall clock instead made fixed-date tests rot after 24 hours.
+        self.store.expire_stale_proactive(now=now)
         self.deliver_pending(now)
         self.ensure_schedules(now)
         created = 0

@@ -1269,8 +1269,10 @@ class AppStore:
             "AND pd.active=1 AND pd.apns_token IS NOT NULL)"
         ).fetchall()]
 
-    def expire_stale_proactive(self, max_age: timedelta = timedelta(hours=24)) -> int:
-        cutoff = _iso(_now() - max_age)
+    def expire_stale_proactive(
+        self, max_age: timedelta = timedelta(hours=24), *, now: datetime | None = None
+    ) -> int:
+        cutoff = _iso((now or _now()) - max_age)
         with self._tx() as db:
             rows = db.execute(
                 "SELECT id,user_id FROM app_moments WHERE source='proactive' AND acked=0 "
