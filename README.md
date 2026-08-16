@@ -232,6 +232,18 @@ murmur web            # 打开 http://127.0.0.1:8765
   不是同一份记忆**，窗口合并了，记忆没有。这一点面板上写明了。
 - **所在 app / 正在用的模型 / 数据库位置**都在总览页。
 
+侧栏的「VPS 面板」（http://127.0.0.1:8765/vps ）是生产 VPS 的管理页：
+四个服务 + Caddy 的运行状态、负载 / 内存 / 磁盘、两个服务日志的尾巴，
+以及**自己创建邀请码**（别名、有效天数、是否不限次数；明文码只在创建的
+这一次响应里出现）。它通过本机的 gcloud / ssh 凭据在 VPS 上执行只读命令和
+`app-invite` CLI，**VPS 上没有任何新端口或新接口**。gcloud 实例默认就是
+现网那台（`MURMUR_VPS_GCLOUD_INSTANCE` / `MURMUR_VPS_ZONE` / `MURMUR_VPS_PROJECT`
+可改），普通 SSH 主机用 `murmur web --vps-ssh user@host`。
+`gcloud compute ssh` 每次调用要一分钟上下，所以启动时会用 `instances describe`
+解析出外网 IP，之后全部走直连 SSH（`~/.ssh/google_compute_engine`）。
+在 Windows 电脑上用同一套面板（双击 `.bat` 打开）：见
+[docs/win-vps-panel.md](docs/win-vps-panel.md)。
+
 看板支持手机窄屏：侧栏会收成顶部的联系人区，不会挤掉聊天和总览内容。
 
 只读：这个进程不发消息、不改记忆、不碰 `.env`。唯一写的就是额度快照那张表。
@@ -295,6 +307,7 @@ murmur/
   qq.py        QQ 测试通道
   web.py       只读看板：进程 / 端口 / 额度曲线 / 每人的聊天窗口和记忆
                （配 MURMUR_WEB_TOKEN 后支持开放访问）
+  vps_panel.py VPS 面板后端：经 gcloud/ssh 查服务状态、建邀请码
   webui/       看板的前端，单个 HTML，没有构建步骤
   cli.py       app-api / app-worker / 本地诊断 / 测试 Bot / web
 ```

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Murmur · VPS 面板</title>
+<link rel="icon" href="/mark.svg">
+<style>
+:root{
+  --bg:#0f1113; --panel:#16191c; --panel-2:#1c2024; --line:#262b30;
+  --ink:#e8e6e3; --ink-2:#a8a49f; --ink-3:#6f6b66;
+  --coral:#F2705C; --green:#5fbf8f; --amber:#e0a44a; --red:#e05a4a;
+  --radius:12px;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:light){
+  :root{
+    --bg:#f7f6f4; --panel:#fff; --panel-2:#f2f0ed; --line:#e3e0dc;
+    --ink:#1c1a18; --ink-2:#5f5b57; --ink-3:#94908b;
+  }
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB",
+       "Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.mono{font-family:var(--mono);font-size:12px}
+.dim{color:var(--ink-2)}
+.dimmer{color:var(--ink-3)}
+a{color:inherit}
+
+.wrap{max-width:860px;margin:0 auto;padding:20px 16px 60px}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+.brand img{width:26px;height:26px}
+.brand h1{font-size:15px;margin:0;font-weight:600}
+.brand .spacer{flex:1}
+.brand a.back{font-size:12px;color:var(--ink-2);text-decoration:none}
+.brand a.back:hover{color:var(--ink)}
+.tick{font-size:11px;color:var(--ink-3);font-family:var(--mono)}
+
+.card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:14px 16px;margin-bottom:14px;
+}
+.card h2{font-size:13px;margin:0 0 10px;font-weight:600;color:var(--ink-2)}
+.card h2 .right{float:right;font-weight:400}
+
+.svc{
+  display:inline-flex;align-items:center;gap:6px;padding:4px 10px;margin:0 6px 6px 0;
+  border-radius:999px;background:var(--panel-2);border:1px solid var(--line);font-size:12px;
+}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ink-3);flex:none}
+.dot.up{background:var(--green);box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 22%,transparent)}
+.dot.down{background:var(--red);box-shadow:0 0 0 3px color-mix(in srgb,var(--red) 22%,transparent)}
+
+.meters{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:8px}
+.meter .lab{font-size:11px;color:var(--ink-3);margin-bottom:3px}
+.meter .val{font-size:13px;font-family:var(--mono)}
+.bar{height:6px;border-radius:3px;background:var(--panel-2);margin-top:5px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--green);border-radius:3px}
+.bar i.warn{background:var(--amber)}
+.bar i.bad{background:var(--red)}
+
+pre.logs{
+  margin:8px 0 0;padding:10px;border-radius:8px;background:var(--panel-2);
+  font-family:var(--mono);font-size:11px;line-height:1.5;overflow-x:auto;
+  max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;
+  color:var(--ink-2);
+}
+details summary{cursor:pointer;font-size:12px;color:var(--ink-2)}
+details summary:hover{color:var(--ink)}
+
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
+th{color:var(--ink-3);font-weight:400;font-size:11px}
+td.mono{font-size:11px}
+
+form.invite{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:4px}
+input[type=text],input[type=number]{
+  background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
+  color:var(--ink);font:inherit;font-size:13px;padding:6px 10px;outline:none;
+}
+input[type=text]{flex:1;min-width:140px}
+input[type=number]{width:80px}
+input:focus{border-color:var(--coral)}
+label.chk{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--ink-2)}
+button{
+  background:var(--coral);border:0;border-radius:8px;color:#fff;font:inherit;
+  font-size:13px;padding:6px 14px;cursor:pointer;
+}
+button:disabled{opacity:.5;cursor:default}
+button.ghost{background:var(--panel-2);border:1px solid var(--line);color:var(--ink-2)}
+button.ghost:hover{color:var(--ink)}
+
+.code-out{
+  margin-top:10px;padding:12px;border-radius:8px;border:1px dashed var(--coral);
+  display:none;align-items:center;gap:10px;flex-wrap:wrap;
+}
+.code-out .code{font-family:var(--mono);font-size:16px;letter-spacing:.04em;color:var(--coral)}
+.hint{font-size:11px;color:var(--ink-3)}
+.err{color:var(--red);font-size:12px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">
+    <img src="/mark.svg" alt="">
+    <h1>Murmur · VPS 面板</h1>
+    <span class="tick" id="tick"></span>
+    <span class="spacer"></span>
+    <a class="back" href="/" id="back-link">← 看板</a>
+  </div>
+
+  <div class="card" id="svc-card">
+    <h2>服务 <span class="right dimmer mono" id="target"></span></h2>
+    <div id="svcs"><span class="dim">加载中…</span></div>
+    <div class="meters" id="meters"></div>
+    <div id="status-err" class="err"></div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>日志尾巴</summary>
+      <div id="logs"></div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>创建邀请码</h2>
+    <form class="invite" id="invite-form">
+      <input type="text" id="f-alias" placeholder="备注（选填，只给自己看）" maxlength="40">
+      <input type="number" id="f-days" value="7" min="1" max="365" title="有效天数">
+      <label class="chk"><input type="checkbox" id="f-reusable"> 不限兑换次数</label>
+      <button type="submit" id="f-submit">创建</button>
+    </form>
+    <div class="code-out" id="code-out">
+      <span class="code" id="code-text"></span>
+      <button type="button" class="ghost" id="copy-btn">复制</button>
+      <span class="hint">只显示这一次，数据库里不存明文。</span>
+    </div>
+    <div id="invite-err" class="err"></div>
+  </div>
+
+  <div class="card">
+    <h2>未使用的邀请码 <span class="right dimmer" id="invite-count"></span></h2>
+    <div id="invite-list"><span class="dim">加载中…</span></div>
+  </div>
+
+  <div class="card">
+    <h2>App 用户</h2>
+    <div id="user-list"><span class="dim">加载中…</span></div>
+  </div>
+</div>
+
+<script>
+const $ = (s,r=document)=>r.querySelector(s);
+const WEB_TOKEN = new URLSearchParams(location.search).get('token');
+function apiUrl(p){
+  const u = new URL(p, location.origin);
+  if (WEB_TOKEN) u.searchParams.set('token', WEB_TOKEN);
+  return u;
+}
+if (WEB_TOKEN) $('#back-link').href = '/?token=' + encodeURIComponent(WEB_TOKEN);
+
+async function api(p, opts){
+  const r = await fetch(apiUrl(p), opts);
+  if (r.status === 401) { location.reload(); return new Promise(()=>{}); }
+  return r.json();
+}
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function bar(pct){
+  const cls = pct >= 90 ? 'bad' : pct >= 70 ? 'warn' : '';
+  return `<div class="bar"><i class="${cls}" style="width:${Math.min(pct,100)}%"></i></div>`;
+}
+
+async function loadStatus(){
+  const d = await api('/api/vps/status');
+  $('#tick').textContent = new Date().toLocaleTimeString();
+  $('#target').textContent = d.target || '';
+  if (!d.ok){
+    $('#svcs').innerHTML = '<span class="dim">连不上 VPS</span>';
+    $('#meters').innerHTML = '';
+    $('#logs').innerHTML = '';
+    $('#status-err').textContent = d.detail || '';
+    return;
+  }
+  $('#status-err').textContent = '';
+  $('#svcs').innerHTML = Object.entries(d.services || {}).map(([name, st]) =>
+    `<span class="svc"><span class="dot ${st === 'active' ? 'up' : 'down'}"></span>` +
+    `${esc(name)} <span class="dimmer">${esc(st)}</span></span>`
+  ).join('') || '<span class="dim">没有服务信息</span>';
+
+  const meters = [];
+  if (d.mem){
+    const pct = Math.round(d.mem.used_mb / d.mem.total_mb * 100);
+    meters.push(`<div class="meter"><div class="lab">内存</div>` +
+      `<div class="val">${d.mem.used_mb} / ${d.mem.total_mb} MB（可用 ${d.mem.available_mb}）</div>${bar(pct)}</div>`);
+  }
+  if (d.disk){
+    meters.push(`<div class="meter"><div class="lab">磁盘 /</div>` +
+      `<div class="val">${d.disk.used} / ${d.disk.size}（${d.disk.use_percent}%）</div>${bar(d.disk.use_percent)}</div>`);
+  }
+  if (d.load){
+    meters.push(`<div class="meter"><div class="lab">负载 1/5/15 分钟</div>` +
+      `<div class="val">${d.load.join(' · ')}</div></div>`);
+  }
+  if (d.uptime){
+    meters.push(`<div class="meter"><div class="lab">已运行</div>` +
+      `<div class="val">${esc(d.uptime)}</div></div>`);
+  }
+  $('#meters').innerHTML = meters.join('');
+
+  $('#logs').innerHTML = Object.entries(d.logs || {}).map(([name, lines]) =>
+    `<div class="hint" style="margin-top:8px">${esc(name)}</div>` +
+    `<pre class="logs">${esc(lines.join('\n')) || '（空）'}</pre>`
+  ).join('');
+}
+
+async function loadInvites(){
+  const d = await api('/api/vps/invites');
+  if (!d.ok){
+    $('#invite-list').innerHTML = `<div class="err">${esc(d.detail || '读取失败')}</div>`;
+    $('#user-list').innerHTML = '';
+    return;
+  }
+  const inv = d.invites || [];
+  $('#invite-count').textContent = inv.length ? `${inv.length} 个` : '';
+  $('#invite-list').innerHTML = inv.length
+    ? `<table><tr><th>id</th><th>类型</th><th>备注</th><th>过期</th><th>用量</th></tr>` +
+      inv.map(i => `<tr><td class="mono">${esc(i.id)}</td><td>${esc(i.kind)}</td>` +
+        `<td>${esc(i.alias || '—')}</td><td class="mono">${esc(i.expiry)}</td>` +
+        `<td class="mono">${esc(i.usage)}</td></tr>`).join('') + '</table>'
+    : '<span class="dim">没有未使用的邀请码</span>';
+  const users = d.users || [];
+  $('#user-list').innerHTML = users.length
+    ? users.map(u => `<div class="mono">${esc(u)}</div>`).join('')
+    : '<span class="dim">还没有 App 用户</span>';
+}
+
+$('#invite-form').onsubmit = async e => {
+  e.preventDefault();
+  $('#invite-err').textContent = '';
+  $('#code-out').style.display = 'none';
+  const btn = $('#f-submit');
+  btn.disabled = true; btn.textContent = '创建中…';
+  try {
+    const d = await api('/api/vps/invite', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        alias: $('#f-alias').value || null,
+        days: parseInt($('#f-days').value, 10) || 7,
+        reusable: $('#f-reusable').checked,
+      }),
+    });
+    if (d.ok){
+      $('#code-text').textContent = d.code;
+      $('#code-out').style.display = 'flex';
+      loadInvites();
+    } else {
+      $('#invite-err').textContent = d.detail || '创建失败';
+    }
+  } finally {
+    btn.disabled = false; btn.textContent = '创建';
+  }
+};
+
+$('#copy-btn').onclick = async () => {
+  try { await navigator.clipboard.writeText($('#code-text').textContent);
+    $('#copy-btn').textContent = '已复制';
+    setTimeout(() => $('#copy-btn').textContent = '复制', 1500);
+  } catch { /* 剪贴板不可用时用户自己选中复制 */ }
+};
+
+loadStatus(); loadInvites();
+setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>

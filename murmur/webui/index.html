@@ -63,6 +63,7 @@ main{overflow-y:auto;min-width:0}
   background:none;border:0;border-radius:8px;color:var(--ink-2);font:inherit;font-size:13px;
   cursor:pointer;
 }
+a.navbtn{text-decoration:none}
 .navbtn:hover{background:var(--panel-2);color:var(--ink)}
 .navbtn.on{background:color-mix(in srgb,var(--coral) 14%,transparent);color:var(--coral)}
 
@@ -362,6 +363,7 @@ pre.log{
     <div class="pills" id="pills"></div>
     <button class="navbtn on" data-view="overview">总览</button>
     <button class="navbtn" data-view="quota">额度变化</button>
+    <a class="navbtn" id="vps-link" href="/vps">VPS 面板 ↗</a>
     <div class="seclabel"><span>聊天窗口</span><span id="pcount"></span></div>
     <div class="filters" id="filters"></div>
     <div class="search"><input id="person-search" type="search" placeholder="搜索昵称、ID 或最近消息" autocomplete="off"></div>
@@ -386,6 +388,7 @@ const PLAT_ORDER = ['wx','qq','dt','tg','?'];
 // 用 ?token= 打开远程看板时，后续 API 和照片请求也得带回 token；
 // 否则首页能开、页面里的 fetch 却全是 401。
 const WEB_TOKEN = new URLSearchParams(location.search).get('token');
+if (WEB_TOKEN) $('#vps-link').href = '/vps?token=' + encodeURIComponent(WEB_TOKEN);
 
 let state = {view:'overview', person:null, ctx:null, tab:'chat', platFilter:null, query:'', data:{}, sig:null};
 
@@ -1002,7 +1005,7 @@ async function refresh(){
   }
 }
 
-document.querySelectorAll('.navbtn').forEach(b=>{
+document.querySelectorAll('button.navbtn').forEach(b=>{
   b.onclick = ()=>{
     document.querySelectorAll('.navbtn').forEach(n=>n.classList.remove('on'));
     b.classList.add('on');

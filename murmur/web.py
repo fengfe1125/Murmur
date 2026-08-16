@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from . import vps_panel
 from .config import Config
 from .dossier import BLOCKS, REFRESH_EVERY, Dossier, _safe
 
@@ -745,8 +746,9 @@ def _dossier_full(cfg: Config, thread: str | None, conn: sqlite3.Connection,
 class Handler(BaseHTTPRequestHandler):
     server_version = "murmur-web"
 
-    def __init__(self, cfg: Config, *args, **kw):
+    def __init__(self, cfg: Config, vps: vps_panel.VpsConfig, *args, **kw):
         self.cfg = cfg
+        self.vps = vps
         super().__init__(*args, **kw)
 
     # 默认实现每个请求打一行到 stderr，前端 5 秒一轮询会把终端刷爆
@@ -792,6 +794,31 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("请求出错 %s", self.path)
             self._json({"error": f"{type(e).__name__}: {e}"}, 500)
 
+    def do_POST(self) -> None:  # noqa: N802
+        """唯一的写入口：在 VPS 上创建邀请码。鉴权与 GET 同一套。"""
+        if not self._authorized():
+            return self._send(401, b"unauthorized", "text/plain")
+        url = urlparse(self.path)
+        try:
+            if url.path != "/api/vps/invite":
+                return self._json({"error": "没有这个接口"}, 404)
+            try:
+                length = min(int(self.headers.get("Content-Length") or 0), 4096)
+                data = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                return self._json({"error": "body 不是合法 JSON"}, 400)
+            self._json(vps_panel.create_invite(
+                self.vps,
+                alias=data.get("alias"),
+                days=data.get("days", 7),
+                reusable=bool(data.get("reusable")),
+            ))
+        except BrokenPipeError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            log.exception("请求出错 %s", self.path)
+            self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+
     def _route(self, path: str, q: dict) -> None:
         if path in ("/", "/index.html"):
             html = (UI_DIR / "index.html").read_bytes()
@@ -800,6 +827,13 @@ class Handler(BaseHTTPRequestHandler):
             # webui 目录里放了一份拷贝，装成 wheel 之后 brand/ 是不在包里的
             return self._send(200, (UI_DIR / "mark.svg").read_bytes(),
                               "image/svg+xml")
+        if path == "/vps":
+            return self._send(200, (UI_DIR / "vps.html").read_bytes(),
+                              "text/html; charset=utf-8")
+        if path == "/api/vps/status":
+            return self._json(vps_panel.status(self.vps))
+        if path == "/api/vps/invites":
+            return self._json(vps_panel.list_invites(self.vps))
         if path == "/api/overview":
             return self._json(self.overview())
         if path == "/api/quota":
@@ -972,8 +1006,10 @@ def _poller(cfg: Config, stop: threading.Event) -> None:
         stop.wait(QUOTA_EVERY)
 
 
-def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False) -> None:
+def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
+        vps: vps_panel.VpsConfig | None = None) -> None:
     cfg = Config.load()
+    vps = vps or vps_panel.VpsConfig.resolve()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
@@ -982,9 +1018,10 @@ def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False) -
     threading.Thread(target=_poller, args=(cfg, stop),
                      name="murmur-quota", daemon=True).start()
 
-    httpd = ThreadingHTTPServer((host, port), partial(Handler, cfg))
+    httpd = ThreadingHTTPServer((host, port), partial(Handler, cfg, vps))
     url = f"http://{host}:{port}"
-    log.info("看板在 %s（只读；Ctrl-C 停）", url)
+    log.info("看板在 %s（只读；Ctrl-C 停）；VPS 面板 %s/vps → %s",
+             url, url, vps.describe())
     if open_browser:
         threading.Timer(0.6, lambda: __import__("webbrowser").open(url)).start()
     try:
