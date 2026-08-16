@@ -7,6 +7,14 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// Firebase wiring (T2.2) needs google-services.json from the Firebase console
+// (T2.3.1). The plugin is applied only when the file is present, so builds on
+// machines without Firebase credentials keep working; the FCM service degrades
+// to "no Firebase app" at runtime.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 // Local, gitignored overrides — the Android counterpart of `*.local.xcconfig`.
 // Recognised keys (all optional):
 //   murmur.apiBaseUrl   e.g. http://127.0.0.1:8766  (debug default)
@@ -85,6 +93,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.firebase.messaging)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)

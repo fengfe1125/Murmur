@@ -6,3 +6,6 @@ local.properties
 *.iml
 .cxx/
 .kotlin/
+# Firebase config is environment-specific; the build applies the
+# google-services plugin only when this file exists.
+google-services.json

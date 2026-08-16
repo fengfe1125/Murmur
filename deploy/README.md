@@ -70,6 +70,47 @@ sudo install -o murmur -g murmur -m 0600 AuthKey_KEYID.p8 \
 # .env: MURMUR_APP_APNS_KEY_PATH=/etc/murmur/AuthKey_KEYID.p8
 ```
 
+### 安卓客户端（Key Attestation + FCM，接入中）
+
+安卓正式客户端的认证与推送与 iOS 平级（契约见
+`deploy/android-server-plan.md`）。客户端 Release 构建已带 Keystore Key
+Attestation 认证器与 FCM 服务；服务端在 `MURMUR_APP_ANDROID_ENABLED=1` 后才会
+接受安卓注册，生产模式缺任何一项配置都会拒绝启动。上线前依次完成：
+
+1. **Firebase 项目**（T2.3.1）：在 Firebase 控制台建项目、启用 Cloud Messaging
+   API，把 `google-services.json` 放进 `android/app/`（该文件被 Git 忽略，构建
+   脚本检测到它才会应用 google-services 插件）；生成 FCM 服务账号 JSON，放到
+   `/etc/murmur/`（0600，murmur 可读）。
+2. **签名摘要**（T2.3.2）：算出 release 签名证书（若用 Play App Signing 则是
+   Play 上传证书）的 SHA-256，写进
+   `MURMUR_APP_ANDROID_SIGNING_DIGESTS`（逗号分隔）。不配或配错时，安卓注册会被
+   attestation 校验 fail closed 拒绝——这是设计，不是故障。
+3. **Google 硬件认证根证书**（T2.3.3）：从
+   https://developer.android.com/privacy-and-security/security-key-attestation
+   下载 Google Hardware Attestation Root CA，放到 `/etc/murmur/`，路径写入
+   `MURMUR_APP_ATTEST_GOOGLE_ROOT_CA`。吊销列表默认 fail closed（每小时查一次）。
+4. **`.env` 配置**：
+
+```dotenv
+MURMUR_APP_ANDROID_ENABLED=1
+MURMUR_APP_ANDROID_PACKAGE=com.sakura.murmur
+MURMUR_APP_ANDROID_SIGNING_DIGESTS=<release 签名证书 SHA-256，逗号分隔>
+MURMUR_APP_ATTEST_GOOGLE_ROOT_CA=/etc/murmur/attest_root.pem
+MURMUR_APP_FCM_PROJECT_ID=<Firebase 项目编号>
+MURMUR_APP_FCM_SERVICE_ACCOUNT_PATH=/etc/murmur/firebase-adminsdk.json
+```
+
+5. **重启并自检**（T2.3.4）：`systemctl restart murmur-app-worker murmur-app-api`
+   后两个服务都必须起来（配置不全会拒绝启动）；随后推送一条主动消息验证 FCM 到
+   达与失效 token 清理（T2.3.5：客户端上报假 token → 服务端收到
+   `UNREGISTERED` → `mark_push_dead` 不再重投）。
+6. 通知点按深链：服务端 FCM payload 已带
+   `android.notification.click_action=OPEN_MOMENT`，客户端 `MainActivity` 的
+   OPEN_MOMENT intent-filter 接收 `moment_id` 并拉取对应 moment。
+
+国内真机若 FCM 不可达，厂商推送通道与 Play Integrity 的立项结论在 Phase 3
+依据真机实测数据决定（`docs/android-adaptation-plan.md` §5.3 / §11）。
+
 安装并启动正式服务：
 
 ```bash

@@ -42,9 +42,9 @@ class OkHttpMurmurApiClientTest {
             MurmurIdentity("test-user", "test-device", "test-key")
 
         override suspend fun pendingEnrollmentKeyID(): String? = null
-        override suspend fun enrollmentKeyID(): String = "dev-x"
+        override suspend fun enrollmentKeyID(): String? = "dev-x"
 
-        override suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String): String =
+        override suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String?): String =
             "attestation"
 
         override suspend fun assertion(
@@ -283,9 +283,83 @@ class OkHttpMurmurApiClientTest {
         )
     }
 
+    /** Key Attestation's two-phase enrollment: the key (and its ID) only
+     *  exists after the attestation call, so the challenge request goes out
+     *  without a key_id and the enrollment POST carries the final one. */
+    private class TwoPhaseAuthenticator : MurmurAuthenticator {
+        override val environment: String = "production"
+        private var calls = 0
+
+        override fun publicHeaders(): Map<String, String> = emptyMap()
+        override suspend fun storedIdentity(): MurmurIdentity? = null
+        override suspend fun pendingEnrollmentKeyID(): String? = null
+        override suspend fun enrollmentKeyID(): String? = if (calls++ == 0) null else "attest-key"
+
+        override suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String?): String =
+            "chain-b64"
+
+        override suspend fun assertion(
+            challenge: AppAttestChallenge,
+            method: String,
+            path: String,
+            bodyDigest: ByteArray,
+            keyID: String,
+        ): String = "signature"
+
+        override suspend fun completeEnrollment(identity: MurmurIdentity) = Unit
+        override suspend fun discardPendingEnrollmentKey() = Unit
+        override suspend fun clearIdentity() = Unit
+    }
+
     @Test
-    fun sseHandshakeReleasesTheGateWhileTheStreamIsOpen() = runTest {
-        order.clear()
+    fun keyAttestationEnrollmentIsTwoPhaseOnTheWire() = runTest {
+        val challengeBodies = mutableListOf<String>()
+        val enrollmentBodies = mutableListOf<String>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val body = request.body.readUtf8()
+                return when (request.path) {
+                    "/v1/auth/challenges" -> {
+                        challengeBodies += body
+                        MockResponse()
+                            .setResponseCode(200)
+                            .setHeader("Content-Type", "application/json")
+                            .setBody("""{"challenge_id":"c-1","challenge":"Y2hhbGxlbmdl"}""")
+                    }
+                    "/v1/enrollments" -> {
+                        enrollmentBodies += body
+                        MockResponse()
+                            .setResponseCode(200)
+                            .setHeader("Content-Type", "application/json")
+                            .setBody("""{"user_id":"u-1","device_id":"d-1","key_id":"attest-key"}""")
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val client = OkHttpMurmurApiClient(
+            baseURL = server.url("/").toString(),
+            authenticator = TwoPhaseAuthenticator(),
+            cacheDir = File(System.getProperty("java.io.tmpdir")),
+        )
+
+        val identity = client.enroll(inviteCode = "invite-code", deviceName = "Pixel")
+
+        assertEquals("u-1", identity.userID)
+        // Phase 1: the challenge request has no key_id (the key is generated
+        // with the challenge inside the attestation call).
+        assertEquals("""{"purpose":"enrollment"}""", challengeBodies.single())
+        // Phase 2: the enrollment POST declares the attestation platform and
+        // the key ID that only came into existence in the previous phase.
+        val enrollment = kotlinx.serialization.json.Json.parseToJsonElement(enrollmentBodies.single())
+            as kotlinx.serialization.json.JsonObject
+        assertEquals("attest-key", enrollment["key_id"]?.let { it as kotlinx.serialization.json.JsonPrimitive }?.content)
+        assertEquals("android", enrollment["platform"]?.let { it as kotlinx.serialization.json.JsonPrimitive }?.content)
+        assertEquals("chain-b64", enrollment["attestation"]?.let { it as kotlinx.serialization.json.JsonPrimitive }?.content)
+    }
+
+    @Test
+    fun sseHandshakeReleasesTheGateWhileTheStreamIsOpen() = runTest {        order.clear()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 order += request.path ?: ""

@@ -1,10 +1,11 @@
 # 安卓适配详细任务清单
 
-> 状态：执行中——**M1 + M2 里程碑均已完成**（T0.1/T0.2/T1.1–T1.7：65 条 JVM
-> 单测 + 10 条 Compose UI 测试全绿，debug/release 构建通过，模拟器实装验收）。
-> 剩余：Phase 2（T2.1–T2.4）与 Phase 3。本文档把
-> `docs/android-adaptation-plan.md` 的 Phase 1–3 拆成可勾选、可验收的任务。
-> 每个任务写清「改哪、对照哪个 iOS 文件、怎么算完成」。
+> 状态：执行中——**M1 + M2 完成，M3 代码侧完成**（T0.1/T0.2/T1.1–T1.7、T2.1、
+> T2.2 客户端与服务端 payload、T2.3.6：76 条 JVM 单测 + 10 条 Compose UI 测试
+> 全绿，debug/release 构建通过，模拟器实装验收）。剩余：T2.3.1–2.3.5（需
+> Firebase 项目与服务账号）、T2.2.5 联调、T2.4 评审、Phase 3 全部。
+> 本文档把 `docs/android-adaptation-plan.md` 的 Phase 1–3 拆成可勾选、可验收的
+> 任务。每个任务写清「改哪、对照哪个 iOS 文件、怎么算完成」。
 > 服务端（P0–P4）已全部落地，本清单只含客户端与运维工作。
 > 总原则不变：**同产品、同约束，iOS 是基准，安卓不做功能加餐。**
 
@@ -163,40 +164,55 @@
 
 ### T2.1 Release 认证器（Key Attestation，契约见 `deploy/android-server-plan.md` 末尾）
 
-- [ ] T2.1.1 Keystore 生成 P-256：purpose SIGN、digest SHA-256、不可导入、
-  `setAttestationChallenge(client_data_hash)`、`setUserAuthenticationRequired(false)`。
-- [ ] T2.1.2 注册证明物：`KeyStore.getCertificateChain()` 编码为
-  **SEQUENCE OF OCTET STRING**（leaf 在前）放 `attestation` 字段。
-- [ ] T2.1.3 `key_id = base64url(sha256(SPKI))` 去 padding，与服务端不变量一致。
-- [ ] T2.1.4 每请求 assertion：裸 ECDSA/SHA-256 签
-  `sha256(challenge ‖ METHOD ‖ path ‖ sha256(body))`（client_data_hash）。
-- [ ] T2.1.5 `MurmurEnvironment.kt` release 分支换成
+- [x] T2.1.1 Keystore 生成 P-256：purpose SIGN、digest SHA-256、不可导入、
+  `setAttestationChallenge(client_data_hash)`、`setUserAuthenticationRequired(false)`
+  （`KeystoreAttestationKeyProvider.generateAttested`，注册 challenge =
+  sha256(原始 challenge 字节)，与服务端 `enroll()` 的 client_data_hash 一致）。
+- [x] T2.1.2 注册证明物：`KeyStore.getCertificateChain()` 编码为
+  **SEQUENCE OF OCTET STRING**（leaf 在前）放 `attestation` 字段
+  （`AttestationChain.encode`，字节级测试锁定）。
+- [x] T2.1.3 `key_id = base64url(sha256(SPKI))` 去 padding，与服务端不变量一致。
+- [x] T2.1.4 每请求 assertion：Keystore `SHA256withECDSA` 签
+  `sha256(challenge ‖ METHOD ‖ path ‖ sha256(body))`；Keystore 输出的 DER (r,s)
+  正是服务端 `cryptography` `key.verify` 期望的格式，无需转换。
+- [x] T2.1.5 `MurmurEnvironment.kt` release 分支换成
   `KeyAttestationAuthenticator`，删掉 `integrity_unsupported` 占位；
-  debug 仍走 Development。
-- [ ] T2.1.6 失败路径清理：`invalid_attestation` / `invite_invalid` /
-  `app_attest_invalid_key` 时丢弃 pending key（已有骨架，补 release 实现）。
-- [ ] T2.1.7 客户端侧纯函数单测：chain 编码、key_id、client_data_hash 字节序
-  （服务端 21 条测试是服务端视角，客户端要有自己的）。
+  debug 仍走 Development。注册流程改为两阶段：challenge 先于密钥存在
+  （密钥在 attestation 调用内用 challenge 生成），客户端在第二步取回 keyID。
+- [x] T2.1.6 失败路径清理：`invalid_attestation` / `invite_invalid` /
+  `app_attest_invalid_key` 时丢弃 pending key 并**删除 Keystore 条目**。
+- [x] T2.1.7 客户端侧纯函数单测：chain 编码、key_id、client_data_hash、
+  两阶段状态机（假密钥提供商）、两阶段注册 wire 测试。
+  顺带修了一个真 bug：`platform` 字段因有默认值被序列化省略，服务端会把
+  安卓注册记成 iOS——现在 `@EncodeDefault(ALWAYS)` 强制上线。
 - **验收**：锁定 bootloader 的真机 release 构建注册成功；模拟器（非硬件密钥）
   被服务端 fail closed 拒绝，报错信息可读。
+  状态：**代码与测试落地**；真机验收待真机（T3.2）。
 
 ### T2.2 FCM 推送
 
-- [ ] T2.2.1 `google-services.json` + firebase-messaging 依赖 + 默认通知渠道
-  （API 33+ 渠道必需）。
-- [ ] T2.2.2 `FirebaseMessagingService`：`onNewToken` 与启动时 token 变化 →
-  `updateDevice(pushToken = …)`；按 T1.5.2 三态决定传 token 还是 `null`。
-- [ ] T2.2.3 通知 payload：只认 `data.moment_id`，点击 → T1.3.3 深链拉取；
-  通知预览文案与服务端 `FCMProvider` 的 180 字约束一致（客户端不改服务端）。
-- [ ] T2.2.4 通知权限变化监听：允许→补传 token，拒绝→传 `null`。
+- [x] T2.2.1 `google-services.json` + firebase-messaging 依赖 + 默认通知渠道
+  （API 33+ 渠道必需）。**google-services 插件条件应用**：检测到
+  `android/app/google-services.json`（已加入 .gitignore）才 apply，无凭据的
+  机器照常构建；Firebase 初始化失败时优雅降级（模拟器实测：仅日志提示，不崩溃）。
+- [x] T2.2.2 `MurmurFirebaseMessagingService`：`onNewToken` → `MurmurPushBridge`
+  → 活动生命周期 `consumePending` → `updatePushRegistration`；按三态策略决定
+  传 token 还是 `null`（允许→token；拒绝/未决定→null）。
+- [x] T2.2.3 通知 payload：服务端 `FCMProvider` 增加
+  `android.notification.click_action=OPEN_MOMENT`（含测试断言）；
+  客户端 `MainActivity` 的 OPEN_MOMENT intent-filter 接收 `moment_id` 深链；
+  前台 `onMessageReceived` 直接用 `proactiveIntent` 拉起对应 moment。
+- [x] T2.2.4 通知权限变化监听：允许→补传 token，拒绝→传 `null`
+  （`shouldSyncToken` 策略 + `NotificationPermission` 三态）。
 - [ ] T2.2.5 模拟器（google_apis 镜像自带 Play services）FCM token 获取 +
-  服务端 `deliver_pending` 真实下发验收。
+  服务端 `deliver_pending` 真实下发验收。**阻塞：需要 Firebase 项目与
+  google-services.json（T2.3.1，管理员账号操作）。**
 - **验收**：模拟器收到主动消息推送，点击进入 App 展示对应 proactive moment。
 
 ### T2.3 VPS 生产配置
 
 - [ ] T2.3.1 Firebase 项目建立 + FCM 服务账号（`.gitignore` 已挡
-  `*service-account*.json`，注意别放错位置）。
+  `google-services.json` / `*service-account*.json`，注意别放错位置）。
 - [ ] T2.3.2 确定 release 签名证书 SHA-256 → `MURMUR_APP_ANDROID_SIGNING_DIGESTS`
   （Play App Signing 的话用 Play 上传证书的值，先确认清楚）。
 - [ ] T2.3.3 VPS 写入：`MURMUR_APP_ANDROID_ENABLED=1`、`MURMUR_APP_ANDROID_PACKAGE`、
@@ -206,8 +222,10 @@
   缺一即拒启）；重启 app-api / app-worker。
 - [ ] T2.3.5 失效 token 链路测试：上报一个假 FCM token → 服务端收到
   `UNREGISTERED` → `mark_push_dead` 不再重投。
-- [ ] T2.3.6 部署文档同步：`deploy/README.md` 补 Android 配置段。
+- [x] T2.3.6 部署文档同步：`deploy/README.md` 补 Android 配置段。
 - **验收**：VPS 上 iOS 零回归 + 安卓真机注册/推送全链路通。
+  状态：**代码侧全部就绪**；T2.3.1–2.3.5 需要 Firebase 项目与服务账号
+  （管理员账号），属于 Phase 3 前置的运维步骤。
 
 ### T2.4 评审项（不写代码，出结论）
 
@@ -234,8 +252,10 @@
 `murmur/app_lock.py` 无条件 `import fcntl`（→ `murmur app-api` / `app-worker`
 在 Windows 根本起不来，4 个测试文件直接挂）。修好才有本地基线：
 
-- [ ] W1 `app_lock.py` 平台分支：Windows 用 `msvcrt.locking` 或退化实现，
+- [x] W1 `app_lock.py` 平台分支：Windows 用 `msvcrt.locking` 或退化实现，
   POSIX 保持 `fcntl.flock`；行为语义（跨进程互斥）在 Linux 上不变。
+  状态：**已修**（Windows 上 app_api/app_push/app_worker 相关 7 个测试文件
+  现在可运行，服务端套件从 4/19 可运行恢复到 12/19）。
 - [ ] W2 测试脚本输出 UTF-8：脚本内 `sys.stdout.reconfigure(encoding="utf-8")`
   或文档统一要求 `PYTHONUTF8=1`（✓ 字符在 GBK 控制台炸了一堆脚本）。
 - [ ] W3 `test_env_sanitizer.py` 的 0o600 断言加平台分支（Windows 无此语义）。

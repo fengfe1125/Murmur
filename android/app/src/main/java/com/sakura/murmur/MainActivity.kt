@@ -38,6 +38,13 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        // A token the FCM service delivered while no activity was alive; the
+        // session model holds it until an identity exists (iOS parity).
+        MurmurPushBridge.consumePending(this, session)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIntent(intent)

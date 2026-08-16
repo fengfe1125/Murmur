@@ -39,7 +39,7 @@ class DevelopmentAuthenticatorTest {
         val store = InMemoryIdentityStore()
         val authenticator = DevelopmentAuthenticator("token", store)
 
-        val first = authenticator.enrollmentKeyID()
+        val first = authenticator.enrollmentKeyID() ?: error("expected a development key id")
         assertTrue(first.startsWith("dev-"))
         // A second call reuses the pending key instead of minting a new one.
         assertEquals(first, authenticator.enrollmentKeyID())

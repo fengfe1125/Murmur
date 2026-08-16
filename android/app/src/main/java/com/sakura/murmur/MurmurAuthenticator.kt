@@ -25,8 +25,15 @@ interface MurmurAuthenticator {
     fun publicHeaders(): Map<String, String>
     suspend fun storedIdentity(): MurmurIdentity?
     suspend fun pendingEnrollmentKeyID(): String?
-    suspend fun enrollmentKeyID(): String
-    suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String): String
+    /**
+     * The key ID this enrollment will claim. The development authenticator
+     * mints it on demand; the Key Attestation authenticator returns null until
+     * the key actually exists — the client generates the key inside
+     * [enrollmentAttestation] (the attestation challenge is baked in at key
+     * generation) and calls this again to learn the resulting ID.
+     */
+    suspend fun enrollmentKeyID(): String?
+    suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String?): String
     suspend fun assertion(
         challenge: AppAttestChallenge,
         method: String,
@@ -159,14 +166,14 @@ class DevelopmentAuthenticator(
 
     override suspend fun pendingEnrollmentKeyID(): String? = store.loadPendingKeyID()
 
-    override suspend fun enrollmentKeyID(): String {
+    override suspend fun enrollmentKeyID(): String? {
         store.loadPendingKeyID()?.let { if (it.startsWith("dev-")) return it }
         val keyID = "dev-${UUID.randomUUID().toString().lowercase()}"
         store.savePendingKeyID(keyID)
         return keyID
     }
 
-    override suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String): String =
+    override suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String?): String =
         Base64Url.encode("development:${challenge.challengeID}:$keyID".toByteArray(Charsets.UTF_8))
 
     override suspend fun assertion(

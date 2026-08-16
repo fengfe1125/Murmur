@@ -142,6 +142,11 @@ class FCMProviderTests(unittest.TestCase):
         self.assertEqual(body["message"]["notification"]["body"], "在干嘛")
         self.assertEqual(body["message"]["android"]["collapse_key"], "moment-7")
         self.assertEqual(body["message"]["android"]["priority"], "HIGH")
+        # The tap deep link: MainActivity's OPEN_MOMENT intent-filter receives
+        # the data payload (moment_id) as extras.
+        self.assertEqual(
+            body["message"]["android"]["notification"], {"click_action": "OPEN_MOMENT"}
+        )
 
     def test_oversized_preview_is_trimmed_under_the_fcm_limit(self):
         raw = FCMProvider.payload("proj", "t" * 300, "m" * 64, "长" * 4000)

@@ -165,6 +165,10 @@ class FCMProvider:
                 "android": {
                     "priority": "HIGH",
                     "collapse_key": moment_id[:64],
+                    # Tapping the tray notification opens MainActivity with the
+                    # data payload (moment_id) as extras — the client's deep
+                    # link (OPEN_MOMENT intent-filter) pulls that moment.
+                    "notification": {"click_action": "OPEN_MOMENT"},
                 },
             }}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             if len(body) <= 4096:

@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.DeserializationStrategy
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.serializer
@@ -82,11 +83,16 @@ class OkHttpMurmurApiClient(
         val keyID = authenticator.enrollmentKeyID()
         try {
             val challenge = challenge(purpose = "enrollment", keyID = keyID)
+            // Key Attestation generates the key inside this call (the
+            // attestation challenge is baked in at generation), so the key ID
+            // may only exist afterwards — ask again.
             val attestation = authenticator.enrollmentAttestation(challenge, keyID)
+            val finalKeyID = authenticator.enrollmentKeyID()
+                ?: throw MurmurFailure("attestation_failed", "无法生成设备安全密钥。", retryable = false)
             val payload = EnrollmentRequest(
                 challengeID = challenge.challengeID,
                 inviteCode = inviteCode,
-                keyID = keyID,
+                keyID = finalKeyID,
                 attestation = attestation,
                 deviceName = deviceName,
                 environment = authenticator.environment,
@@ -467,7 +473,9 @@ private data class EnrollmentRequest(
     // The server defaults a missing platform to "ios" (the shipped iOS client
     // predates the field).  An Android enrolment that stays silent would be
     // recorded as iOS: push-token validation and the per-request attestor are
-    // both chosen from the enrolled key's platform, so declare it here.
+    // both chosen from the enrolled key's platform, so this field MUST reach
+    // the wire even though it has a default value.
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS)
     val platform: String = "android",
 )
 
