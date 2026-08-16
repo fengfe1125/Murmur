@@ -88,6 +88,28 @@ struct MurmurFailure: Error, Equatable, Sendable {
     }
 }
 
+/// How fast Murmur's bubbles are allowed to land.
+///
+/// The server streams a whole reply the instant it is ready, which reads as a
+/// machine emptying a buffer.  Holding each bubble back by roughly the time it
+/// would take somebody to type it — measured from when the previous one landed,
+/// so real server latency counts towards the wait rather than adding to it — is
+/// what gives the rhythm a person's shape.
+struct MurmurBubblePacing: Sendable, Equatable {
+    var perCharacter: TimeInterval
+    var minimum: TimeInterval
+    var maximum: TimeInterval
+
+    static let human = MurmurBubblePacing(perCharacter: 0.075, minimum: 0.7, maximum: 2.8)
+    /// Tests and previews want the transcript, not the theatre.
+    static let instant = MurmurBubblePacing(perCharacter: 0, minimum: 0, maximum: 0)
+
+    func delay(for text: String) -> TimeInterval {
+        guard perCharacter > 0 else { return 0 }
+        return min(max(Double(text.count) * perCharacter, minimum), maximum)
+    }
+}
+
 struct PhotoAttachment: Identifiable, @unchecked Sendable {
     let id: UUID
     let originalURL: URL

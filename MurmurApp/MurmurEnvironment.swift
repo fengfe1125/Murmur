@@ -3,7 +3,7 @@ import Foundation
 enum MurmurEnvironment {
     @MainActor
     static func makeAPIClient() -> any MurmurAPIClient {
-#if DEBUG && targetEnvironment(simulator)
+#if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--murmur-ui-testing") {
             return UITestMurmurAPIClient()
         }
@@ -48,6 +48,26 @@ enum MurmurEnvironment {
         return URLSessionMurmurAPIClient(baseURL: baseURL, authenticator: authenticator)
     }
 
+    /// UI tests run against a persisted transcript, so without somewhere to put
+    /// it they inherit whatever the last test said.  Under the UI-testing flag
+    /// the history goes to a directory of its own that a second flag empties,
+    /// which lets one test still check that a moment survives a cold launch.
+    @MainActor
+    static func makeTranscriptStore() -> MurmurTranscriptStore {
+#if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--murmur-ui-testing") {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("murmur-ui-transcript", isDirectory: true)
+            if arguments.contains("--murmur-reset-transcript") {
+                try? FileManager.default.removeItem(at: directory)
+            }
+            return MurmurTranscriptStore(directory: directory)
+        }
+#endif
+        return MurmurTranscriptStore()
+    }
+
     private static var defaultBaseURL: String {
 #if DEBUG
         "http://127.0.0.1:8766"
@@ -85,20 +105,25 @@ private actor UnavailableMurmurAPIClient: MurmurAPIClient {
     }
 }
 
-#if DEBUG && targetEnvironment(simulator)
+#if DEBUG
 private actor UITestMurmurAPIClient: MurmurAPIClient {
     private let identity = MurmurIdentity(userID: "ui-user", deviceID: "ui-device", keyID: "ui-key")
+    /// Every moment needs its own id.  Handing the same one back twice gives
+    /// two replies the same message id, and the transcript's `ForEach` then
+    /// draws only the first of them.
+    private var moments = 0
 
     func storedIdentity() async throws -> MurmurIdentity? { identity }
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity { identity }
     func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String) async throws -> MomentReceipt {
-        .init(momentID: "ui-moment", status: "queued")
+        moments += 1
+        return .init(momentID: "ui-moment-\(moments)", status: "queued")
     }
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> {
         AsyncThrowingStream { continuation in
-            continuation.yield(.accepted(id: "1"))
-            continuation.yield(.bubble(id: "2", text: "这一刻，我收到了。"))
-            continuation.yield(.done(id: "3", move: nil, scene: nil))
+            continuation.yield(.accepted(id: "\(momentID)-1"))
+            continuation.yield(.bubble(id: "\(momentID)-2", text: "这一刻，我收到了。"))
+            continuation.yield(.done(id: "\(momentID)-3", move: nil, scene: nil))
             continuation.finish()
         }
     }

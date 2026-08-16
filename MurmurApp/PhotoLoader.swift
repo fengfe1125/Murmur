@@ -117,7 +117,9 @@ actor PhotoLoader {
         return destination
     }
 
-    private nonisolated static func downsample(url: URL, maximumPixels: CGFloat) throws -> UIImage {
+    /// Shared with the transcript, which reads the same files back at whatever
+    /// size the screen actually needs rather than decoding originals whole.
+    nonisolated static func downsample(url: URL, maximumPixels: CGFloat) throws -> UIImage {
         let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
         guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
             throw MurmurFailure(code: "invalid_image", message: "无法读取这张图片。", retryable: false)

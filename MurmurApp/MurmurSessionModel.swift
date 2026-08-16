@@ -24,16 +24,38 @@ final class MurmurSessionModel: ObservableObject {
     /// The scrollback the person reads.  Held here rather than derived from
     /// `bubbles`, which only ever describes the moment in flight.
     @Published private(set) var messages: [MurmurMessage] = []
+    /// Picking a photo runs on its own clock.  A photo can be chosen while
+    /// Murmur is still answering the previous message, so its progress cannot
+    /// live in `phase`, which describes the moment in flight.
+    @Published private(set) var isPreparingPhoto = false
+    /// True from the moment something is queued until the last reply lands.
+    /// The typing indicator reads this rather than `phase`, so choosing a photo
+    /// mid-answer does not make Murmur look like it stopped talking.
+    @Published private(set) var isAwaitingReply = false
 
     let transcriptStore: MurmurTranscriptStore
     private let api: any MurmurAPIClient
     private let photoLoader: PhotoLoader
     private let requestTimeoutSeconds: TimeInterval
     private let uploadTimeoutSeconds: TimeInterval
+    private let bubblePacing: MurmurBubblePacing
     /// Index of the outgoing message whose ticks the running moment drives.
     private var pendingMessageID: String?
-    private var operationTask: Task<Void, Never>?
+    /// Messages wait their turn rather than blocking the composer: a person can
+    /// type the next line while Murmur is still answering the last one, and the
+    /// server still sees one moment at a time.
+    private var queue: [Submission] = []
+    private var pumpTask: Task<Void, Never>?
+    private var pumpGeneration = 0
+    private var isRunning = false
     private var photoTask: Task<Void, Never>?
+    /// Bumped whenever the draft photo is replaced, removed or cancelled, so a
+    /// decode that finishes late knows it is no longer the one being waited on.
+    private var photoGeneration = 0
+    /// Copies of sent photos into transcript storage, keyed by message, so the
+    /// upload's cleanup can wait for the copy instead of racing it.
+    private var adoptTasks: [String: Task<Void, Never>] = [:]
+    private var lastBubbleAt: Date?
     private var lastSubmission: Submission?
     private var didBootstrap = false
     private var pendingAPNSToken: String?
@@ -47,13 +69,15 @@ final class MurmurSessionModel: ObservableObject {
         photoLoader: PhotoLoader = PhotoLoader(),
         requestTimeoutSeconds: TimeInterval = 45,
         uploadTimeoutSeconds: TimeInterval = 300,
-        transcriptStore: MurmurTranscriptStore = MurmurTranscriptStore()
+        transcriptStore: MurmurTranscriptStore = MurmurTranscriptStore(),
+        bubblePacing: MurmurBubblePacing = .human
     ) {
         self.api = api
         self.photoLoader = photoLoader
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.uploadTimeoutSeconds = uploadTimeoutSeconds
         self.transcriptStore = transcriptStore
+        self.bubblePacing = bubblePacing
     }
 
     // ---- Transcript ---------------------------------------------------------
@@ -66,6 +90,7 @@ final class MurmurSessionModel: ObservableObject {
     func clearTranscript() async {
         messages = []
         pendingMessageID = nil
+        adoptTasks = [:]
         await transcriptStore.clear()
     }
 
@@ -86,8 +111,12 @@ final class MurmurSessionModel: ObservableObject {
         persistTranscript()
     }
 
+    /// A reply already in flight is no reason to hold the next line back; only
+    /// a photo that has not finished decoding is, because sending then would
+    /// silently drop it.
     var canSubmit: Bool {
-        !phase.isBusy && (!draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draftPhoto != nil)
+        !isPreparingPhoto
+            && (!draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draftPhoto != nil)
     }
 
     var hasCurrentMoment: Bool {
@@ -162,23 +191,23 @@ final class MurmurSessionModel: ObservableObject {
     }
 
     func beginPhotoSelection() {
-        guard phase != .uploading && phase != .responding else { return }
         photoTask?.cancel()
+        photoGeneration += 1
+        isPreparingPhoto = true
         failure = nil
         phase = .preparingPhoto
     }
 
     func failPhotoSelection() {
-        guard phase == .preparingPhoto else { return }
+        guard isPreparingPhoto else { return }
+        photoGeneration += 1
+        isPreparingPhoto = false
         failure = .init(code: "photo_unavailable", message: "没有读取到这张图片。", retryable: false)
         phase = .error
     }
 
     func preparePhoto(at url: URL) {
-        guard phase != .uploading && phase != .responding else { return }
-        photoTask?.cancel()
-        phase = .preparingPhoto
-        failure = nil
+        let generation = beginPreparing()
         photoTask = Task { [weak self] in
             guard let self else { return }
             let loaded: PhotoAttachment
@@ -186,57 +215,46 @@ final class MurmurSessionModel: ObservableObject {
                 loaded = try await self.photoLoader.load(fileURL: url)
             } catch is CancellationError {
                 await self.photoLoader.discardFile(at: url)
-                self.phase = self.canSubmit ? .ready : .idle
+                self.finishPreparing(generation)
                 return
             } catch {
                 await self.photoLoader.discardFile(at: url)
-                self.failure = MurmurFailure.from(error)
-                self.phase = .error
+                self.failPreparing(generation, with: error)
                 return
             }
-            guard self.phase == .preparingPhoto, !Task.isCancelled else {
+            guard self.adopt(loaded, generation: generation) else {
                 await self.photoLoader.discard(loaded)
                 await self.photoLoader.discardFile(at: url)
                 return
             }
-            let old = self.draftPhoto
-            self.draftPhoto = loaded
-            self.phase = .ready
-            await self.photoLoader.discard(old)
         }
     }
 
     func prepareCapturedPhoto(_ image: UIImage) {
-        guard !phase.isBusy else { return }
-        photoTask?.cancel()
-        phase = .preparingPhoto
-        failure = nil
+        let generation = beginPreparing()
         photoTask = Task { [weak self] in
             guard let self else { return }
             let loaded: PhotoAttachment
             do {
                 loaded = try await self.photoLoader.load(capturedImage: image)
             } catch is CancellationError {
-                self.phase = self.canSubmit ? .ready : .idle
+                self.finishPreparing(generation)
                 return
             } catch {
-                self.failure = MurmurFailure.from(error)
-                self.phase = .error
+                self.failPreparing(generation, with: error)
                 return
             }
-            guard self.phase == .preparingPhoto, !Task.isCancelled else {
+            guard self.adopt(loaded, generation: generation) else {
                 await self.photoLoader.discard(loaded)
                 return
             }
-            let old = self.draftPhoto
-            self.draftPhoto = loaded
-            self.phase = .ready
-            await self.photoLoader.discard(old)
         }
     }
 
     func removeDraftPhoto() {
         photoTask?.cancel()
+        photoGeneration += 1
+        isPreparingPhoto = false
         let old = draftPhoto
         draftPhoto = nil
         if phase == .ready || phase == .error || phase == .preparingPhoto {
@@ -245,16 +263,77 @@ final class MurmurSessionModel: ObservableObject {
         Task { await photoLoader.discard(old) }
     }
 
+    private func beginPreparing() -> Int {
+        photoTask?.cancel()
+        photoGeneration += 1
+        isPreparingPhoto = true
+        phase = .preparingPhoto
+        failure = nil
+        return photoGeneration
+    }
+
+    /// Late results are dropped by generation rather than by reading `phase`:
+    /// a reply landing while the decode runs moves `phase` on, and a photo the
+    /// person is still waiting for must survive that.
+    private func adopt(_ photo: PhotoAttachment, generation: Int) -> Bool {
+        guard generation == photoGeneration, !Task.isCancelled else { return false }
+        let old = draftPhoto
+        draftPhoto = photo
+        isPreparingPhoto = false
+        phase = .ready
+        Task { [photoLoader] in await photoLoader.discard(old) }
+        return true
+    }
+
+    private func finishPreparing(_ generation: Int) {
+        guard generation == photoGeneration else { return }
+        isPreparingPhoto = false
+        phase = canSubmit ? .ready : .idle
+    }
+
+    private func failPreparing(_ generation: Int, with error: Error) {
+        guard generation == photoGeneration else { return }
+        isPreparingPhoto = false
+        failure = MurmurFailure.from(error)
+        phase = .error
+    }
+
     func submit() {
         guard canSubmit else { return }
         let note = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let photo = draftPhoto
+        // The outgoing turn joins the transcript before anything is queued, so
+        // the bubble is on screen the instant the send button is pressed.
+        let outgoing = MurmurMessage(
+            author: .you,
+            text: note,
+            sentAt: Date(),
+            delivery: .sending
+        )
         let submission = Submission(
+            messageID: outgoing.id,
             note: note.isEmpty ? nil : note,
-            photo: draftPhoto,
+            photo: photo,
             idempotencyKey: UUID().uuidString.lowercased(),
             replyToProactiveMomentID: note.isEmpty ? nil : proactiveMomentID
         )
-        begin(submission: submission, replacingCurrent: true)
+        draftText = ""
+        draftPhoto = nil
+        proactiveMomentID = nil
+        append(outgoing)
+        if let photo {
+            adoptTasks[outgoing.id] = Task { [transcriptStore] in
+                let name = await transcriptStore.adoptImage(at: photo.originalURL, id: outgoing.id)
+                await MainActor.run {
+                    guard let name,
+                          let index = self.messages.firstIndex(where: { $0.id == outgoing.id })
+                    else { return }
+                    self.messages[index].imageFile = name
+                    self.persistTranscript()
+                }
+            }
+        }
+        enqueue(submission)
     }
 
     func retry() {
@@ -263,19 +342,23 @@ final class MurmurSessionModel: ObservableObject {
         move = nil
         scene = nil
         currentMomentID = nil
-        begin(submission: lastSubmission, replacingCurrent: false)
+        // The failed turn is already in the transcript; it goes back to
+        // spinning rather than being said a second time.
+        pendingMessageID = lastSubmission.messageID
+        updatePending { $0.delivery = .sending }
+        enqueue(lastSubmission)
     }
 
     func cancelCurrentOperation() {
         photoTask?.cancel()
-        let cancelledTask = operationTask
+        photoGeneration += 1
         let original = lastSubmission?.photo
-        let abandonedDraft = phase == .preparingPhoto ? draftPhoto : nil
-        if phase == .preparingPhoto {
+        let abandonedDraft = isPreparingPhoto ? draftPhoto : nil
+        if isPreparingPhoto {
             draftPhoto = nil
+            isPreparingPhoto = false
         }
-        cancelledTask?.cancel()
-        operationTask = nil
+        cancelPump()
         lastSubmission = nil
         failure = nil
         phase = currentMomentID == nil && currentNote.isEmpty && currentPhoto == nil ? .idle : .ready
@@ -287,11 +370,13 @@ final class MurmurSessionModel: ObservableObject {
 
     func clearCurrent() {
         photoTask?.cancel()
-        operationTask?.cancel()
+        photoGeneration += 1
+        cancelPump()
         let oldDraft = draftPhoto
         let oldCurrent = currentPhoto
         draftText = ""
         draftPhoto = nil
+        isPreparingPhoto = false
         currentPhoto = nil
         currentNote = ""
         bubbles = []
@@ -306,6 +391,26 @@ final class MurmurSessionModel: ObservableObject {
             await photoLoader.discard(oldDraft)
             await photoLoader.discard(oldCurrent)
         }
+    }
+
+    /// Stops the line and tells the truth about the turns that never left: a
+    /// row stuck on a spinner forever is worse than a row marked failed.
+    private func cancelPump() {
+        pumpTask?.cancel()
+        pumpTask = nil
+        let stranded = Set(queue.map(\.messageID)).union(pendingMessageID.map { [$0] } ?? [])
+        for id in stranded { adoptTasks.removeValue(forKey: id) }
+        queue = []
+        isRunning = false
+        isAwaitingReply = false
+        pendingMessageID = nil
+        var changed = false
+        for index in messages.indices
+        where stranded.contains(messages[index].id) && messages[index].delivery == .sending {
+            messages[index].delivery = .failed
+            changed = true
+        }
+        if changed { persistTranscript() }
     }
 
     func handleBackground() {
@@ -405,58 +510,54 @@ final class MurmurSessionModel: ObservableObject {
         notificationPromptRequested = false
     }
 
-    private func begin(submission: Submission, replacingCurrent: Bool) {
-        guard !phase.isBusy else { return }
-        operationTask?.cancel()
-        failure = nil
-        if replacingCurrent {
-            let oldCurrent = currentPhoto
-            currentPhoto = submission.photo
-            currentNote = submission.note ?? ""
-            currentMomentID = nil
-            proactiveMomentID = nil
-            bubbles = []
-            move = nil
-            scene = nil
-            draftText = ""
-            draftPhoto = nil
-            if oldCurrent?.id != currentPhoto?.id {
-                Task { await photoLoader.discard(oldCurrent) }
-            }
-        }
-        lastSubmission = submission
+    private func enqueue(_ submission: Submission) {
+        queue.append(submission)
+        isAwaitingReply = true
         phase = .uploading
-
-        // The outgoing turn joins the transcript before the network is touched,
-        // so the bubble is on screen while it is still being delivered.
-        let outgoing = MurmurMessage(
-            author: .you,
-            text: submission.note ?? "",
-            sentAt: Date(),
-            delivery: .sending
-        )
-        pendingMessageID = outgoing.id
-        append(outgoing)
-        if let photo = submission.photo {
-            let id = outgoing.id
-            Task { [transcriptStore] in
-                let name = await transcriptStore.adoptImage(at: photo.originalURL, id: id)
-                await MainActor.run {
-                    guard let name,
-                          let index = self.messages.firstIndex(where: { $0.id == id })
-                    else { return }
-                    self.messages[index].imageFile = name
-                    self.persistTranscript()
-                }
-            }
+        failure = nil
+        guard pumpTask == nil else { return }
+        pumpGeneration += 1
+        let generation = pumpGeneration
+        pumpTask = Task { [weak self] in
+            await self?.pump(generation: generation)
         }
+    }
 
-        operationTask = Task { [weak self] in
-            await self?.run(submission)
+    /// One moment at a time, in the order they were said.  The server treats a
+    /// moment as a unit of attention, so overlapping them would have Murmur
+    /// answering two halves of a thought at once.
+    private func pump(generation: Int) async {
+        while !queue.isEmpty, !Task.isCancelled {
+            let next = queue.removeFirst()
+            activate(next)
+            isRunning = true
+            await run(next)
+            isRunning = false
+        }
+        guard pumpGeneration == generation else { return }
+        pumpTask = nil
+        isAwaitingReply = !queue.isEmpty
+    }
+
+    private func activate(_ submission: Submission) {
+        let oldCurrent = currentPhoto
+        currentPhoto = submission.photo
+        currentNote = submission.note ?? ""
+        currentMomentID = nil
+        bubbles = []
+        move = nil
+        scene = nil
+        lastSubmission = submission
+        pendingMessageID = submission.messageID
+        failure = nil
+        phase = .uploading
+        if oldCurrent?.id != currentPhoto?.id {
+            Task { [photoLoader] in await photoLoader.discard(oldCurrent) }
         }
     }
 
     private func run(_ submission: Submission) async {
+        lastBubbleAt = nil
         do {
             if let proactiveMomentID = submission.replyToProactiveMomentID,
                let reply = submission.note {
@@ -500,10 +601,15 @@ final class MurmurSessionModel: ObservableObject {
                         switch event {
                         case .accepted:
                             phase = .responding
+                            // The clock for the first bubble starts here, so a
+                            // server that thought for two seconds does not then
+                            // make the reader wait another two.
+                            lastBubbleAt = Date()
                             // Two ticks: Murmur has started composing.
                             updatePending { $0.delivery = .answered }
                         case let .bubble(_, text):
                             if !text.isEmpty {
+                                try await pace(for: text)
                                 let id = eventID ?? UUID().uuidString
                                 bubbles.append(.init(id: id, text: text))
                                 append(.init(
@@ -512,6 +618,7 @@ final class MurmurSessionModel: ObservableObject {
                                     text: text,
                                     momentID: receipt.momentID
                                 ))
+                                lastBubbleAt = Date()
                             }
                         case .quiet:
                             wasQuiet = true
@@ -534,7 +641,7 @@ final class MurmurSessionModel: ObservableObject {
                     try await Task.sleep(for: .milliseconds(350 * retries))
                 }
             }
-            await photoLoader.discard(submission.photo)
+            await discardAfterTranscriptCopy(submission)
             pendingMessageID = nil
             if !bubbles.isEmpty && !didRequestNotificationPrompt {
                 didRequestNotificationPrompt = true
@@ -548,7 +655,7 @@ final class MurmurSessionModel: ObservableObject {
             failure = MurmurFailure.from(error)
             requiresDeviceReconnect = failure?.requiresDeviceReconnect == true
             if failure?.retryable == false {
-                await photoLoader.discard(submission.photo)
+                await discardAfterTranscriptCopy(submission)
                 lastSubmission = nil
             }
             if failure?.requiresDeviceReconnect == true {
@@ -558,14 +665,29 @@ final class MurmurSessionModel: ObservableObject {
         }
     }
 
+    /// Holds a bubble back to roughly the time it would take to type it,
+    /// counting from when the previous one landed.
+    private func pace(for text: String) async throws {
+        let target = bubblePacing.delay(for: text)
+        guard target > 0 else { return }
+        let elapsed = lastBubbleAt.map { Date().timeIntervalSince($0) } ?? 0
+        let remaining = target - elapsed
+        guard remaining > 0 else { return }
+        try await Task.sleep(for: .seconds(remaining))
+    }
+
+    /// The upload's temporary file is also what the transcript copies from, so
+    /// deleting it before that copy lands would leave a photo message with no
+    /// photo in it.
+    private func discardAfterTranscriptCopy(_ submission: Submission) async {
+        await adoptTasks.removeValue(forKey: submission.messageID)?.value
+        await photoLoader.discard(submission.photo)
+    }
+
     private func refreshProactive(expectedMomentID: String?) async {
         do {
             guard let proactive = try await api.currentProactive() else { return }
             if let expectedMomentID, proactive.momentID != expectedMomentID { return }
-            operationTask?.cancel()
-            let oldCurrent = currentPhoto
-            currentPhoto = nil
-            currentNote = ""
             currentMomentID = proactive.momentID
             proactiveMomentID = proactive.momentID
             bubbles = proactive.resolvedBubbles.enumerated().map {
@@ -573,9 +695,22 @@ final class MurmurSessionModel: ObservableObject {
             }
             move = proactive.move
             scene = proactive.scene
-            phase = bubbles.isEmpty ? .quiet : .complete
+            // A message Murmur sent on its own belongs in the scrollback like
+            // any other; without this it only ever existed in the notification.
+            for bubble in bubbles where !messages.contains(where: { $0.id == bubble.id }) {
+                append(.init(
+                    id: bubble.id,
+                    author: .murmur,
+                    text: bubble.text,
+                    momentID: proactive.momentID
+                ))
+            }
+            // A send already on the wire keeps its own phase; a proactive
+            // message arriving must not make it look finished.
+            if !isRunning && queue.isEmpty {
+                phase = bubbles.isEmpty ? .quiet : .complete
+            }
             connection = .connected
-            await photoLoader.discard(oldCurrent)
             try await api.acknowledge(momentID: proactive.momentID, reply: nil)
         } catch {
             if expectedMomentID != nil {
@@ -628,6 +763,9 @@ final class MurmurSessionModel: ObservableObject {
 }
 
 private struct Submission: Sendable {
+    /// The transcript row this send owns, so a retry re-uses the bubble the
+    /// person already saw instead of saying the same thing twice.
+    let messageID: String
     let note: String?
     let photo: PhotoAttachment?
     let idempotencyKey: String

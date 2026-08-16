@@ -30,6 +30,53 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertTrue(cleared.isEmpty)
     }
 
+    func testAdoptedPhotoSurvivesASaveThatDoesNotNameItYet() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let source = try writeTestJPEG(size: CGSize(width: 200, height: 150), name: "adopted")
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        let adopted = await store.adoptImage(at: source, id: "m1")
+        let name = try XCTUnwrap(adopted)
+        // The reply lands first: the transcript is saved while the message
+        // still knows nothing about the photo copied in beside it.
+        await store.save([.init(id: "m1", author: .you, text: "看这个")])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.imageURL(for: name).path))
+
+        await store.save([.init(id: "m1", author: .you, text: "看这个", imageFile: name)])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.imageURL(for: name).path))
+
+        // Once nothing refers to it, it goes.
+        await store.save([.init(id: "m2", author: .you, text: "别的")])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.imageURL(for: name).path))
+    }
+
+    func testASentPhotoIsStillReadableAfterTheMomentCompletes() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let api = FakeMurmurAPIClient()
+        let model = MurmurSessionModel(api: api, transcriptStore: store, bubblePacing: .instant)
+        await model.bootstrap()
+        let source = try writeTestJPEG(size: CGSize(width: 400, height: 300), name: "sent-photo")
+
+        model.preparePhoto(at: source)
+        try await waitUntil { model.phase == .ready }
+        model.submit()
+        try await waitUntil { model.phase == .complete }
+        try await waitUntil { model.messages.first?.imageFile != nil }
+
+        // The whole point of keeping a copy: the picture is still there to be
+        // opened after the upload's temporary file has been cleaned up.
+        let name = try XCTUnwrap(model.messages.first?.imageFile)
+        let url = store.imageURL(for: name)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertNotNil(try? PhotoLoader.downsample(url: url, maximumPixels: 400))
+    }
+
     func testTranscriptKeepsOnlyTheMostRecentHistory() async throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -47,7 +94,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testColdBootstrapIsEmptyAndDoesNotFetchProactive() async throws {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
 
         await model.bootstrap()
 
@@ -60,7 +107,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testKeyboardAndButtonGateCannotCreateTwoMoments() async throws {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.draftText = "同一刻"
 
@@ -73,9 +120,167 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertEqual(model.bubbles.map(\.text), ["reply-1"])
     }
 
+    func testASecondLineCanBeSaidWhileMurmurIsStillAnsweringTheFirst() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let api = FakeMurmurAPIClient()
+        let model = MurmurSessionModel(
+            api: api,
+            transcriptStore: MurmurTranscriptStore(directory: directory),
+            bubblePacing: .instant
+        )
+        await model.bootstrap()
+
+        model.draftText = "第一句"
+        model.submit()
+        // The composer stays open while the first moment is still in flight.
+        XCTAssertTrue(model.isAwaitingReply)
+        model.draftText = "第二句"
+        XCTAssertTrue(model.canSubmit)
+        model.submit()
+
+        try await waitUntil { model.messages.count == 4 }
+        // Both lines are on screen the moment they are said; the replies come
+        // after, in the order the moments were queued.
+        XCTAssertEqual(model.messages.map(\.text), ["第一句", "第二句", "reply-1", "reply-2"])
+        XCTAssertEqual(model.messages[0].delivery, .answered)
+        XCTAssertEqual(model.messages[1].delivery, .answered)
+        // Queued, not overlapped: the server still sees one moment at a time.
+        let keys = await api.idempotencyKeys
+        XCTAssertEqual(keys.count, 2)
+        XCTAssertEqual(Set(keys).count, 2)
+        try await waitUntil { !model.isAwaitingReply }
+    }
+
+    func testAPhotoCanBeChosenWhileMurmurIsStillAnswering() async throws {
+        let api = FakeMurmurAPIClient(mode: .neverStreams)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
+        await model.bootstrap()
+        model.draftText = "先说一句"
+        model.submit()
+        try await waitUntil { model.phase == .responding }
+
+        let source = try writeTestJPEG(size: CGSize(width: 640, height: 480), name: "while-answering")
+        model.preparePhoto(at: source)
+        try await waitUntil { model.draftPhoto != nil }
+
+        // The reply landing must not throw away a photo still being decoded,
+        // and the photo must not silently cancel the reply.
+        XCTAssertFalse(model.isPreparingPhoto)
+        XCTAssertTrue(model.canSubmit)
+        XCTAssertTrue(model.isAwaitingReply)
+
+        model.clearCurrent()
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertTrue(murmurTemporaryFiles().isEmpty)
+    }
+
+    func testBubblesAreHeldBackToAHumanRhythm() async throws {
+        let api = FakeMurmurAPIClient(mode: .orderedBubbles)
+        let model = MurmurSessionModel(
+            api: api,
+            bubblePacing: MurmurBubblePacing(perCharacter: 0.02, minimum: 0.08, maximum: 0.2)
+        )
+        await model.bootstrap()
+        model.draftText = "两句"
+
+        let start = ContinuousClock.now
+        model.submit()
+        try await waitUntil { model.phase == .complete }
+        let elapsed = start.duration(to: ContinuousClock.now)
+
+        // The fake streams both bubbles at once; each still waits its turn.
+        XCTAssertGreaterThan(elapsed, .milliseconds(130))
+        XCTAssertEqual(model.bubbles.map(\.text), ["先这一句", "再这一句"])
+    }
+
+    func testPacingScalesWithLengthAndStaysWithinItsBounds() {
+        let pacing = MurmurBubblePacing.human
+        XCTAssertEqual(pacing.delay(for: "好"), pacing.minimum, accuracy: 0.0001)
+        XCTAssertEqual(
+            pacing.delay(for: String(repeating: "字", count: 20)),
+            20 * pacing.perCharacter,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(pacing.delay(for: String(repeating: "字", count: 500)), pacing.maximum, accuracy: 0.0001)
+        XCTAssertEqual(MurmurBubblePacing.instant.delay(for: "任何长度"), 0, accuracy: 0.0001)
+    }
+
+    func testRetryReusesTheFailedBubbleInsteadOfSayingItTwice() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let api = FakeMurmurAPIClient(mode: .terminalFailureThenSuccess)
+        let model = MurmurSessionModel(
+            api: api,
+            transcriptStore: MurmurTranscriptStore(directory: directory),
+            bubblePacing: .instant
+        )
+        await model.bootstrap()
+        model.draftText = "重发"
+
+        model.submit()
+        try await waitUntil { model.phase == .error }
+        XCTAssertEqual(model.messages.filter { $0.text == "重发" }.count, 1)
+        XCTAssertEqual(model.messages.first?.delivery, .failed)
+
+        model.retry()
+        try await waitUntil { model.phase == .complete }
+        XCTAssertEqual(model.messages.filter { $0.text == "重发" }.count, 1)
+        XCTAssertNotEqual(model.messages.first?.delivery, .failed)
+    }
+
+    func testProactiveMessageJoinsTheTranscript() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let api = FakeMurmurAPIClient(mode: .proactiveReply)
+        let model = MurmurSessionModel(
+            api: api,
+            transcriptStore: MurmurTranscriptStore(directory: directory),
+            bubblePacing: .instant
+        )
+        await model.bootstrap()
+
+        await model.handleNotification(momentID: "proactive-1")
+
+        // Without this the message only ever existed inside the notification.
+        XCTAssertEqual(model.messages.map(\.text), ["想到你了"])
+        XCTAssertEqual(model.messages.first?.author, .murmur)
+        // Arriving twice must not say it twice.
+        await model.handleNotification(momentID: "proactive-1")
+        XCTAssertEqual(model.messages.count, 1)
+    }
+
+    func testCancellingMarksStrandedSendsFailedRatherThanLeavingThemSpinning() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let api = FakeMurmurAPIClient(mode: .neverStreams)
+        let model = MurmurSessionModel(
+            api: api,
+            transcriptStore: MurmurTranscriptStore(directory: directory),
+            bubblePacing: .instant
+        )
+        await model.bootstrap()
+        model.draftText = "在路上"
+        model.submit()
+        model.draftText = "还在排队"
+        model.submit()
+        try await waitUntil { model.phase == .responding }
+
+        model.cancelCurrentOperation()
+
+        // The first one reached the server, so it keeps its tick; only the one
+        // that never left is called failed.
+        XCTAssertEqual(model.messages.map(\.delivery), [.sent, .failed])
+        XCTAssertFalse(model.isAwaitingReply)
+    }
+
     func testRetryReusesIdempotencyKeyAndDoesNotDuplicateBubbles() async throws {
         let api = FakeMurmurAPIClient(mode: .streamFailsOnce)
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.draftText = "重试"
 
@@ -92,7 +297,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testAutomaticSSEReconnectCarriesLastEventID() async throws {
         let api = FakeMurmurAPIClient(mode: .disconnectThenResume)
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.draftText = "继续"
 
@@ -106,7 +311,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testProcessingFailureRetryReusesOriginalIdempotencyKey() async throws {
         let api = FakeMurmurAPIClient(mode: .terminalFailureThenSuccess)
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.draftText = "重新处理"
 
@@ -123,7 +328,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testIdempotencyConflictIsNotRetryable() async throws {
         let api = FakeMurmurAPIClient(mode: .idempotencyConflict)
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.draftText = "不同内容"
 
@@ -139,7 +344,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testNewMomentReplacesRatherThanAppendsHistory() async throws {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.draftText = "第一刻"
         model.submit()
@@ -155,7 +360,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testTimeoutBecomesRetryableError() async throws {
         let api = FakeMurmurAPIClient(mode: .neverCreates)
-        let model = MurmurSessionModel(api: api, requestTimeoutSeconds: 0.05, uploadTimeoutSeconds: 0.05)
+        let model = MurmurSessionModel(api: api, requestTimeoutSeconds: 0.05, uploadTimeoutSeconds: 0.05, bubblePacing: .instant)
         await model.bootstrap()
         model.draftText = "超时"
 
@@ -171,7 +376,8 @@ final class MurmurSessionModelTests: XCTestCase {
         let model = MurmurSessionModel(
             api: api,
             requestTimeoutSeconds: 0.02,
-            uploadTimeoutSeconds: 0.25
+            uploadTimeoutSeconds: 0.25,
+            bubblePacing: .instant
         )
         await model.bootstrap()
         model.draftText = "慢速移动网络"
@@ -185,7 +391,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testCancelLeavesCurrentMomentWithoutSubmittingAgain() async throws {
         let api = FakeMurmurAPIClient(mode: .neverStreams)
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.draftText = "取消"
         model.submit()
@@ -200,7 +406,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testRemovingCurrentDeviceReturnsToEnrollment() async throws {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         await model.refreshDevices()
         let current = try XCTUnwrap(model.devices.first { $0.id == "test-device" })
@@ -215,7 +421,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testUnknownAttestationKeyOffersExplicitLocalReconnect() async throws {
         let api = FakeMurmurAPIClient(mode: .attestationKeyUnknown)
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
 
         await model.bootstrap()
 
@@ -231,7 +437,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testNotificationReplyAcknowledgesProactiveAndCreatesNewMoment() async throws {
         let api = FakeMurmurAPIClient(mode: .proactiveReply)
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         await model.handleNotification(momentID: "proactive-1")
         model.draftText = "我看见了"
@@ -259,7 +465,7 @@ final class MurmurSessionModelTests: XCTestCase {
         }
         try XCTUnwrap(image.jpegData(compressionQuality: 0.8)).write(to: source)
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
 
         model.preparePhoto(at: source)
@@ -274,7 +480,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testBootstrapLoadsServerPreferences() async throws {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         XCTAssertEqual(model.preferences.dailyFrequency, 2)
         XCTAssertEqual(model.preferences.quietStart, "21:00")
@@ -282,7 +488,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testStateMachineWalksIdleToComplete() async throws {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         XCTAssertEqual(model.phase, .idle)
         model.beginPhotoSelection()
@@ -299,7 +505,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testRemovingPhotoDuringPrepareLeavesIdle() async {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.beginPhotoSelection()
         XCTAssertEqual(model.phase, .preparingPhoto)
@@ -311,7 +517,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testPhotoSelectionFailureIsNotRetryable() async {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.beginPhotoSelection()
         model.failPhotoSelection()
@@ -323,7 +529,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testSSEPreservesBubbleOrder() async throws {
         let api = FakeMurmurAPIClient(mode: .orderedBubbles)
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.draftText = "两句"
         model.submit()
@@ -371,7 +577,7 @@ final class MurmurSessionModelTests: XCTestCase {
     func testCancelDuringPhotoPrepareDiscardsFileAndIgnoresLateResult() async throws {
         let source = try writeTestJPEG(size: CGSize(width: 1_200, height: 900), name: "cancel-prepare")
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         model.preparePhoto(at: source)
         XCTAssertEqual(model.phase, .preparingPhoto)
@@ -386,7 +592,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testPreparingPhotoPhaseIsEnteredWithinOneHundredMilliseconds() async {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         let start = ContinuousClock.now
         model.beginPhotoSelection()
@@ -397,7 +603,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testPreparePhotoDoesNotBlockBeforeBackgroundDecodeFinishes() async throws {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         let source = try writeTestJPEG(size: CGSize(width: 2_400, height: 1_800), name: "nonblocking-prepare")
         let start = ContinuousClock.now
@@ -410,7 +616,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
     func testThirtyCompletedMomentsLeaveNoHistoryOrTemporaryFiles() async throws {
         let api = FakeMurmurAPIClient()
-        let model = MurmurSessionModel(api: api)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
         for index in 1...30 {
             let source = try writeTestJPEG(size: CGSize(width: 64, height: 64), name: "moment-\(index)")

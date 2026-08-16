@@ -60,6 +60,12 @@ actor MurmurTranscriptStore {
     private let directory: URL
     private let fileURL: URL
     private let imageDirectory: URL
+    /// Photos copied in but not yet named by any saved message.  A send saves
+    /// the transcript at least twice — once when the line appears, again when
+    /// the reply lands — and the copy finishes somewhere in between.  Without
+    /// this, the save in the middle prunes the photo it has not been told
+    /// about, and the message ends up pointing at a file that no longer exists.
+    private var pendingAdoptions: Set<String> = []
 
     init(directory: URL? = nil) {
         let base = directory ?? FileManager.default
@@ -101,7 +107,10 @@ actor MurmurTranscriptStore {
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(Array(trimmed)) else { return }
         try? data.write(to: fileURL, options: [.atomic, .completeFileProtection])
-        pruneImages(keeping: Set(trimmed.compactMap(\.imageFile)))
+        let referenced = Set(trimmed.compactMap(\.imageFile))
+        pruneImages(keeping: referenced.union(pendingAdoptions))
+        // Anything this snapshot names is durable now and no longer pending.
+        pendingAdoptions.subtract(referenced)
     }
 
     /// Copies a picked photo out of the temporary directory, which the photo
@@ -116,6 +125,7 @@ actor MurmurTranscriptStore {
             try? FileManager.default.setAttributes(
                 [.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path
             )
+            pendingAdoptions.insert(name)
             return name
         } catch {
             return nil
@@ -136,6 +146,7 @@ actor MurmurTranscriptStore {
     }
 
     func clear() {
+        pendingAdoptions = []
         try? FileManager.default.removeItem(at: fileURL)
         try? FileManager.default.removeItem(at: imageDirectory)
     }

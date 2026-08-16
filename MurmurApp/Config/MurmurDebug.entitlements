@@ -1,10 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Deliberately empty.
+
+  A free personal team cannot provision Push Notifications or App Attest, so
+  declaring either makes signing fail outright and no debug build reaches a
+  phone.  Debug does not need them: the shared development token stands in for
+  App Attest, and push is not part of on-device testing.
+
+  MurmurRelease.entitlements still declares both for the production build.
+-->
 <plist version="1.0">
-<dict>
-	<key>aps-environment</key>
-	<string>development</string>
-	<key>com.apple.developer.devicecheck.appattest-environment</key>
-	<string>development</string>
-</dict>
+<dict/>
 </plist>

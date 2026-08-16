@@ -9,7 +9,10 @@ struct MurmurApp: App {
     @StateObject private var notifications: MurmurNotificationBridge
 
     init() {
-        _session = StateObject(wrappedValue: MurmurSessionModel(api: MurmurEnvironment.makeAPIClient()))
+        _session = StateObject(wrappedValue: MurmurSessionModel(
+            api: MurmurEnvironment.makeAPIClient(),
+            transcriptStore: MurmurEnvironment.makeTranscriptStore()
+        ))
         _notifications = StateObject(wrappedValue: .shared)
     }
 
@@ -144,6 +147,19 @@ final class MurmurNotificationBridge: ObservableObject {
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
         UIApplication.shared.registerForRemoteNotifications()
         await refreshAuthorizationStatus()
+    }
+
+    /// APNs answers through the app delegate whenever it feels like it, so a
+    /// caller that wants to register the token right now has to wait for it
+    /// rather than read a `nil` and conclude push is broken.
+    func tokenAfterRegistering(timeout: Duration = .seconds(10)) async -> String? {
+        if let apnsToken { return apnsToken }
+        UIApplication.shared.registerForRemoteNotifications()
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while apnsToken == nil, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(120))
+        }
+        return apnsToken
     }
 }
 

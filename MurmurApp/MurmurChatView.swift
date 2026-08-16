@@ -55,6 +55,10 @@ enum MurmurTheme {
     /// One diameter for every standalone icon control, so the chrome reads
     /// as one family: the toolbar mark, the gear, add-photo and send.
     static let disc: CGFloat = 36
+    /// The free-standing discs at the top of the screen.  They carry their own
+    /// background, so the drawn circle and the tap target are the same box and
+    /// it has to clear 44pt on its own.
+    static let floatingDisc: CGFloat = 44
     static let pageInset: CGFloat = 20
     static let contentWidth: CGFloat = 1_080
     static let corner: CGFloat = 18
@@ -73,9 +77,24 @@ struct MurmurChatView: View {
     @EnvironmentObject private var notifications: MurmurNotificationBridge
     @State private var showSettings = false
     @State private var showCamera = false
+    @State private var topChromeHeight: CGFloat = 0
+    @State private var topFadeHeight: CGFloat = 0
+    /// Ties the settings sheet to the gear it comes from.  See the transition
+    /// on the sheet below.
+    @Namespace private var settingsZoom
 
     var body: some View {
-        NavigationStack {
+        // The chrome floats: the conversation owns the whole screen and the two
+        // discs sit on top of it, rather than a band that pushes the chat down.
+        // `safeAreaPadding` is what keeps that honest — the content is inset by
+        // exactly the height of the discs, so at rest nothing is behind them,
+        // and scrolling passes the conversation under two small circles instead
+        // of under a full-width slab.
+        // The VStack is load-bearing: left to itself a ScrollView at the root
+        // of the scene draws all the way up behind the status bar, and the
+        // conversation ends up tangled in the clock.  Wrapped, its frame stops
+        // at the safe area, and the discs float inside that frame.
+        VStack(spacing: 0) {
             Group {
                 if model.connection == .checking {
                     ConnectionLoadingView()
@@ -87,67 +106,209 @@ struct MurmurChatView: View {
                     MomentWorkbench(model: model, showCamera: $showCamera)
                 }
             }
-            .background(MurmurTheme.paper.ignoresSafeArea())
-            .toolbarBackground(MurmurTheme.paper, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    // Just the mark: a bare toolbar item lets the system glass
-                    // background stay a circle concentric with it.  An adjacent
-                    // Text here collapses to zero width and leaves the HStack's
-                    // trailing spacing behind, pushing the mark off-centre.
-                    MurmurMark(size: 32)
-                }
-                if model.identity != nil {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        HStack(spacing: 8) {
-                            // "已连接" is the normal case and just adds noise;
-                            // a broken connection still has to be visible.
-                            if model.connection != .connected {
-                                Text(model.connection.label)
-                                    .font(MurmurTheme.body(.caption2, weight: .medium))
-                                    .foregroundStyle(connectionCaptionColor)
-                            }
-                            Button {
-                                showSettings = true
-                            } label: {
-                                // Same 32pt content box as MurmurMark, so the
-                                // system glass wraps both toolbar items into
-                                // circles of one diameter instead of a circle
-                                // beside a wider capsule.
-                                Image(systemName: "gearshape")
-                                    .font(.system(size: 18, weight: .regular))
-                                    .frame(width: 32, height: 32)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(MurmurPressStyle())
-                            .foregroundStyle(MurmurTheme.ink)
-                            .accessibilityLabel("设置，\(model.connection.label)")
-                            .accessibilityIdentifier("settings-button")
-                        }
-                    }
-                }
-            }
-            .sheet(isPresented: $showSettings) {
-                MurmurSettingsView(model: model)
-                    .environmentObject(notifications)
-            }
-            .sheet(isPresented: $showCamera) {
-                CameraPicker(
-                    onCaptureFile: { model.preparePhoto(at: $0) },
-                    onCaptureImage: { model.prepareCapturedPhoto($0) }
+            .safeAreaPadding(.top, topChromeHeight)
+        }
+        // A scroll view draws all the way up behind the status bar whatever
+        // frame it is given, and a bubble tangled in the clock is worse than
+        // either problem this is trying to solve.  Fading is the way to keep
+        // the conversation full-height without laying anything over it: the
+        // text dissolves as it passes the discs instead of being cut by a bar.
+        .mask(alignment: .top) {
+            VStack(spacing: 0) {
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .clear, location: 0.42),
+                        .init(color: .black, location: 1)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
                 )
-                .ignoresSafeArea()
+                .frame(height: max(topFadeHeight, 1))
+                Rectangle().fill(.black)
             }
+            .ignoresSafeArea()
+        }
+        .overlay(alignment: .top) {
+            MurmurTopChrome(
+                connection: model.connection,
+                showsSettings: model.identity != nil,
+                settingsZoom: settingsZoom,
+                onSettings: { showSettings = true }
+            )
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                topChromeHeight = frame.height
+                // Where the discs end in the window is where the chat becomes
+                // fully legible again.
+                topFadeHeight = frame.maxY
+            }
+        }
+        .background(MurmurTheme.paper.ignoresSafeArea())
+        // The gear grows under the finger exactly as the mark does — measured
+        // at the same 1.36× — and then nobody sees it, because presenting a
+        // sheet scales the whole screen *down* behind it in the same breath.
+        // The press was not weaker; it was overrun.  Zooming the sheet out of
+        // the gear itself is what lets it finish: the disc keeps growing, into
+        // the sheet, instead of being shrunk away mid-spring.
+        .sheet(isPresented: $showSettings) {
+            MurmurSettingsView(model: model)
+                .environmentObject(notifications)
+                .navigationTransition(.zoom(sourceID: Self.settingsSource, in: settingsZoom))
+        }
+        .sheet(isPresented: $showCamera) {
+            CameraPicker(
+                onCaptureFile: { model.preparePhoto(at: $0) },
+                onCaptureImage: { model.prepareCapturedPhoto($0) }
+            )
+            .ignoresSafeArea()
         }
         .tint(MurmurTheme.olive)
     }
 
+    fileprivate static let settingsSource = "murmur-settings-disc"
+}
+
+/// Two independent discs floating over the transcript: the mark and the gear.
+/// Nothing behind them is painted, so the only thing between the reader and
+/// the conversation is the 44pt of each disc.
+private struct MurmurTopChrome: View {
+    let connection: MurmurConnectionState
+    let showsSettings: Bool
+    let settingsZoom: Namespace.ID
+    let onSettings: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // No action of its own — the mark answers a press the way the
+            // gear does, and that is all.
+            Button {} label: {
+                MurmurFloatingDisc { MurmurMark(size: 38) }
+            }
+            .murmurDiscButtonStyle()
+            .accessibilityLabel("Murmur")
+            Spacer(minLength: 0)
+            // "已连接" is the normal case and just adds noise; a broken
+            // connection still has to be visible.
+            if connection != .connected {
+                Text(connection.label)
+                    .font(MurmurTheme.body(.caption2, weight: .medium))
+                    .foregroundStyle(connectionCaptionColor)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(MurmurTheme.raisedPaper, in: Capsule())
+                    .overlay { Capsule().stroke(MurmurTheme.rule, lineWidth: 1) }
+            }
+            if showsSettings {
+                Button(action: onSettings) {
+                    MurmurFloatingDisc {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 23, weight: .regular))
+                            .foregroundStyle(MurmurTheme.ink)
+                    }
+                }
+                .murmurDiscButtonStyle()
+                // The disc the settings sheet grows out of, and shrinks back
+                // into.  On the whole button, so the sheet leaves from the
+                // same 44pt circle the finger pressed.
+                .matchedTransitionSource(id: MurmurChatView.settingsSource, in: settingsZoom)
+                .accessibilityLabel("设置，\(connection.label)")
+                .accessibilityIdentifier("settings-button")
+            }
+        }
+        .frame(maxWidth: MurmurTheme.contentWidth)
+        .padding(.horizontal, MurmurTheme.pageInset)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity)
+    }
+
     private var connectionCaptionColor: Color {
-        switch model.connection {
+        switch connection {
         case .connected, .checking: MurmurTheme.secondaryInk
         case .needsEnrollment, .offline: MurmurTheme.coral
         }
     }
+}
+
+/// Which build this device is actually running.
+///
+/// The app is side-loaded, and `CFBundleVersion` never moves between builds, so
+/// there is otherwise no way to tell a fresh install from a stale one — the
+/// question "did the update land" cannot be answered by looking at the screen.
+/// The executable's own modification date is the build's timestamp.
+enum MurmurBuild {
+    static let summary: String = {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "—"
+        let build = info?["CFBundleVersion"] as? String ?? "—"
+        return "\(version) (\(build)) · \(stamp)"
+    }()
+
+    private static var stamp: String {
+        guard let url = Bundle.main.executableURL,
+              let date = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                  .contentModificationDate
+        else { return "构建时间未知" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "MM-dd HH:mm"
+        return formatter.string(from: date)
+    }
+}
+
+/// A floating 44pt control: the whole disc is both the drawn shape and the
+/// tap target, which is the part a navigation bar would not give up.
+private struct MurmurDisc<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .frame(width: MurmurTheme.floatingDisc, height: MurmurTheme.floatingDisc)
+            .background(MurmurTheme.raisedPaper, in: Circle())
+            .overlay { Circle().strokeBorder(MurmurTheme.rule, lineWidth: 1) }
+            .shadow(color: MurmurTheme.ink.opacity(0.08), radius: 6, y: 2)
+            .contentShape(Circle())
+    }
+}
+
+/// The face of a floating disc.  On iOS 26 the system's glass draws the
+/// disc — applied as an effect on the exact 44pt circle, because the glass
+/// *button style* sizes its capsule to its own metrics and dwarfs the icon
+/// inside — and before that the drawn paper disc does it.
+private struct MurmurFloatingDisc<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        if #available(iOS 26.0, *) {
+            content
+                .frame(width: MurmurTheme.floatingDisc, height: MurmurTheme.floatingDisc)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Circle())
+        } else {
+            MurmurDisc { content }
+        }
+    }
+}
+
+extension View {
+    /// The floating discs' press behaviour.  On iOS 26 the interactive glass
+    /// supplies all of it — the finger's light, the grow, the spring home —
+    /// so the button itself keeps quiet and lets it.  Before that, the
+    /// plain press style is all there is.
+    @ViewBuilder
+    fileprivate func murmurDiscButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(MurmurQuietStyle())
+        } else {
+            self.buttonStyle(MurmurPressStyle())
+        }
+    }
+}
+
+/// A button with no opinions: the interactive glass supplies all of the
+/// press feedback, and a second one from the style would double it.
+private struct MurmurQuietStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View { configuration.label }
 }
 
 private struct DeviceReconnectView: View {
@@ -290,35 +451,73 @@ private struct MomentWorkbench: View {
     @ObservedObject var model: MurmurSessionModel
     @Binding var showCamera: Bool
     @State private var showPhotoSource = false
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @State private var openPhoto: MurmurPhotoPreview?
+    /// Bumped whenever the field takes focus.  The keyboard notification alone
+    /// is not enough: tapping a field that is already first responder raises no
+    /// notification at all, and that is exactly when the transcript was left
+    /// sitting behind the keyboard.
+    @State private var focusPulse = 0
+    /// The picker is presented from here rather than from the button that asks
+    /// for it.  That button lives under the add-photo menu, which is being torn
+    /// down in the same turn the picker is asked for, and a presentation
+    /// started from a view on its way out never appears.
+    @State private var showLibrary = false
+    @State private var selectedItem: PhotosPickerItem?
+    /// The composer's focus lives up here, where the conversation can reach it.
+    ///
+    /// It used to be private to the composer, and a tap on the conversation had
+    /// to travel down as a counter the composer watched.  That round trip cost a
+    /// whole update pass, and the deferred `onChange` it woke landed on whatever
+    /// pass came next — which, when the reader tapped the field again, was the
+    /// pass that had just taken focus.  The keyboard was dropped before it had
+    /// risen: the recorder caught `tapped field` and then a bare `DidHide`, with
+    /// the composer never leaving its resting position.  One piece of shared
+    /// focus state has no such gap.
+    @FocusState private var composerFocused: Bool
+    /// The keyboard, on its own clock.  See `MurmurKeyboardInset`.
+    @ObservedObject private var keyboard = MurmurKeyboardInset.shared
+    /// Only to know when we have come back from the background, which is the
+    /// other moment the keyboard has to be loaded from scratch.
+    @Environment(\.scenePhase) private var scenePhase
+
+    private func closePhotoSource() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            showPhotoSource = false
+        }
+    }
 
     var body: some View {
-        MurmurTranscriptView(model: model)
+        MurmurTranscriptView(
+            model: model,
+            focusPulse: focusPulse,
+            onOpenImage: { openPhoto = $0 },
+            onDismissKeyboard: {
+#if DEBUG
+                MurmurDiagnostics.record("tapped conversation")
+#endif
+                composerFocused = false
+            }
+        )
             // A tap anywhere off the menu closes it, the way a popover does.
+            // The catcher covers the transcript and nothing else: over the
+            // whole screen it would sit on top of the menu it is meant to be
+            // outside of and eat the taps meant for it.
             .overlay {
                 if showPhotoSource {
-                    MurmurTheme.ink.opacity(0.08)
-                        .ignoresSafeArea()
-                        .transition(.opacity)
-                        .onTapGesture {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-                                showPhotoSource = false
-                            }
-                        }
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { closePhotoSource() }
                         .accessibilityLabel("关闭添加照片菜单")
                 }
             }
+            // The strip carries no paper of its own — only the rounded field
+            // and, when something has gone wrong, a card.  The conversation
+            // runs underneath and stays readable between them.  The inset is
+            // what reserves the room, so at rest nothing is hidden, and the
+            // padding at its foot is what moves the field when the keyboard
+            // arrives — on the keyboard's own curve, not SwiftUI's.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
-                    // The draft photo still needs somewhere to show itself
-                    // before it is sent; once sent it lives in the transcript.
-                    if model.draftPhoto != nil || model.phase == .preparingPhoto {
-                        MomentVisualPanel(model: model)
-                            .frame(maxWidth: MurmurTheme.contentWidth)
-                            .padding(.horizontal, MurmurTheme.pageInset)
-                            .padding(.bottom, 10)
-                            .frame(maxWidth: .infinity)
-                    }
                     if model.phase == .error, let failure = model.failure {
                         MurmurNotice(
                             message: failure.message,
@@ -326,6 +525,9 @@ private struct MomentWorkbench: View {
                             identifier: "moment-error",
                             onRetry: { model.retry() }
                         )
+                        .padding(12)
+                        .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 16))
+                        .overlay { RoundedRectangle(cornerRadius: 16).stroke(MurmurTheme.rule, lineWidth: 1) }
                         .frame(maxWidth: MurmurTheme.contentWidth)
                         .padding(.horizontal, MurmurTheme.pageInset)
                         .padding(.bottom, 10)
@@ -334,56 +536,61 @@ private struct MomentWorkbench: View {
                     MomentComposer(
                         model: model,
                         showCamera: $showCamera,
-                        showPhotoSource: $showPhotoSource
+                        showPhotoSource: $showPhotoSource,
+                        onOpenPhoto: { openPhoto = $0 },
+                        onFocus: { focusPulse += 1 },
+                        onPickFromLibrary: { showLibrary = true },
+                        focused: $composerFocused
                     )
                 }
-                .background(MurmurTheme.paper)
+                // The one thing that moves for the keyboard.  Growing the inset
+                // rather than sliding the composer means the scroll view's
+                // bottom anchor carries the conversation with it, in step,
+                // instead of correcting itself afterwards.
+                .padding(.bottom, keyboard.overlap)
             }
-            .task { await model.loadTranscript() }
+            // SwiftUI's own avoidance would be a second, differently timed
+            // motion on top of the one above; two of them are what left the
+            // band of paper behind.
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+        .photosPicker(isPresented: $showLibrary, selection: $selectedItem, matching: .images)
+        .fullScreenCover(item: $openPhoto) { photo in
+            MurmurPhotoLightbox(url: photo.url)
+        }
+        .onChange(of: selectedItem, initial: false) { _, item in
+            guard let item else { return }
+            model.beginPhotoSelection()
+            Task {
+                defer { selectedItem = nil }
+                do {
+                    guard let file = try await item.loadTransferable(type: PhotoPickerFile.self) else {
+                        model.failPhotoSelection()
+                        return
+                    }
+                    model.preparePhoto(at: file.url)
+                } catch {
+                    model.failPhotoSelection()
+                }
+            }
+        }
+        .task { await model.loadTranscript() }
+        // The keyboard is loaded before it is wanted, not when the field is
+        // tapped.  Once on arrival, and again on the way back from the
+        // background, where iOS may have reclaimed it while we were away.
+        .onAppear { warmKeyboard() }
+        .onChange(of: scenePhase, initial: false) { _, phase in
+            guard phase == .active else { return }
+            warmKeyboard()
+        }
     }
-}
 
-private struct MomentVisualPanel: View {
-    @ObservedObject var model: MurmurSessionModel
-
-    private var shownPhoto: PhotoAttachment? { model.currentPhoto ?? model.draftPhoto }
-
-    var body: some View {
-        ZStack {
-            MurmurTheme.raisedPaper
-            if let photo = shownPhoto {
-                Image(uiImage: photo.preview)
-                    .resizable()
-                    .scaledToFit()
-                    .accessibilityLabel(model.currentPhoto == nil ? "待发送的照片" : "当前照片")
-            } else if model.phase == .preparingPhoto {
-                VStack(spacing: 12) {
-                    ProgressView().tint(MurmurTheme.olive)
-                    Text("正在准备照片")
-                        .font(MurmurTheme.body(.footnote))
-                        .foregroundStyle(MurmurTheme.secondaryInk)
-                }
-            } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "viewfinder")
-                        .font(.system(size: 32, weight: .light))
-                        .foregroundStyle(MurmurTheme.olive)
-                    Text("照片会在这里出现")
-                        .font(MurmurTheme.body(.footnote))
-                        .foregroundStyle(MurmurTheme.secondaryInk)
-                }
-            }
-        }
-        .frame(minHeight: 260, idealHeight: 420, maxHeight: 560)
-        .clipShape(RoundedRectangle(cornerRadius: MurmurTheme.corner))
-        .overlay {
-            RoundedRectangle(cornerRadius: MurmurTheme.corner)
-                .stroke(MurmurTheme.rule, lineWidth: 1)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("visual-panel")
-        .accessibilityLabel("图片预览区域")
-        .accessibilitySortPriority(1)
+    /// Warming borrows first responder for a turn, which is fine on an idle
+    /// screen and not fine over a half-written sentence: coming back from the
+    /// background with the field still focused, that turn would take away the
+    /// keyboard iOS is in the middle of restoring.
+    private func warmKeyboard() {
+        guard !composerFocused else { return }
+        keyboard.warm()
     }
 }
 
@@ -391,46 +598,39 @@ private struct MomentComposer: View {
     @ObservedObject var model: MurmurSessionModel
     @Binding var showCamera: Bool
     @Binding var showPhotoSource: Bool
-    @State private var selectedItem: PhotosPickerItem?
-    @State private var showLibrary = false
+    let onOpenPhoto: (MurmurPhotoPreview) -> Void
+    let onFocus: () -> Void
+    let onPickFromLibrary: () -> Void
+    /// Owned by the workbench, so tapping the conversation can drop focus in the
+    /// same turn the tap is seen rather than a pass later.
+    @FocusState.Binding var focused: Bool
     @State private var menuHeight: CGFloat = 0
-    @FocusState private var textFocused: Bool
+    /// A box rather than plain `@State`: the two paths that see a reach for the
+    /// field fire in the same update pass, and a `@State` write is not visible
+    /// to the second one, so both signalled and two scrolls fought each other.
+    @State private var focusClock = FocusClock()
 
     var body: some View {
         VStack(spacing: 10) {
-            if let photo = model.draftPhoto {
-                HStack(spacing: 10) {
-                    Image(uiImage: photo.preview)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 48, height: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .accessibilityHidden(true)
-                    Text("照片已准备好 · \(ByteCountFormatter.string(fromByteCount: photo.byteCount, countStyle: .file))")
-                        .font(MurmurTheme.body(.caption))
-                        .foregroundStyle(MurmurTheme.secondaryInk)
-                        .lineLimit(1)
-                    Spacer()
-                    Button("移除照片", systemImage: "xmark") {
-                        selectedItem = nil
-                        model.removeDraftPhoto()
-                    }
-                    .labelStyle(.iconOnly)
-                    .frame(width: 44, height: 44)
-                    .buttonStyle(MurmurPressStyle())
-                    .accessibilityLabel("移除待发送照片")
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 12))
-                .overlay { RoundedRectangle(cornerRadius: 12).stroke(MurmurTheme.rule, lineWidth: 1) }
+            // The photo waits here, at the size of a thing you are about to
+            // send, rather than taking over the screen it came from.
+            if model.draftPhoto != nil || model.isPreparingPhoto {
+                DraftPhotoTile(
+                    photo: model.draftPhoto,
+                    onOpen: { photo in
+                        onOpenPhoto(.init(id: photo.id.uuidString, url: photo.originalURL))
+                    },
+                    onRemove: { model.removeDraftPhoto() }
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
             // Both controls live inside the field as equal discs, so the row is
             // one container instead of a square button beside a taller pill.
             HStack(alignment: .bottom, spacing: 6) {
                 Button {
-                    textFocused = false
+                    focused = false
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
                         showPhotoSource.toggle()
                     }
@@ -445,15 +645,16 @@ private struct MomentComposer: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(MurmurPressStyle())
-                .disabled(model.phase.isBusy)
+                .disabled(model.isPreparingPhoto)
                 .accessibilityLabel("添加照片")
-                .photosPicker(isPresented: $showLibrary, selection: $selectedItem, matching: .images)
 
+                    // Never disabled: a reply still arriving is no reason to
+                    // take the keyboard away mid-thought.
                     TextField("发一张图，或说点什么", text: $model.draftText, axis: .vertical)
                         .font(MurmurTheme.body(.body))
                         .foregroundStyle(MurmurTheme.ink)
                         .lineLimit(1...4)
-                        .focused($textFocused)
+                        .focused($focused)
                         .submitLabel(.send)
                         .onSubmit(submit)
                         .onChange(of: model.draftText, initial: false) { _, newValue in
@@ -461,9 +662,21 @@ private struct MomentComposer: View {
                             model.draftText = newValue.replacingOccurrences(of: "\n", with: "")
                             submit()
                         }
-                        .disabled(model.phase.isBusy)
                         .padding(.leading, 8)
                         .padding(.vertical, 12)
+                        // Both paths are needed and neither is enough alone:
+                        // the gesture catches a tap on a field that is already
+                        // first responder (coming back from history), the focus
+                        // change catches focus arriving any other way.  They
+                        // overlap on the ordinary tap, so the signal is
+                        // coalesced — two scrolls milliseconds apart fought
+                        // over the same position.
+                        .simultaneousGesture(TapGesture().onEnded {
+#if DEBUG
+                            MurmurDiagnostics.record("field tap gesture")
+#endif
+                            signalFocus()
+                        })
                         .accessibilityLabel("这一刻的文字")
                         .accessibilityIdentifier("moment-composer")
 
@@ -496,7 +709,7 @@ private struct MomentComposer: View {
             .overlay(alignment: .topLeading) {
                 if showPhotoSource {
                     PhotoSourceMenu(
-                        onLibrary: { showLibrary = true },
+                        onLibrary: onPickFromLibrary,
                         onCamera: { showCamera = true },
                         onDismiss: { closePhotoSource() }
                     )
@@ -519,24 +732,34 @@ private struct MomentComposer: View {
         .padding(.bottom, 10)
         .frame(maxWidth: .infinity)
         .accessibilitySortPriority(3)
-        .onChange(of: selectedItem, initial: false) { _, item in
-            guard let item else { return }
-            model.beginPhotoSelection()
-            Task {
-                do {
-                    guard let file = try await item.loadTransferable(type: PhotoPickerFile.self) else {
-                        selectedItem = nil
-                        model.failPhotoSelection()
-                        return
-                    }
-                    selectedItem = nil
-                    model.preparePhoto(at: file.url)
-                } catch {
-                    selectedItem = nil
-                    model.failPhotoSelection()
-                }
-            }
+#if DEBUG
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: {
+            MurmurDiagnostics.composerTop = $0
         }
+#endif
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.draftPhoto?.id)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.isPreparingPhoto)
+        .onChange(of: focused, initial: false) { _, isFocused in
+#if DEBUG
+            MurmurDiagnostics.record("field focus -> \(isFocused)")
+#endif
+            if isFocused { signalFocus() }
+        }
+    }
+
+    /// One scroll per reach for the field, however many ways the tap is seen.
+    ///
+    /// The window has to clear the gap between the two, and it is wider than it
+    /// looks: the recorder puts the tap gesture at 16:57:10.619 and the focus
+    /// change at 16:57:10.975, 356ms apart.  At the old 0.15s both got through,
+    /// every time, so one tap started two scrolls — and each of those scheduled
+    /// a second one 300ms later, landing four animated scrolls in the middle of
+    /// the keyboard's rise.  That was the stutter.
+    private func signalFocus() {
+        let now = Date()
+        guard now.timeIntervalSince(focusClock.last) > 0.5 else { return }
+        focusClock.last = now
+        onFocus()
     }
 
     private func closePhotoSource() {
@@ -547,10 +770,15 @@ private struct MomentComposer: View {
 
     private func submit() {
         guard model.canSubmit else { return }
-        textFocused = false
-        selectedItem = nil
+        focused = false
         model.submit()
     }
+}
+
+/// Mutable across a single update pass, which `@State` is not.
+@MainActor
+private final class FocusClock {
+    var last = Date.distantPast
 }
 
 private struct MurmurSettingsView: View {
@@ -560,12 +788,16 @@ private struct MurmurSettingsView: View {
     @State private var confirmDelete = false
     @State private var confirmReconnect = false
     @State private var deviceToRemove: MurmurDevice?
+    @State private var connectingPush = false
+    @State private var confirmClearTranscript = false
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("连接") {
                     LabeledContent("状态", value: model.connection.label)
+                    LabeledContent("版本", value: MurmurBuild.summary)
+                        .accessibilityIdentifier("build-stamp")
                     if model.requiresDeviceReconnect {
                         Text("本机安全身份已失效。重置只会移除本机绑定，不会删除 Murmur 的记忆。")
                             .font(.footnote)
@@ -604,7 +836,11 @@ private struct MurmurSettingsView: View {
                                     }
                                     Text(device.pushEnabled ? "推送已连接" : "推送未连接")
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(
+                                            device.pushEnabled || device.id != model.identity?.deviceID
+                                                ? AnyShapeStyle(.secondary)
+                                                : AnyShapeStyle(MurmurTheme.coral)
+                                        )
                                 }
                                 Spacer()
                                 Button(role: .destructive) { deviceToRemove = device } label: {
@@ -629,19 +865,45 @@ private struct MurmurSettingsView: View {
                     Button("保存频率与时段") { Task { await model.savePreferences() } }
                 }
 
-                Section("通知") {
+                Section {
                     Toggle("允许通知", isOn: notificationsAllowed)
                         .accessibilityIdentifier("notification-toggle")
                     LabeledContent("系统通知", value: notificationLabel)
+                    LabeledContent("这台设备的推送", value: currentDevicePushEnabled ? "已连接" : "未连接")
                     if notifications.authorization == .denied {
                         Button("前往系统设置") { openSystemSettings() }
+                    } else if !currentDevicePushEnabled {
+                        Button {
+                            Task { await connectPush() }
+                        } label: {
+                            HStack {
+                                Text(connectingPush ? "正在连接推送" : "连接推送")
+                                if connectingPush {
+                                    Spacer()
+                                    ProgressView()
+                                }
+                            }
+                        }
+                        .disabled(connectingPush)
+                        .accessibilityIdentifier("connect-push")
+                    }
+                } header: {
+                    Text("通知")
+                } footer: {
+                    // "推送未连接" on its own reads like a fault in the app; the
+                    // usual cause is simply that iOS has not been asked yet.
+                    if !currentDevicePushEnabled {
+                        Text("Murmur 只有拿到这台设备的推送凭证，才能主动送来一条此刻。允许通知后凭证会自动登记。")
                     }
                 }
 
-                Section("当前界面") {
+                Section("聊天记录") {
                     Button("清空这一刻") { model.clearCurrent() }
                         .disabled(!model.hasCurrentMoment && model.draftPhoto == nil && model.draftText.isEmpty)
-                    Text("App 不会保存聊天列表；冷启动时始终从空白开始。")
+                    Button("清空聊天记录", role: .destructive) { confirmClearTranscript = true }
+                        .disabled(model.messages.isEmpty)
+                        .accessibilityIdentifier("clear-transcript")
+                    Text("聊天记录连同其中的照片只存在这台设备上，删除 App 就一并消失。服务端保存的是私有记忆，不是对话本身。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -677,6 +939,14 @@ private struct MurmurSettingsView: View {
                 }
             } message: {
                 Text("这个操作无法撤销。")
+            }
+            .alert("清空聊天记录？", isPresented: $confirmClearTranscript) {
+                Button("取消", role: .cancel) {}
+                Button("确认清空", role: .destructive) {
+                    Task { await model.clearTranscript() }
+                }
+            } message: {
+                Text("这台设备上的对话和其中的照片会被删除，服务端的记忆不受影响。")
             }
             .alert("重置本机安全身份？", isPresented: $confirmReconnect) {
                 Button("取消", role: .cancel) {}
@@ -756,9 +1026,99 @@ private struct MurmurSettingsView: View {
         )
     }
 
+    private var currentDevicePushEnabled: Bool {
+        guard let deviceID = model.identity?.deviceID else { return false }
+        return model.devices.first { $0.id == deviceID }?.pushEnabled ?? false
+    }
+
+    /// Walks the whole chain in one tap: permission, an APNs token, the token
+    /// registered with Murmur, then a fresh read of what the server now thinks.
+    /// Doing it piecemeal is how the row ends up stale and saying "未连接"
+    /// after the person has already said yes.
+    private func connectPush() async {
+        connectingPush = true
+        defer { connectingPush = false }
+        await notifications.refreshAuthorizationStatus()
+        if notifications.authorization == .notDetermined {
+            await notifications.requestAuthorizationIfNeeded()
+        }
+        guard notifications.authorization == .allowed else {
+            openSystemSettings()
+            return
+        }
+        let token = await notifications.tokenAfterRegistering()
+        await model.updatePushRegistration(token: token)
+        await model.refreshDevices()
+    }
+
     private func openSystemSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+}
+
+/// The photo waiting to be sent, sitting just above the field it will leave
+/// from.  Tapping it opens it full screen; the cross takes it back off.
+private struct DraftPhotoTile: View {
+    let photo: PhotoAttachment?
+    let onOpen: (PhotoAttachment) -> Void
+    let onRemove: () -> Void
+
+    private static let side: CGFloat = 76
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let photo {
+                    Button {
+                        onOpen(photo)
+                    } label: {
+                        Image(uiImage: photo.preview)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: Self.side, height: Self.side)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .contentShape(RoundedRectangle(cornerRadius: 14))
+                    }
+                    .buttonStyle(MurmurPressStyle())
+                    .accessibilityLabel("待发送的照片，轻点放大")
+                    .accessibilityIdentifier("draft-photo")
+                } else {
+                    ZStack {
+                        MurmurTheme.raisedPaper
+                        ProgressView().tint(MurmurTheme.olive)
+                    }
+                    .frame(width: Self.side, height: Self.side)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .accessibilityLabel("正在准备照片")
+                }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 14).stroke(MurmurTheme.rule, lineWidth: 1)
+            }
+
+            if photo != nil {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(MurmurTheme.paper)
+                        .frame(width: 22, height: 22)
+                        .background(MurmurTheme.ink.opacity(0.85), in: Circle())
+                        .overlay { Circle().stroke(MurmurTheme.paper, lineWidth: 1.5) }
+                        // The disc straddles the corner; the tap target around
+                        // it stays a full 44pt without covering the picture.
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(MurmurPressStyle())
+                .offset(x: 13, y: -13)
+                .accessibilityLabel("移除待发送照片")
+                .accessibilityIdentifier("remove-draft-photo")
+            }
+        }
+        // Room for the cross to overhang without being clipped.
+        .padding(.top, 11)
+        .padding(.trailing, 11)
     }
 }
 
@@ -793,7 +1153,7 @@ private struct PhotoSourceMenu: View {
         .frame(width: 210)
         .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 16))
         .overlay { RoundedRectangle(cornerRadius: 16).stroke(MurmurTheme.rule, lineWidth: 1) }
-        .shadow(color: MurmurTheme.ink.opacity(0.14), radius: 16, y: 6)
+        .shadow(color: MurmurTheme.ink.opacity(0.10), radius: 10, y: 4)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("photo-source-menu")
     }
