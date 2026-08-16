@@ -29,7 +29,7 @@ object MurmurEnvironment {
             }
         }
 
-        val store = IdentityStore(context.applicationContext)
+        val store = AndroidIdentityStore(context.applicationContext)
         val authenticator: MurmurAuthenticator =
             if (BuildConfig.ALLOW_DEVELOPMENT && BuildConfig.MURMUR_DEV_TOKEN.isNotBlank()) {
                 DevelopmentAuthenticator(token = BuildConfig.MURMUR_DEV_TOKEN, store = store)

@@ -12,6 +12,18 @@ enum class MurmurPhase {
 
     val isBusy: Boolean
         get() = this == PreparingPhoto || this == Uploading || this == Responding
+
+    val statusText: String
+        get() = when (this) {
+            Idle -> "此刻为空"
+            PreparingPhoto -> "正在准备照片"
+            Ready -> "准备好了"
+            Uploading -> "正在送往 Murmur"
+            Responding -> "Murmur 正在回应"
+            Complete -> "这一刻已完成"
+            Quiet -> "Murmur 选择安静陪着"
+            Error -> "没有送达"
+        }
 }
 
 sealed interface MurmurConnectionState {
@@ -41,6 +53,12 @@ class MurmurFailure(
     companion object {
         fun from(error: Throwable): MurmurFailure = when (error) {
             is MurmurFailure -> error
+            // TimeoutCancellationException is a CancellationException subclass; it
+            // must be mapped before the generic cancellation branch below.
+            is kotlinx.coroutines.TimeoutCancellationException ->
+                MurmurFailure("timeout", "等待时间有点久，请再试一次。", retryable = true)
+            is kotlinx.coroutines.CancellationException ->
+                MurmurFailure("cancelled", "已取消。", retryable = true)
             is java.net.SocketTimeoutException, is java.io.InterruptedIOException ->
                 MurmurFailure("timeout", "等待时间有点久，请再试一次。", retryable = true)
             is java.io.IOException ->

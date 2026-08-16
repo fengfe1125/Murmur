@@ -364,6 +364,15 @@ for f in tests/test_*.py; do .venv/bin/python "$f"; done   # 全部
 改 `Config` 加字段时，`tests/_helpers.py` 会提醒补测试默认值，不用手查。
 lint 用 ruff（`uv pip install -e '.[dev]'` 后 `ruff check murmur tests`）。
 
+安卓客户端测试在 `android/`（Windows 下先把 `GRADLE_USER_HOME` 指进工作区，
+见 `docs/android-adaptation-plan.md` §12）：
+
+```powershell
+cd android
+.\gradlew.bat testDebugUnitTest          # JVM 单测：状态机 / SSE 分帧 / multipart / 串行闸门
+.\gradlew.bat connectedDebugAndroidTest  # Compose UI 测试（需模拟器在线）
+```
+
 ## 隐私
 
 照片和记录都在本地（`./murmur.db`，已 gitignore）。

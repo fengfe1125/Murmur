@@ -15,7 +15,11 @@ class MainActivity : ComponentActivity() {
     private val sessionFactory: ViewModelProvider.Factory = viewModelFactory {
         initializer {
             val app = application as MurmurApp
-            MurmurSessionModel(app.container.apiClient, app.container.configurationFailure)
+            MurmurSessionModel(
+                api = app.container.apiClient,
+                configurationFailure = app.container.configurationFailure,
+                photoLoader = AndroidPhotoLoader(app),
+            )
         }
     }
 
