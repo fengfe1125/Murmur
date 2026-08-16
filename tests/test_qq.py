@@ -148,6 +148,7 @@ with tempfile.TemporaryDirectory() as d:
     check("没有接着开新话题", _calls == [], str(_calls))
     h.handle_c2c(qq_msg("在吗", "m2"))
     check("打过招呼之后才正经回", "新话题" in http.sent, str(http.sent))
+    mem.close()
 
 print("\n── 连发时同一会话不会并行回两轮 " + "─" * 18)
 
@@ -195,6 +196,7 @@ with tempfile.TemporaryDirectory() as d:
     t2.join(2)
     check("两句叠在一起不会各回一轮", n_respond["n"] <= 2, str(n_respond["n"]))
     check("发出去的不乱成两套", http.sent.count("回") <= 2, str(http.sent))
+    mem.close()
 
 print(f"\n{'─' * 60}\n通过 {ok}，失败 {fail}")
 sys.exit(1 if fail else 0)

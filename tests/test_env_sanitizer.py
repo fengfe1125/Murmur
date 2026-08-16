@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import stat
 import tempfile
 import unittest
@@ -67,7 +68,8 @@ class ProductionEnvSanitizerTests(unittest.TestCase):
             self.assertNotIn("local-dev-bypass-token-value", raw)
             self.assertEqual(values["MURMUR_MODEL"], "qwen3.7-plus")
             self.assertIn("# keep this comment", raw)
-            self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
+            if os.name != "nt":  # Windows has no POSIX mode bits; 0600 is enforced where it exists
+                self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
 
 
 if __name__ == "__main__":

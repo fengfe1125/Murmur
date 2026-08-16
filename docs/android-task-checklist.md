@@ -8,6 +8,12 @@
 > 任务。每个任务写清「改哪、对照哪个 iOS 文件、怎么算完成」。
 > 服务端（P0–P4）已全部落地，本清单只含客户端与运维工作。
 > 总原则不变：**同产品、同约束，iOS 是基准，安卓不做功能加餐。**
+>
+> **端到端实跑记录（2026-08-16，模拟器 → VPS 生产后端 development 通道）**：
+> 邀请码注册（201）→ 文本 moment 上传（202）→ SSE 流（网关 503 时客户端按
+> T0.1 抛"回应中断了。"+ 重试）→ 同一幂等键重投 → 两条流式气泡（"在呢"、
+> "怎么啦这个点找我~"）+ 完成 → 首次完整回复后弹通知权限（T1.5）→ 设置页
+> 删除账号（204）级联清理、回到注册页。全链路无人工干预。
 
 ## 0. 先修的两个既有问题（进入 Phase 1 前完成）
 
@@ -19,7 +25,9 @@
   `phase = Error`，**不删除照片、不清 note**。
   验收：模拟器把 SSE 在 bubble 后掐断（停掉 app-api），界面显示"回应中断了"+
   「再试一次」，重试用同一个 idempotencyKey 不产生新 moment。
-  状态：**已修**（JVM 测试 `streamEndingWithoutDoneIsAnInterruptibleErrorNotCompletion` 盯着这条）。
+  状态：**已修**（JVM 测试 `streamEndingWithoutDoneIsAnInterruptibleErrorNotCompletion`
+  盯着这条）。**生产实锤**：VPS 网关 503 时模拟器端到端实测显示"回应中断了。+
+  再试一次"，点重试用同一幂等键重投并成功收到流式回复（2026-08-16 E2E 记录）。
 
 - [x] **T0.2 死代码接线清单**
   `MurmurApiClient.kt` 已实现但没有任何调用方：`currentProactive` / `acknowledge` /
@@ -258,12 +266,16 @@
   现在可运行，服务端套件从 4/19 可运行恢复到 12/19）。
 - [ ] W2 测试脚本输出 UTF-8：脚本内 `sys.stdout.reconfigure(encoding="utf-8")`
   或文档统一要求 `PYTHONUTF8=1`（✓ 字符在 GBK 控制台炸了一堆脚本）。
-- [ ] W3 `test_env_sanitizer.py` 的 0o600 断言加平台分支（Windows 无此语义）。
-- [ ] W4 `test_roster.py` / `test_wechat_flow.py` 关闭 SQLite 连接后再退
+- [x] W3 `test_env_sanitizer.py` 的 0o600 断言加平台分支（Windows 无此语义）。
+  状态：**已修**（test_env_sanitizer / test_app_worker ×2 / test_wechat 共 4 处）。
+- [x] W4 `test_roster.py` / `test_wechat_flow.py` 关闭 SQLite 连接后再退
   TemporaryDirectory（Windows 文件锁导致清理失败，Linux 上无感）。
-- [ ] W5 README「测试」一节补 Windows 跑法（`py -3` + 环境变量），并注明
-  `app-api/app-worker` 的生产目标平台是 Linux。
+  状态：**已修**（roster 7 处 / wechat_flow 9 处 / qq 2 处 / channel_gate 3 处
+  `mem.close()`）。
+- [x] W5 README「测试」一节补 Windows 跑法（`py -3` + 环境变量），并注明
+  `app-api/app-worker` 的生产目标平台是 Linux。状态：**已修**。
 - **验收**：Windows 上 20 个测试文件全绿；Linux 上依旧全绿。
+  状态：**19/19 全绿（Windows）**；Linux 行为不变（所有改动都是平台分支/测试收尾）。
 
 ## 依赖与顺序
 

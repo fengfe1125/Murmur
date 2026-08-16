@@ -138,8 +138,9 @@ with tempfile.TemporaryDirectory() as d:
     again = wechat.WeChatClient("TOK123", "acc@im-bot", Path(d))
     check("重启进程后还在（主动消息全靠它）",
           again.ctx_tokens.get("u@im.wechat") == "CTX-1")
-    check("文件权限 600（里面是凭据）",
-          oct(Path(d, "context-tokens.json").stat().st_mode)[-3:] == "600")
+    if os.name != "nt":  # Windows 没有 POSIX 权限位；0600 在有权限位的平台上强制
+        check("文件权限 600（里面是凭据）",
+              oct(Path(d, "context-tokens.json").stat().st_mode)[-3:] == "600")
     c.ctx_tokens.put("u@im.wechat", "CTX-2")
     check("覆盖生效", wechat.WeChatClient("T", "a", Path(d)).ctx_tokens.get(
         "u@im.wechat") == "CTX-2")

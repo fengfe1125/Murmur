@@ -364,6 +364,14 @@ for f in tests/test_*.py; do .venv/bin/python "$f"; done   # 全部
 改 `Config` 加字段时，`tests/_helpers.py` 会提醒补测试默认值，不用手查。
 lint 用 ruff（`uv pip install -e '.[dev]'` 后 `ruff check murmur tests`）。
 
+Windows 上跑同一套测试（`app-api` / `app-worker` 也能在开发机起，但生产目标平台
+是 Linux；文件权限类断言在 Windows 上自动跳过）：
+
+```powershell
+$env:PYTHONUTF8 = "1"                       # 测试脚本输出 ✓/中文，GBK 控制台会炸
+foreach ($f in Get-ChildItem tests\test_*.py) { .venv\Scripts\python.exe $f }
+```
+
 安卓客户端测试在 `android/`（Windows 下先把 `GRADLE_USER_HOME` 指进工作区，
 见 `docs/android-adaptation-plan.md` §12）：
 
