@@ -137,7 +137,7 @@ interface MurmurApiClient {
     fun events(momentID: String, lastEventID: String?): Flow<MurmurStreamEvent>
     suspend fun currentProactive(): ProactiveMoment?
     suspend fun acknowledge(momentID: String, reply: String?)
-    suspend fun updateDevice(apnsToken: String?, environment: String, timezone: String, deviceName: String)
+    suspend fun updateDevice(pushToken: String?, environment: String, timezone: String, deviceName: String)
     suspend fun devices(): List<MurmurDevice>
     suspend fun removeDevice(deviceID: String)
     suspend fun preferences(): MurmurPreferences

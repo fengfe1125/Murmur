@@ -79,6 +79,24 @@ Murmur 当前由四部分组成：
 
 ## 4. 设备认证：App Attest → Play Integrity（核心差异点）
 
+> **落地状态（2026-08，以代码为准）**：服务端改造已按 `deploy/android-server-plan.md`
+> 完成（P0–P4，commit `beed935`/`b42ab3c`/`da9cf75`/`89994e5`），与本节原计划的
+> 三处关键出入：
+>
+> 1. **主认证方案是 Key Attestation，不是 Play Integrity。** `AndroidKeyAttestor`
+>    （`murmur/app_attest_android.py`）验证 Google 硬件认证根签发的 X.509 证书链 +
+>    KeyDescription 扩展（OID 1.3.6.1.4.1.11129.2.1.17），production 模式 fail
+>    closed（TEE/StrongBox + verifiedBoot Verified + 签名证书白名单缺一不可）。
+>    Play Integrity 经评审**暂缓**（Key Attestation + 邀请码已够，且绑定 GMS 对国内
+>    设备是负担），接口留作后续可选。
+> 2. **enroll 不分派字段，而是显式 `platform`。** 请求体新增 `platform`
+>    （`"ios" | "android"`，缺省 `ios` 以兼容已发布 iOS 客户端）；每请求认证的平台
+>    取自注册时存的 key，**不取自请求**（防降级）。
+> 3. **schema 是 `platform` 列 + `apns_token` 改名 `push_token`**，不是
+>    `push_platform`（见 §5.1 已同步修正）。
+>
+> 客户端要对上的精确 wire 契约见 `deploy/android-server-plan.md` 末尾的契约表。
+
 ### 4.1 现状（不改动 iOS 逻辑的前提下抽象）
 
 服务端 `murmur/app_auth.py`：
@@ -89,7 +107,10 @@ Murmur 当前由四部分组成：
   counter 单调递增）→ 服务端验签并 `advance_counter`。
 - challenge 是一次性的（`consume_challenge`），本身提供重放防护。
 
-### 4.2 安卓主方案：Play Integrity + 设备密钥
+### 4.2 安卓主方案：Play Integrity + 设备密钥（已暂缓，保留备查）
+
+> **此方案未实施。** 服务端实际落地的是 §4.3 的 Key Attestation（见 §4 开头）。
+> 以下流程仅在未来重启 Play Integrity 时作参考。
 
 协议形状保持不变（challenge → 证明物 → 服务端验），只替换证明物的来源：
 
@@ -119,46 +140,59 @@ challenge（challenge 表已有），风险等价；如需更强防护可在 cha
 
 ### 4.3 降级方案：Key Attestation（无 GMS 设备）
 
+> **落地状态**：此方案已升级为主线并**在服务端实现完毕**（`AndroidKeyAttestor`，
+> commit `da9cf75`）。原计划"Phase 2 只做 Play Integrity"作废——Play Integrity
+> 暂缓（见 §4 开头）。客户端 Release 认证器要按 `deploy/android-server-plan.md`
+> 末尾契约表实现：Keystore 生成 P-256 密钥时带 challenge 请求 attestation
+> 证书链，注册报文 `attestation` 字段装 **SEQUENCE OF OCTET STRING**（leaf 在前，
+> 每项 `Certificate.getEncoded()`），`key_id = base64url(sha256(SPKI))` 去 padding。
+
 部分国内 ROM / 无 Google 服务的设备没有 Play Integrity。降级路径用 Android Keystore 自带的
 **Key Attestation**：生成密钥时要求 attestation 证书链（由 Google 硬件根签发），服务端验证
-证书链、`verifiedBootState`（锁定）、包名扩展。这条路径的证书链验证逻辑与
-`app_auth.py::_verify_chain` 高度相似，可作为 verifier 的第二种实现。**Phase 2 只做
-Play Integrity；Key Attestation 在真机阶段按需要启用，不阻塞主线。**
+证书链、`verifiedBootState`（锁定）、包名扩展。
 
-### 4.4 服务端改动（app_auth.py / app_settings.py）
+### 4.4 服务端改动（app_auth.py / app_settings.py）—— 已落地，以此为准
 
-- 新增 `PlayIntegrityVerifier`：配置 `MURMUR_ANDROID_PACKAGE` +
-  `MURMUR_ANDROID_INTEGRITY_SERVICE_ACCOUNT`（Google Cloud 服务账号 JSON），
-  调用 `https://playintegrity.googleapis.com/v1/{packageName}:decodeIntegrityToken`。
-- `enroll()` 按提交字段分派：带 `attestation`（base64）走苹果路径；带
-  `integrity_token + public_key_spki + signature` 走安卓路径。`app_attest_keys` 表复用
-  （SPKI 字段通吃两种平台）。
-- 新错误码：`integrity_invalid`、`integrity_unsupported`、`attestation_key_unknown`（复用）。
-- `app_settings.py` 新增上述两个环境变量 + `validate()` 分支；`.env.example` 与
-  `deploy/README.md` 同步。
+- `AppAuthenticator` 改为 **attestor 注册表**（`platform -> DeviceAttestor`）：
+  `AppleAppAttestVerifier`（`platform = "ios"`）+ `AndroidKeyAttestor`
+  （`platform = "android"`）。`enroll()` 按请求体的 `platform` 选 attestor；
+  `authenticate()` 按**注册时存的 key 的 platform** 选，客户端不可声明。
+- Android 注册证明物 = Key Attestation 证书链（非 Play Integrity token）；
+  每请求 assertion = 裸 ECDSA/SHA-256 签名，签 `client_data_hash`
+  （`sha256(challenge ‖ METHOD ‖ path ‖ sha256(body))`），counter 恒不推进
+  （重放防护由一次性 challenge 承担）。
+- 配置项（`MURMUR_APP_ANDROID_*` / `MURMUR_APP_FCM_*` / Google 根证书路径 /
+  吊销列表策略）见 `deploy/android-server-plan.md` §4；production +
+  `android_enabled` 时 `validate()` 强制要求 Android 与 FCM 配置齐全。
 
 ## 5. 推送：APNs → FCM
 
-### 5.1 服务端（app_push.py / app_store.py / app_api.py）
+### 5.1 服务端（app_push.py / app_store.py / app_api.py）—— 已落地，以此为准
 
-- **schema 迁移**：`app_devices.apns_token` → `push_token` + `push_platform`
-  （`'apns' | 'fcm'`）。迁移策略：新列上线（双写/双读过渡），旧列保留一个版本后废弃；
-  迁移脚本随部署文档发布。`app_attest_keys` 不变。
-- **Provider 抽象**：`APNsProvider` 拆出 `PushProvider` 协议
-  （`send(token, moment_id, preview) -> PushResult`），APNs 实现保留不动；
-  新增 `FCMProvider`：
-  - 服务账号 RS256 JWT 换 OAuth2 access token（缓存至过期前 5 分钟）；
+- **schema 迁移（已完成）**：`app_devices` 与 `app_attest_keys` 各加 `platform`
+  列（`'ios' | 'android'`，存量行 `DEFAULT 'ios'` 回填），`apns_token` **改名**
+  `push_token`（`UNIQUE` 保留）。注意是 `platform` 不是原计划的 `push_platform`，
+  取值是平台名而非通道名。
+- **Provider 抽象（已完成）**：`PushProvider` 协议 + scheduler 按 `platform`
+  路由；`PushResult.permanent` 由各 provider 自填（FCM 的 404 `UNREGISTERED`
+  与 APNs 的 410 统一成"判死"信号）。缺 provider 的平台走 retry 不判死。
+  `FCMProvider`（`murmur/app_push_fcm.py`，commit `b42ab3c`）：
+  - 服务账号 RS256 JWT 换 OAuth2 access token（未引入 google-auth，按
+    `expires_in` 提前 60 秒续期）；
   - `POST https://fcm.googleapis.com/v1/projects/{project}/messages:send`；
   - payload：`notification.body` 预览（与 APNs 一样只放 180 字预览，不放对话），
-    `android.priority=high`、`collapse_key=moment_id`（对齐 `apns-collapse-id`）；
-  - 失效 token：错误码 `UNREGISTERED` / `INVALID_ARGUMENT`（token 相关）→
-    `on_invalid_token`，复用现有失效清理链路。
-- **app_api.py `PUT /v1/device`**：接受 `push_platform` + `push_token`（过渡期兼容
-  `apns_token` 旧字段）；设备列表返回 `push_enabled` 语义不变。
-- **app_settings.py**：`MURMUR_ANDROID_FCM_PROJECT`、`MURMUR_ANDROID_FCM_SERVICE_ACCOUNT`
-  （与 Play Integrity 可共用同一个服务账号 JSON，权限分开）。
-- `ProactiveScheduler` / `deliver_pending` 不动：队列按 device 行分发，provider 按
-  `push_platform` 选择即可。
+    `android.priority=HIGH`、`collapse_key=moment_id`（对齐 `apns-collapse-id`）；
+  - 失效 token：`UNREGISTERED` / `INVALID_ARGUMENT` → `permanent` →
+    `on_invalid_token` + `mark_push_dead`，复用现有失效清理链路。
+- **app_api.py `PUT /v1/device`（已完成）**：接受 `push_token`（保留 `apns_token`
+  作旧别名）；token 校验按**注册时存的 key 的 platform** 分流——iOS 仍 hex
+  32–256，Android `[A-Za-z0-9_:.-]` 64–512（FCM token 不是 hex）。
+- **app_settings.py（已完成）**：`MURMUR_APP_ANDROID_ENABLED` /
+  `MURMUR_APP_ANDROID_PACKAGE` / `MURMUR_APP_ANDROID_SIGNING_DIGESTS` /
+  `MURMUR_APP_FCM_PROJECT_ID` / `MURMUR_APP_FCM_SERVICE_ACCOUNT_PATH` 等，
+  详见 `deploy/android-server-plan.md` §4。
+- `ProactiveScheduler` / `deliver_pending` 状态机不动：队列按 device 行分发，
+  provider 按 `platform` 选择。
 
 ### 5.2 客户端
 
@@ -227,17 +261,18 @@ design.md 是锁定的视觉系统。安卓端用 `MurmurTheme.kt` 集中定义�
 - **Data safety 表单**：按 `PrivacyInfo.xcprivacy` 的等价内容填写（照片内容、设备标识
   用于认证、通知 token 等），与 iOS 声明保持一致。
 
-## 8. 服务端改造清单汇总
+## 8. 服务端改造清单汇总 —— 全部已落地（2026-08）
 
-| 文件 | 改动 |
+| 文件 | 改动（实际，commit 见 deploy/android-server-plan.md） |
 |---|---|
-| `murmur/app_store.py` | `app_devices` 增加 `push_token` / `push_platform` 列 + 迁移；`update_device`、设备列表、`invalidate_*_token`、`push_enabled` 查询适配双平台 |
-| `murmur/app_auth.py` | 新增 `PlayIntegrityVerifier`；`enroll()` 双路径分派；（可选）Key Attestation 验证器 |
-| `murmur/app_push.py` | `PushProvider` 协议化；新增 `FCMProvider`；`deliver_pending` 按平台选择 provider |
-| `murmur/app_api.py` | `/v1/device` 接受 `push_platform`+`push_token`；enrollment 请求字段扩展；新错误码映射 |
-| `murmur/app_settings.py` | 新增安卓包名 / 服务账号 / FCM 项目配置与校验 |
-| `.env.example`、`deploy/README.md` | 新变量文档与迁移步骤 |
-| `tests/` | Play Integrity verifier（模拟 Google 响应）、FCM provider（mock transport）、schema 迁移、双平台 enroll 分派测试；`_helpers.py` 配置默认值同步 |
+| `murmur/app_store.py` | `app_devices` / `app_attest_keys` 加 `platform` 列（存量回填 `ios`）；`apns_token` 改名 `push_token`；push 查询带出 `platform` |
+| `murmur/app_auth.py` | `DeviceAttestor` Protocol + attestor 注册表；`enroll()` 按请求体 `platform` 分派；`authenticate()` 按存库 key 的 platform 选 attestor |
+| `murmur/app_attest_android.py` | `AndroidKeyAttestor`：Google 硬件根证书链 + KeyDescription 扩展解析；production fail closed；吊销列表 1 小时缓存 |
+| `murmur/app_push.py` | `PushProvider` 协议化；`PushResult.permanent`；scheduler 按平台路由，缺 provider 走 retry |
+| `murmur/app_push_fcm.py` | `FCMProvider`：RS256 自签换 OAuth2（无 google-auth）；HTTP v1 发送；失效 token 判死 |
+| `murmur/app_api.py` | `/v1/enrollments` 收 `platform`（缺省 `ios`）；`/v1/device` 收 `push_token`（`apns_token` 别名保留），token 校验按存库平台分流 |
+| `murmur/app_settings.py` | `MURMUR_APP_ANDROID_*` / `MURMUR_APP_FCM_*` / Google 根证书 / 吊销策略配置与校验 |
+| `tests/` | FCM provider（14 条）、Android attestor（21 条合成证书链）、schema 迁移、平台 wire 契约（7 条）——全部通过，iOS 零回归 |
 
 **兼容性红线**：全部改动必须保证现有 iOS 客户端（含旧版 App）在迁移后行为不变；
 过渡期内 `apns_token` 旧字段继续生效。
@@ -263,21 +298,28 @@ design.md 是锁定的视觉系统。安卓端用 `MurmurTheme.kt` 集中定义�
 - [ ] 对照移植 iOS 单元测试矩阵（状态机、幂等重排、SSE 续传、串行闸门、临时文件清理）
 - **验收**：模拟器开发模式全流程 + 全测试通过；横屏/深色/XXXL 字体/双栏断点 UI 检查
 
-### Phase 2 — 服务端双平台（2–3 周）
+### Phase 2 — 生产链路（真机认证 + 推送）（2–3 周）
 
-- [ ] schema 迁移（push_token/push_platform，双字段过渡）
-- [ ] PlayIntegrityVerifier + enroll 双路径（+ 对应客户端 Release 认证器）
-- [ ] FCMProvider + 客户端 FirebaseMessagingService + 通知权限策略
-- [ ] 部署文档、`.env.example`、迁移脚本
+> 原计划的服务端条目（schema 迁移 / FCMProvider / enroll 双平台）**已全部提前落地**
+> （见 §8），本阶段剩下的都是客户端与运维工作。
+
+- [ ] 客户端 Release 认证器：Keystore P-256 + Key Attestation 证书链注册
+  （wire 契约见 `deploy/android-server-plan.md` 末尾），替换 `MurmurEnvironment`
+  里 release 分支的 `integrity_unsupported` 占位
+- [ ] 客户端 FirebaseMessagingService + `POST_NOTIFICATIONS` 权限策略 +
+  `updateDevice(pushToken=…)` 上传（客户端已发 `push_token` 字段）
+- [ ] VPS 部署：`MURMUR_APP_ANDROID_*` / `MURMUR_APP_FCM_*` 配置、Google 根证书
+  与 Firebase 服务账号就位、部署文档同步
+- [ ] （可选，评审后再定）Play Integrity 是否重启；国内厂商推送通道是否立项
 - **验收**：iOS 回归零回归；安卓 Debug（development 通道）与
-  Release（Play Integrity + FCM，真机）双链路验收；失效 token 清理链路测试
+  Release（Key Attestation + FCM，真机）双链路验收；失效 token 清理链路测试
 
 ### Phase 3 — 真机验收与发布（2–4 周）
 
 - [ ] Google Play Console 应用注册、FCM/Firebase 项目、服务账号与 API 启用
-- [ ] 真机矩阵：Play Integrity 判定、FCM 到达（海外/国内网络分别记录）、OEM 后台限制
+- [ ] 真机矩阵：Key Attestation 硬件密钥判定、FCM 到达（海外/国内网络分别记录）、OEM 后台限制
 - [ ] 内测渠道发布（internal testing），邀请现有 iOS 用户交叉试用
-- [ ] 决定 Key Attestation 降级与国内厂商推送通道是否立项
+- [ ] 决定 Play Integrity 增补与国内厂商推送通道是否立项
 - **验收**：内测用户完成两周真实使用；推送到达率与 iOS 同量级（或已明确记录差距与原因）
 
 ## 10. 测试策略
@@ -289,19 +331,19 @@ design.md 是锁定的视觉系统。安卓端用 `MurmurTheme.kt` 集中定义�
   （google_apis 镜像自带 Play services）；通知权限三态（未决定/允许/拒绝）。
 - **UI 测试**（Compose UI test）：冷启动为空、发送后替换、横屏、深色、XXXL 字体、
   48dp 点击区域、≥600dp 双栏断言——对照 `MurmurUITests.swift` 矩阵。
-- **真机**：Play Integrity（Play Console 注册后）、FCM 到达率、Doze/厂商后台策略。
-- **服务端测试**（Python，项目现有风格）：mock Play Integrity / FCM 响应，双平台 enroll
-  分派，schema 迁移前后兼容。
+- **真机**：Key Attestation 硬件密钥判定、FCM 到达率、Doze/厂商后台策略。
+- **服务端测试**（Python，项目现有风格，已完成）：合成证书链验证 Android attestor、
+  mock FCM transport、schema 迁移前后兼容、双平台 wire 契约。
 
 ## 11. 风险与阻塞项
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
-| Google Play Console 注册（一次性 $25）与 Google Cloud 服务账号 | Phase 2 验收与 Phase 3 发布 | 提前启动账号申请，可与 Phase 0/1 并行 |
-| Play Integrity 需要应用经 Play 分发签名关联 | 侧载/调试构建无法拿真完整性判定 | Debug 走 development 通道；Phase 2 用 Play 内部测试渠道验收 |
+| Google Play Console 注册（一次性 $25）与 Google Cloud 服务账号 | Phase 2 推送验收与 Phase 3 发布 | 提前启动账号申请，可与 Phase 0/1 并行；FCM 需要服务账号 |
+| Key Attestation 依赖签名证书白名单与 verifiedBoot | 自签/侧载构建无法通过 production 注册 | Debug 走 development 通道；release 签名证书 SHA-256 需配进 `MURMUR_APP_ANDROID_SIGNING_DIGESTS` |
 | FCM 国内网络不可达 | 国内真机推送 | 先实现 FCM；Phase 3 按实测决定厂商通道立项（§5.3） |
-| 服务端 schema 迁移破坏旧 iOS 客户端 | 现有用户 | 双字段过渡期 + 迁移脚本 + iOS 全量回归（§8 红线） |
-| 无 GMS 设备（部分国内 ROM） | Play Integrity 不可用 | Key Attestation 降级路径（§4.3），按需启用 |
+| 服务端 schema 迁移破坏旧 iOS 客户端 | 现有用户 | 已落地：存量行回填 `ios` + `apns_token` 别名保留 + iOS 全量回归（§8 红线） |
+| 无 GMS 设备（部分国内 ROM） | FCM 不可用（Key Attestation 不受影响，不依赖 GMS） | 厂商推送通道按需立项（§5.3） |
 | Keystore 无 counter，重放防护弱于 App Attest | 安全性 | 一次性 challenge + 短 TTL（§4.2），Phase 2 安全评审确认 |
 
 ## 12. 本机测试环境（已就绪）

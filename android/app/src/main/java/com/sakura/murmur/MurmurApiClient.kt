@@ -221,7 +221,7 @@ class OkHttpMurmurApiClient(
     // MARK: devices & preferences
 
     override suspend fun updateDevice(
-        apnsToken: String?,
+        pushToken: String?,
         environment: String,
         timezone: String,
         deviceName: String,
@@ -229,7 +229,7 @@ class OkHttpMurmurApiClient(
         send(
             path = "/v1/device",
             method = "PUT",
-            body = json.encodeToString(DeviceRequest(apnsToken, environment, timezone, deviceName))
+            body = json.encodeToString(DeviceRequest(pushToken, environment, timezone, deviceName))
                 .toByteArray(Charsets.UTF_8),
             contentType = "application/json",
             authenticated = true,
@@ -517,6 +517,11 @@ private data class EnrollmentRequest(
     val attestation: String,
     @SerialName("device_name") val deviceName: String? = null,
     val environment: String,
+    // The server defaults a missing platform to "ios" (the shipped iOS client
+    // predates the field).  An Android enrolment that stays silent would be
+    // recorded as iOS: push-token validation and the per-request attestor are
+    // both chosen from the enrolled key's platform, so declare it here.
+    val platform: String = "android",
 )
 
 @Serializable
@@ -524,7 +529,10 @@ private data class AcknowledgeRequest(val reply: String? = null)
 
 @Serializable
 private data class DeviceRequest(
-    @SerialName("apns_token") val apnsToken: String? = null,
+    // The server grades the token against the platform recorded at enrolment;
+    // "push_token" is the platform-neutral spelling (`apns_token` remains a
+    // legacy alias for the shipped iOS client, which we are not).
+    @SerialName("push_token") val pushToken: String? = null,
     val environment: String,
     val timezone: String,
     @SerialName("device_name") val deviceName: String? = null,
