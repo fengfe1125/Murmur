@@ -707,7 +707,7 @@ internal object MurmurNotificationBridge {
     }
 }
 
-internal enum class NotificationAuthorization {
+enum class NotificationAuthorization {
     Unknown,
     Allowed,
     Denied,

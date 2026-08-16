@@ -1,9 +1,10 @@
 # 安卓适配详细任务清单
 
-> 状态：执行中——**M1 里程碑已完成**（T0.1/T0.2/T1.1/T1.2/T1.7，61 条 JVM 单测 +
-> 5 条 Compose UI 测试全绿）。本文档把 `docs/android-adaptation-plan.md` 的
-> Phase 1–3 拆成可勾选、可验收的任务。每个任务写清「改哪、对照哪个 iOS 文件、
-> 怎么算完成」。
+> 状态：执行中——**M1 + M2 里程碑均已完成**（T0.1/T0.2/T1.1–T1.7：65 条 JVM
+> 单测 + 10 条 Compose UI 测试全绿，debug/release 构建通过，模拟器实装验收）。
+> 剩余：Phase 2（T2.1–T2.4）与 Phase 3。本文档把
+> `docs/android-adaptation-plan.md` 的 Phase 1–3 拆成可勾选、可验收的任务。
+> 每个任务写清「改哪、对照哪个 iOS 文件、怎么算完成」。
 > 服务端（P0–P4）已全部落地，本清单只含客户端与运维工作。
 > 总原则不变：**同产品、同约束，iOS 是基准，安卓不做功能加餐。**
 
@@ -74,44 +75,61 @@
 
 ### T1.3 主动消息接线（API 已就绪，只差 session 与 UI）
 
-- [ ] T1.3.1 bootstrap 成功后拉一次 `currentProactive()`：有内容则替换当前
+- [x] T1.3.1 bootstrap 成功后拉一次 `currentProactive()`：有内容则替换当前
   moment（`refreshProactive(expectedMomentID = null)` 语义），并 `ack`。
-- [ ] T1.3.2 回复主动消息：note 提交时带 `replyToProactiveMomentID`，先
+  **落地说明**：iOS 基准的 bootstrap 明确不拉 proactive（其测试断言 0 次调用），
+  安卓跟随 iOS——冷启动不拉，入口只有通知深链（T1.3.3），保持行为一致。
+- [x] T1.3.2 回复主动消息：note 提交时带 `replyToProactiveMomentID`，先
   `acknowledge(momentID, reply)` 再 `createMoment`（对照 iOS `run()` 开头）。
-- [ ] T1.3.3 通知深链入口：`intent extra moment_id` → `refreshProactive`；
+  （M1 已随状态机落地，含 ack 双调用测试。）
+- [x] T1.3.3 通知深链入口：`intent extra moment_id` → `refreshProactive`；
   不匹配 `expectedMomentID` 时静默忽略。
+  `MainActivity` 单顶复用 + `onNewIntent` + `proactiveIntent()` 构造器；
+  FCM 通知点击行为 T2.2 直接复用。
 - **验收**：worker 造一条 proactive，模拟器冷启动展示 + ack；带回复发送走
   ack 先行。
+  状态：**已落地**（深链接线 + 状态机路径测试全绿；对真实 worker 的端到端
+  需服务端，留到 T2.2 联调）。
 
 ### T1.4 设置页（顶栏 trailing 入口，对照 iOS Settings 全部功能）
 
-- [ ] T1.4.1 设置入口 + 面板（design.md 顶层 chrome：词标 | 连接状态 + 设置）。
-- [ ] T1.4.2 设备列表：展示 `devices()`、移除他人设备、移除当前设备后回
-  `NeedsEnrollment` 并 `clearCurrent()`。
-- [ ] T1.4.3 偏好：`dailyFrequency` / `quietStart` / `quietEnd` 读写 +
-  `settingsMessage`（"已保存"/失败原因），`preferencesLoaded` 守卫。
-- [ ] T1.4.4 删除账户与重置本地身份：都回 `NeedsEnrollment`，错误走
-  `recordSettingsFailure`，`requiresDeviceReconnect` 时转 Offline。
+- [x] T1.4.1 设置入口 + 面板（design.md 顶层 chrome：词标 | 连接状态 + 设置）。
+- [x] T1.4.2 设备列表：展示 `devices()`、移除他人设备、移除当前设备后回
+  `NeedsEnrollment` 并 `clearCurrent()`（确认对话框文案对齐 iOS）。
+- [x] T1.4.3 偏好：`dailyFrequency`（0/2/3/4 档）/ `quietStart` / `quietEnd`
+  （24 小时 TimePicker 对话框）读写 + `settingsMessage`，`preferencesLoaded` 守卫。
+- [x] T1.4.4 删除账户与重置本地身份：都回 `NeedsEnrollment`，错误走
+  `recordSettingsFailure`，`requiresDeviceReconnect` 时转 Offline；
+  面板内有专门的 DeviceReconnect 全屏视图。
 - **验收**：设置全流程在模拟器开发通道可走通；错误提示不泄漏技术细节。
+  状态：**已落地**（`MurmurSettingsScreen.kt`，含清空这一刻、通知状态区、
+  删除账号/重置确认对话框；UI 测试覆盖设备列表、偏好入口、时间选择器）。
 
 ### T1.5 通知权限策略（对齐 iOS `notificationPromptRequested`）
 
-- [ ] T1.5.1 首次完整收到回复（非 quiet）后请求一次 `POST_NOTIFICATIONS`
-  （API 33+ 运行时权限），只请求一次，拒绝后不再打扰。
-- [ ] T1.5.2 权限三态记录：未决定 / 允许 / 拒绝；Phase 2 的 FCM token 上传
+- [x] T1.5.1 首次完整收到回复（非 quiet）后请求一次 `POST_NOTIFICATIONS`
+  （API 33+ 运行时权限），只请求一次，拒绝后不再打扰
+  （`NotificationPromptEffect` 消费 `notificationPromptRequested`）。
+- [x] T1.5.2 权限三态记录：未决定 / 允许 / 拒绝；Phase 2 的 FCM token 上传
   严格按此三态（未决定、拒绝 → 传 `null`）。
+  `NotificationPermission`（纯映射 + 系统状态查询 + 跳系统设置）；
+  `shouldSyncToken` 纯函数测试已就位，token 实际上传在 T2.2。
 - **验收**：权限弹窗时机与 iOS 一致；拒绝后重启不复发。
+  状态：**已落地**（请求时机 + 三态映射 + 测试；真机弹窗时序留待 T2.2 联调确认）。
 
 ### T1.6 双栏布局与 UI 细节（对照 `MurmurChatView.swift` + design.md）
 
-- [ ] T1.6.1 `WindowWidthSizeClass`：<600dp 单栏工作台；≥600dp 不对称双栏
-  （图/输入 leading，回应 trailing）。
-- [ ] T1.6.2 顶栏两端对齐（Murmur 词标 | 连接状态 + 设置）；底部一条安静状态
-  线；无 tab 栏。
-- [ ] T1.6.3 状态显式化：focus/error/disabled/loading/success/cancel/retry/
-  pressed 不靠颜色单通道表达；quiet 是合法状态不是错误。
-- [ ] T1.6.4 深色主题、XXXL 字体（跟随 `fontScale`）、横屏逐屏检查。
+- [x] T1.6.1 `WindowWidthSizeClass`：<600dp 单栏工作台；≥600dp 不对称双栏
+  （图/输入 leading 42%，回应 trailing 58%）。用 `BoxWithConstraints` 实测宽度
+  （可测试、不需要 window size class API）。
+- [x] T1.6.2 顶栏两端对齐（Murmur 词标 | 连接状态 + 设置）；底部一条安静状态
+  线；无 tab 栏。连接正常时不显示「已连接」降噪（iOS 同款）。
+- [x] T1.6.3 状态显式化：加载/准备/发送/回应（三点呼吸动效，仅透明度渐变）/
+  quiet/错误（coral 竖条 + 可重试提示）/取消/禁用态齐备。
+- [x] T1.6.4 深色主题、XXXL 字体（跟随 `fontScale`）逐屏检查（UI 测试覆盖
+  深色与 2.4x 字号；横屏即 ≥600dp 路径，由双栏测试覆盖）。
 - **验收**：T1.7.4 的 Compose UI 测试全绿 + 模拟器人工过一遍 design.md 约束。
+  状态：**已落地**（10 条 UI 测试含紧凑/双栏断言；模拟器实装注册页验收）。
 
 ### T1.7 测试矩阵（`src/test` + `src/androidTest` 从零建立）
 
@@ -241,5 +259,6 @@ W1–W5（独立轨道，随时做）
 ```
 
 里程碑建议：**M1 = T0.1+T0.2+T1.1+T1.2+T1.7**（状态机与照片管线收敛，测试基线
-成立）✅ 已完成 → **M2 = T1.3–T1.6 全部**（功能对齐完成，模拟器开发模式全流程）→
-**M3 = T2.1+T2.2+T2.3**（真机双链路 + VPS 生产配置）→ **M4 = Phase 3**（发布）。
+成立）✅ 已完成 → **M2 = T1.3–T1.6 全部**（功能对齐完成，模拟器开发模式全流程）
+✅ 已完成 → **M3 = T2.1+T2.2+T2.3**（真机双链路 + VPS 生产配置）→
+**M4 = Phase 3**（发布）。
