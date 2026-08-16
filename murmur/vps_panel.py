@@ -106,7 +106,9 @@ def resolve_direct_ssh(cfg: VpsConfig, timeout: float = 25.0) -> VpsConfig | Non
     if cfg.project:
         argv += ["--project", cfg.project]
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
     ip = proc.stdout.strip()
@@ -148,8 +150,12 @@ def _run_remote(cfg: VpsConfig, remote_cmd: str, timeout: float = 30.0) -> Remot
     只解析我们拼好的固定模板（变量一律 shlex.quote 或白名单整形）。"""
     argv = _ssh_argv(cfg, remote_cmd)
     try:
+        # 远端输出是 UTF-8（CLI 结果是中文）。text=True 在 Windows 上会拿
+        # 本机 ANSI 代码页（GBK）去解码，遇到中文直接炸在 reader 线程里，
+        # stdout 变成 None——必须显式指定 utf-8。
         proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout,
+            argv, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout,
         )
     except FileNotFoundError:
         return RemoteResult(False, detail=f"本机没有 {argv[0]}，先装好再试")
