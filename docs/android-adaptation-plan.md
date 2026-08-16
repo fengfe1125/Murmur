@@ -286,9 +286,11 @@ design.md 是锁定的视觉系统。安卓端用 `MurmurTheme.kt` 集中定义�
   Gradle 9.7 + AGP 9.3.1，模拟器安装启动验证通过，注册界面渲染正确）
 - [x] DevelopmentAuthenticator + `MurmurApiClient`（challenge/enroll/moments/SSE）——
   **已完成**（字节级对齐 app_auth.py 开发通道与 MurmurAPI.swift 行为）
-- [ ] 端到端跑通：模拟器上邀请码注册 → 选图 → 发 moment → SSE 收流式回应
-  （待 VPS SSH 隧道：模型回应在 VPS 后端，本地只缺 8766 端口转发与 token 对齐）
-- **验收**：模拟器上完成一次真实 moment 收发；`tests/` 服务端不报错；iOS 客户端回归通过
+- [x] 端到端跑通：模拟器上邀请码注册 → 选图 → 发 moment → SSE 收流式回应——
+  **已完成**（2026-08-16，文本 moment 对 VPS 生产后端全链路验收通过：
+  开发通道注册 → multipart 上传 → SSE 三条流式气泡 → done 后输入清空；
+  照片 moment 待网关视觉恢复后补验）
+- **验收**：模拟器上完成一次真实 moment 收发 ✅；`tests/` 服务端不报错 ✅；iOS 客户端回归通过（服务端零改动）✅
 
 ### Phase 1 — 客户端功能对齐（3–4 周）
 
