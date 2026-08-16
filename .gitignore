@@ -35,3 +35,9 @@ botpy.log
 manifest.txt
 .rollback-commit
 .env.bak-*
+# 安卓开发工具链（JDK / Android SDK / AVD），不入库
+tools/
+android/.gradle/
+android/local.properties
+android/**/build/
+*.keystore
