@@ -159,7 +159,13 @@ class BubbleStreamer:
 
         fresh = done[self._emitted :]
         self._emitted = len(done)
-        return [x for x in fresh if x.strip()]
+        # 模型偶尔把历史里的 ' ⏎ ' 拼接符模仿回单条气泡，流式路径同样拆掉。
+        return [
+            piece.strip()
+            for x in fresh
+            for piece in x.split("⏎")
+            if piece.strip()
+        ]
 
 
 def _as_bubbles(value) -> list[str]:
@@ -171,11 +177,14 @@ def _as_bubbles(value) -> list[str]:
         parts = [str(x).strip() for x in value]
     else:
         return []
-    # 太长的一条再兜一道：模型有时不分段，塞一大坨进来
+    # 喂历史时多条气泡用 ' ⏎ ' 拼接，模型有时会把这个符号原样模仿回
+    # 单条气泡里——按 ⏎ 再拆一次，别让它出现在他看到的文字里。
     out: list[str] = []
     for p in parts:
-        if p:
-            out.append(p)
+        for piece in p.split("⏎"):
+            piece = piece.strip()
+            if piece:
+                out.append(piece)
     return out[:3]
 
 
@@ -527,7 +536,7 @@ def _respond_once(
         if not salvaged:
             raise
         log.warning("模型没按 JSON 返回，抢救出 %d 条气泡", len(salvaged))
-        return Reply(scene="（输出被截断）", move="speak", say=salvaged)
+        return Reply(scene="（输出被截断）", move="speak", say=_as_bubbles(salvaged))
 
     move = data.get("move", "quiet")
     if move not in ("speak", "brief", "quiet"):

@@ -39,6 +39,11 @@ class _Resp:
         self.choices = [_Choice(content)]
 
 
+class _StreamChunk:
+    def __init__(self, content: str):
+        self.choices = [type("C", (), {"delta": type("D", (), {"content": content})()})()]
+
+
 class _HttpResponse:
     """openai 3.x 的 APIStatusError 需要 response.request/status_code/headers。"""
 
@@ -74,6 +79,8 @@ class FakeClient:
         content = self.content_by_model.get(
             model, '{"move":"brief","say":["默认回复"],"scene":"测试"}'
         )
+        if kwargs.get("stream"):
+            return [_StreamChunk(content)]
         return _Resp(content)
 
 
@@ -165,6 +172,30 @@ class EngineFallbackTests(unittest.TestCase):
         reply = self._call(client)
         self.assertEqual(reply.say, ["在呢，怎么啦"])
         self.assertEqual(len(client.calls), 1)
+
+    def test_history_joiner_is_never_shown_to_the_user(self):
+        # 历史里多条气泡用 ' ⏎ ' 拼接喂给模型，它偶尔会原样模仿回来。
+        # 无论走 JSON、纯文本抢救还是流式哪条路，⏎ 都不能发给他。
+        client = FakeClient(
+            {"kimi-k2.6": '{"move":"speak","say":["摸！ ⏎ 吃饱了正是一天里最该摸的时候 ⏎"],"scene":"测试"}'}
+        )
+        reply = self._call(client)
+        self.assertEqual(reply.say, ["摸！", "吃饱了正是一天里最该摸的时候"])
+
+        client = FakeClient({"kimi-k2.6": "摸！ ⏎ 吃饱了正是一天里最该摸的时候"})
+        reply = self._call(client)
+        self.assertEqual(reply.say, ["摸！", "吃饱了正是一天里最该摸的时候"])
+
+    def test_streamed_bubbles_split_the_history_joiner(self):
+        client = FakeClient(
+            {"kimi-k2.6": '{"move":"speak","say":["摸！ ⏎ 多吃点"],"scene":"测试"}'}
+        )
+        streamed: list[str] = []
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, self.cfg,
+                            note="测试", chat_id=0, on_bubble=streamed.append)
+        self.assertEqual(streamed, ["摸！", "多吃点"])
+        self.assertEqual(reply.say, ["摸！", "多吃点"])
 
     def test_long_prose_without_json_still_falls_back(self):
         # 没有花括号的长篇思考痕迹不能当气泡发出去，交给降级模型。
