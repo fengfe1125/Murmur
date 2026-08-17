@@ -255,12 +255,18 @@ ssh -N -L 8765:127.0.0.1:8765 user@server
 - 主模型（`MURMUR_MODEL`）抛网关错误（503/连接失败等）或吐不出 JSON 时，
   Worker 自动换 `MURMUR_FALLBACK_MODEL`（默认 `deepseek-v4-flash`）重试一次；
   降级调用不带 `response_format`（该模型在 OpenCode 网关不支持 json_schema）。
+- `MURMUR_JSON_SCHEMA=0` 可让主模型也走「不带 response_format」模式——
+  glm / deepseek 系传 json_schema 会 400 或把 token 全烧进思考，关掉后靠
+  SYSTEM 提示词约束输出，实测 glm-5.3 合规。qwen/kimi 系保持 1。
 - 带图消息直接走 `MURMUR_IMAGE_MODEL`（默认 `mimo-v2.5`，多模态）；它同样
   不支持 json_schema。mimo 也挂掉时退回 `MURMUR_FALLBACK_MODEL`，**不带图**
   纯文本重试——EXIF/时间/文字仍会进上下文，回复质量下降但不会断。
+- 选主模型时避开与降级模型同一厂商线路（deepseek 主 + deepseek 降级没有
+  隔离意义）；glm-5.3 主 + deepseek-v4-flash 降级是 2026-08-17 Kimi 上游
+  中断后的生产组合。
 - 每一次降级都会在 `murmur_app_worker.log` 打一条
   `模型 <name> 失败（<错误类型>），尝试降级`；巡检日志看到成片出现就说明
-  主模型上游出问题了（2026-08-16 Qwen 上游 503 整场中断即前例）。
+  主模型上游出问题了（2026-08-16 Qwen、2026-08-17 Kimi 两次上游中断即前例）。
 - 模型偶尔无视 json_schema 直接吐短句气泡（kimi-k2.6 在 OpenCode 网关
   实测约 1/3 概率把思考写进正文）——内容是对的就不会丢：无花括号且
   ≤150 字、每行 ≤60 字的输出会按行收下当气泡（日志记

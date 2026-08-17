@@ -76,6 +76,11 @@ class Config:
     fallback_model: str
     # 带图消息走这个多模态模型；空字符串 = 沿用主模型。
     image_model: str
+    # 主模型是否支持 json_schema 响应格式。OpenCode 网关实测只有
+    # qwen / kimi 系吃这套；glm / deepseek 传 response_format 要么 400
+    # 要么把 token 全烧进思考。关掉后靠 SYSTEM 里的「只返回 JSON」+
+    # _extract_json 兜底，实测 glm-5.3 输出完全合规。
+    json_schema: bool
     telegram_token: str | None
     allowed_chat_ids: set[int]
     dingtalk_client_id: str | None
@@ -174,6 +179,7 @@ class Config:
                 "MURMUR_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL
             ),
             image_model=os.getenv("MURMUR_IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
+            json_schema=_parse_bool("MURMUR_JSON_SCHEMA", default=True),
             telegram_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             allowed_chat_ids=allowed,
             dingtalk_client_id=os.getenv("DINGTALK_CLIENT_ID") or None,

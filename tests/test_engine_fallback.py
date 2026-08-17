@@ -176,6 +176,24 @@ class EngineFallbackTests(unittest.TestCase):
         self.assertEqual(reply.say, ["这条是降级模型说的"])
         self.assertEqual(len(client.calls), 2)
 
+    def test_json_schema_off_primary_drops_response_format(self):
+        # glm / deepseek 系不支持 response_format：MURMUR_JSON_SCHEMA=0
+        # 时主模型调用不带 json_schema，直接靠提示词约束。
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "m3.db"),
+            model="glm-5.3",
+            fallback_model="deepseek-v4-flash",
+            image_model="mimo-v2.5",
+            json_schema=False,
+        )
+        client = FakeClient({"glm-5.3": PRIMARY_JSON})
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        self.assertEqual(reply.say, ["主模型说的"])
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(client.calls[0]["model"], "glm-5.3")
+        self.assertNotIn("response_format", client.calls[0])
+
     def test_no_fallback_configured_raises(self):
         cfg = make_config(
             db_path=str(Path(self.tmp.name) / "m2.db"),

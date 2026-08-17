@@ -31,6 +31,8 @@ _EXPLICIT = {
     "api_key": "test-key",
     "model": "test-model",
     "base_url": "https://example.invalid/v1",
+    # 引擎测试断言主模型带 response_format；默认走真实生产行为
+    "json_schema": True,
     # 日志目录：测试里不该碰真实的 logs/，指到临时目录
     "log_dir": Path("/tmp/murmur-test-logs"),
 }

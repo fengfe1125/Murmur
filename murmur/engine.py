@@ -235,14 +235,17 @@ def _response_format() -> dict:
     }
 
 
-def _fallback_attempts(cfg: Config, *, primary: str) -> list[tuple[str, bool]]:
+def _fallback_attempts(
+    cfg: Config, *, primary: str, use_schema: bool = True,
+) -> list[tuple[str, bool]]:
     """(模型, 是否带 json_schema) 的尝试序列。
 
     降级模型一律不带 json_schema——deepseek-v4-flash / mimo-v2.5 在
     OpenCode 网关上不支持 response_format，靠 SYSTEM 提示词里的
-    「只返回 JSON」约束输出，_extract_json 负责剥代码块。
+    「只返回 JSON」约束输出，_extract_json 负责剥代码块。主模型是否
+    带由 MURMUR_JSON_SCHEMA 决定（glm / deepseek 系都不支持）。
     """
-    attempts = [(primary, True)]
+    attempts = [(primary, use_schema)]
     fallback = (cfg.fallback_model or "").strip()
     if fallback and fallback != primary:
         attempts.append((fallback, False))
@@ -288,7 +291,9 @@ def initiate(
     ]
 
     last_error: Exception | None = None
-    for model, use_schema in _fallback_attempts(cfg, primary=cfg.model):
+    for model, use_schema in _fallback_attempts(
+        cfg, primary=cfg.model, use_schema=cfg.json_schema
+    ):
         try:
             reply = _initiate_once(
                 cfg, model, use_schema, messages,
@@ -429,7 +434,7 @@ def respond(
         # 带图消息：mimo 系多模态模型（不支持 json_schema，靠提示词约束）
         attempts = [(cfg.image_model, False)]
     else:
-        attempts = [(cfg.model, True)]
+        attempts = [(cfg.model, cfg.json_schema)]
     fallback = (cfg.fallback_model or "").strip()
     if fallback and fallback != attempts[0][0]:
         attempts.append((fallback, False))
