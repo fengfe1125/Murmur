@@ -11,7 +11,7 @@ import re
 import threading
 from dataclasses import dataclass
 
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 from .config import Config
 from .memory import Entry, Memory
@@ -228,6 +228,27 @@ def _too_similar(text: str, previous: list[str]) -> bool:
     return False
 
 
+def _response_format() -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "reply", "strict": True, "schema": OUTPUT_SCHEMA},
+    }
+
+
+def _fallback_attempts(cfg: Config, *, primary: str) -> list[tuple[str, bool]]:
+    """(模型, 是否带 json_schema) 的尝试序列。
+
+    降级模型一律不带 json_schema——deepseek-v4-flash / mimo-v2.5 在
+    OpenCode 网关上不支持 response_format，靠 SYSTEM 提示词里的
+    「只返回 JSON」约束输出，_extract_json 负责剥代码块。
+    """
+    attempts = [(primary, True)]
+    fallback = (cfg.fallback_model or "").strip()
+    if fallback and fallback != primary:
+        attempts.append((fallback, False))
+    return attempts
+
+
 def initiate(
     moment: Moment,
     mem: Memory,
@@ -259,25 +280,64 @@ def initiate(
     else:
         lines += ["", "（你还没主动说过话，这是第一次）"]
 
-    resp = _client(cfg).chat.completions.create(
-        model=cfg.model,
-        max_tokens=MAX_TOKENS,
-        messages=[
-            {"role": "system", "content": SYSTEM},
-            *([{"role": "system", "content": dossier}] if dossier else []),
-            *history_turns(mem.recent(chat_id, limit=6)),
-            {"role": "user", "content": "\n".join(lines)},
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {"name": "reply", "strict": True, "schema": OUTPUT_SCHEMA},
-        },
-    )
+    messages = [
+        {"role": "system", "content": SYSTEM},
+        *([{"role": "system", "content": dossier}] if dossier else []),
+        *history_turns(mem.recent(chat_id, limit=6)),
+        {"role": "user", "content": "\n".join(lines)},
+    ]
+
+    last_error: Exception | None = None
+    for model, use_schema in _fallback_attempts(cfg, primary=cfg.model):
+        try:
+            reply = _initiate_once(
+                cfg, model, use_schema, messages,
+                moment=moment, mem=mem, intent=intent, chat_id=chat_id,
+                said_before=said_before, dossier=dossier, _retry=_retry,
+            )
+            if last_error is not None:
+                log.info("主动消息：降级模型 %s 接住了", model)
+            return reply
+        except (OpenAIError, ValueError) as error:
+            log.warning(
+                "主动消息：模型 %s 失败（%s），尝试降级",
+                model, type(error).__name__,
+            )
+            last_error = error
+    raise last_error  # attempts 至少有一个，跑不到这里才怪
+
+
+def _initiate_once(
+    cfg: Config,
+    model: str,
+    use_schema: bool,
+    messages: list[dict],
+    *,
+    moment: Moment,
+    mem: Memory,
+    intent,
+    chat_id: int,
+    said_before,
+    dossier: str | None,
+    _retry: bool,
+) -> Reply:
+    kwargs = dict(model=model, max_tokens=MAX_TOKENS, messages=messages)
+    if use_schema:
+        kwargs["response_format"] = _response_format()
+    resp = _client(cfg).chat.completions.create(**kwargs)
     raw = resp.choices[0].message.content or ""
     try:
         data = _extract_json(raw)
     except ValueError:
         salvaged = BubbleStreamer().feed(raw)[:2]
+        if not salvaged and "{" not in raw:
+            lines = [x.strip() for x in raw.splitlines() if x.strip()]
+            if (
+                1 <= len(lines) <= 3
+                and len(raw) <= 150
+                and all(len(x) <= 60 for x in lines)
+            ):
+                salvaged = lines[:2]
         if not salvaged:
             raise
         return Reply(scene="（主动·输出被截断）", move="speak", say=salvaged)
@@ -340,6 +400,12 @@ def respond(
     """photo 为 None 时是纯文字消息——照样要回。
 
     传了 on_bubble 就走流式：每写完一条气泡立刻回调，第一条不用等全部生成完。
+
+    降级备案：带图消息走 MURMUR_IMAGE_MODEL（mimo-v2.5，能看图）；
+    任何模型抛网关错误或吐不出 JSON 时，自动换 MURMUR_FALLBACK_MODEL
+    （deepseek-v4-flash）再试一次——降级模型不支持 json_schema、
+    也不看图，所以降级调用去掉 response_format，带图消息降级时退回
+    纯文本描述（EXIF/时间仍在上下文里）。
     """
     context = build_context(
         moment,
@@ -349,20 +415,67 @@ def respond(
     )
     history = history_turns(mem.recent(chat_id, limit=8))
 
-    content: list[dict] = []
+    image_block: dict | None = None
     if photo is not None:
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{photo.media_type};base64,{photo.image_b64}"
-                },
-            }
-        )
-    content.append({"type": "text", "text": context})
+        image_block = {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{photo.media_type};base64,{photo.image_b64}"
+            },
+        }
 
+    client = _client(cfg)
+    if image_block is not None and (cfg.image_model or "").strip():
+        # 带图消息：mimo 系多模态模型（不支持 json_schema，靠提示词约束）
+        attempts = [(cfg.image_model, False)]
+    else:
+        attempts = [(cfg.model, True)]
+    fallback = (cfg.fallback_model or "").strip()
+    if fallback and fallback != attempts[0][0]:
+        attempts.append((fallback, False))
+
+    last_error: Exception | None = None
+    for model, use_schema in attempts:
+        include_image = image_block is not None and model == attempts[0][0]
+        content: list[dict] = []
+        if include_image:
+            content.append(image_block)
+        content.append({"type": "text", "text": context})
+        try:
+            reply = _respond_once(
+                model=model,
+                use_schema=use_schema,
+                content=content,
+                history=history,
+                dossier=dossier,
+                client=client,
+                on_bubble=on_bubble,
+                photo=photo,
+            )
+            if last_error is not None:
+                log.info("降级模型 %s 接住了回复", model)
+            return reply
+        except (OpenAIError, ValueError) as error:
+            log.warning(
+                "模型 %s 失败（%s），尝试降级", model, type(error).__name__,
+            )
+            last_error = error
+    raise last_error  # attempts 至少有一个，跑不到这里才怪
+
+
+def _respond_once(
+    *,
+    model: str,
+    use_schema: bool,
+    content: list[dict],
+    history: list[dict],
+    dossier: str | None,
+    client: OpenAI,
+    on_bubble,
+    photo: Photo | None,
+) -> Reply:
     kwargs = dict(
-        model=cfg.model,
+        model=model,
         max_tokens=MAX_TOKENS,
         messages=[
             {"role": "system", "content": SYSTEM},
@@ -372,16 +485,9 @@ def respond(
             *history,
             {"role": "user", "content": content},
         ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "reply",
-                "strict": True,
-                "schema": OUTPUT_SCHEMA,
-            },
-        },
     )
-    client = _client(cfg)
+    if use_schema:
+        kwargs["response_format"] = _response_format()
 
     if on_bubble is None:
         raw = client.chat.completions.create(**kwargs).choices[0].message.content or ""
@@ -401,9 +507,21 @@ def respond(
         # JSON 截断了（模型话太多撑爆 max_tokens）。别整个崩掉——
         # 把已经写完整的那几条气泡捞出来照样能用。
         salvaged = BubbleStreamer().feed(raw)[:3]
+        if not salvaged and "{" not in raw:
+            # 有些模型（kimi-k2.6 在 OpenCode 网关上有过）会无视
+            # json_schema，直接吐纯文本气泡——内容是对的，别丢掉。
+            # 只收"像回复"的短文本：气泡每条 ≤60 字、至多 3 条，
+            # 太长或带思考痕迹的（超过 150 字）仍交给降级模型。
+            lines = [x.strip() for x in raw.splitlines() if x.strip()]
+            if (
+                1 <= len(lines) <= 3
+                and len(raw) <= 150
+                and all(len(x) <= 60 for x in lines)
+            ):
+                salvaged = lines[:3]
         if not salvaged:
             raise
-        log.warning("JSON 截断，抢救出 %d 条气泡", len(salvaged))
+        log.warning("模型没按 JSON 返回，抢救出 %d 条气泡", len(salvaged))
         return Reply(scene="（输出被截断）", move="speak", say=salvaged)
 
     move = data.get("move", "quiet")

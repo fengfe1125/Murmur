@@ -275,6 +275,14 @@ URL 里的 token 也会自动带到页面后续 API 和照片请求。没设就�
 默认 `qwen3.7-plus`，约 **¥0.01 一张图**。换模型改 `.env` 的 `MURMUR_MODEL`，
 或者 `murmur reply xx.jpg --model kimi-k2.6` 临时试。
 
+**模型降级备案**（2026-08-16 OpenCode 网关 Qwen 上游整体 503 之后加的）：
+
+- 主模型抛网关错误或吐不出 JSON → 自动换 `MURMUR_FALLBACK_MODEL`
+  （默认 `deepseek-v4-flash`）重试一次，降级调用不带 json_schema。
+- 带图消息走 `MURMUR_IMAGE_MODEL`（默认 `mimo-v2.5`，多模态）；
+  mimo 也挂掉时退回降级模型、**不带图**纯文本重试，消息不会断。
+- 每次降级都会在日志打 `模型 <name> 失败（<错误类型>），尝试降级`。
+
 `minimax-m3` 实测会把 `<think>` 标签写进正文，不建议用（解析器能剥掉，但浪费 token）。
 
 两处已经做了成本分级，不用换主模型：
@@ -311,6 +319,16 @@ murmur/
   webui/       看板的前端，单个 HTML，没有构建步骤
   cli.py       app-api / app-worker / 本地诊断 / 测试 Bot / web
 ```
+
+**GitHub 仓库同时装着两摊代码，靠 git sparse-checkout 隔离：**
+
+- **服务端（会推到 VPS）**：`murmur/`、`deploy/`、`tests/` 和根目录文件
+  （`pyproject.toml` 等）。VPS 用 cone 模式 sparse-checkout 只拉这些。
+- **App（不进 VPS）**：`MurmurApp/`、`MurmurApp.xcodeproj/`、`android/`，
+  只在开发机上构建。`brand/`、`docs/`、`scripts/` 同样留在开发机。
+
+`deploy/murmur-update` 和 `scripts/link-vps-to-github.sh` 都会强制应用这套
+sparse 规则，旧全量检出的 VPS 在下次更新时会自动把 App 目录从磁盘清掉。
 
 参考的开源项目见 [CREDITS.md](CREDITS.md)。
 

@@ -15,6 +15,15 @@ DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 # 备选见 README 的"换模型"。
 DEFAULT_MODEL = "qwen3.7-plus"
 
+# 降级备案：主模型不可用时自动换的模型（OpenCode 网关 2026-08-16 的
+# Qwen 上游中断就是前例）。deepseek-v4-flash 不支持 response_format，
+# 降级调用会自动去掉 json_schema，靠 SYSTEM 提示词约束输出。
+DEFAULT_FALLBACK_MODEL = "deepseek-v4-flash"
+
+# 图片消息的多模态模型。kimi-k2.6 在这套网关上的视觉不可靠，mimo-v2.5
+# 实测能看图、便宜、输出偏短；它同样不支持 json_schema。
+DEFAULT_IMAGE_MODEL = "mimo-v2.5"
+
 CHANNEL_MODES = frozenset({"transition", "app_only"})
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -63,6 +72,10 @@ class Config:
     # 记忆整理用的模型。整理是"重写三块摘要"，便宜模型完全够，
     # 而且它是调用量最大的 prompt——默认跟随主模型，配了就分开算。
     memory_model: str | None
+    # 主模型报错时的降级模型（空字符串 = 不降级，直接失败）。
+    fallback_model: str
+    # 带图消息走这个多模态模型；空字符串 = 沿用主模型。
+    image_model: str
     telegram_token: str | None
     allowed_chat_ids: set[int]
     dingtalk_client_id: str | None
@@ -157,6 +170,10 @@ class Config:
             base_url=os.getenv("MURMUR_BASE_URL", DEFAULT_BASE_URL),
             model=os.getenv("MURMUR_MODEL", DEFAULT_MODEL),
             memory_model=os.getenv("MURMUR_MEMORY_MODEL") or None,
+            fallback_model=os.getenv(
+                "MURMUR_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL
+            ),
+            image_model=os.getenv("MURMUR_IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
             telegram_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             allowed_chat_ids=allowed,
             dingtalk_client_id=os.getenv("DINGTALK_CLIENT_ID") or None,
