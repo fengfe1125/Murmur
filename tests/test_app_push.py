@@ -167,6 +167,42 @@ class APNsTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_scheduler_without_providers_generates_for_in_app_polling(self):
+        store = AppStore(self.root / "app.db")
+        try:
+            invite = store.create_invite()
+            enrolled = store.redeem_invite(
+                code=invite, key_id="dev-poll", public_key=None, receipt=None,
+                counter=0, environment="development",
+            )
+            store.update_device(
+                enrolled.key_id, push_token="dev-token", environment="development",
+                timezone="Asia/Shanghai", device_name="phone",
+            )
+            scheduler = ProactiveScheduler(
+                store, {}, lambda _user, _tz: (["在干嘛"], "傍晚"),
+            )
+            now = datetime(2026, 8, 14, 12, tzinfo=UTC)
+            store.replace_slots(
+                enrolled.user_id, now.astimezone(ZoneInfo("Asia/Shanghai")).date(),
+                [now - timedelta(seconds=1)],
+            )
+            store.create_moment(
+                user_id=enrolled.user_id, note="hello", image_path=None,
+                idempotency_key="first-inbound", request_digest="first",
+            )
+            job = store.claim_job("test")
+            store.finish_job(
+                job, scene="", move="speak", memory_entry_id=1, preview_path=None
+            )
+            self.assertEqual(scheduler.run_once(now), 1)
+            # Nothing is pushed, but the moment waits for in-app polling.
+            self.assertEqual(scheduler.deliver_pending(now), 0)
+            current = store.current_proactive(enrolled.user_id)
+            self.assertEqual(current["bubbles"], ["在干嘛"])
+        finally:
+            store.close()
+
     def test_transport_exception_log_never_contains_device_token(self):
         store = AppStore(self.root / "private-log.db")
         token = "private-device-token-" + "e" * 48

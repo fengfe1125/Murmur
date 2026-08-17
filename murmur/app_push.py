@@ -348,6 +348,11 @@ class ProactiveScheduler:
     def deliver_pending(self, now: datetime | None = None) -> int:
         """Replay durable per-device APNs work, including after a restart."""
         now = now or datetime.now(UTC)
+        if not self.providers:
+            # Without any push provider (development installs) proactive
+            # moments are picked up by in-app polling; pending rows age out
+            # through expire_stale_proactive instead of retrying forever.
+            return 0
         delivered = 0
         # A sick APNs/FCM must not starve the worker's moment processing: one
         # round spends at most delivery_budget_seconds on sends.  Whatever is

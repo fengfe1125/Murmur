@@ -499,7 +499,6 @@ def run() -> None:
     except OSError:
         pass
     with AppStore(settings.db_path) as store:
-        scheduler = None
         apns_configured = all((
             settings.apns_key_path, settings.apns_key_id,
             settings.apns_team_id, settings.apns_topic,
@@ -508,33 +507,39 @@ def run() -> None:
             # The official channel promises proactive delivery.  Starting a
             # production worker without APNs would silently break that promise.
             settings.validate_apns()
+        from .app_push import EngineProactiveGenerator, ProactiveScheduler
+
+        providers = {}
         if apns_configured:
-            from .app_push import APNsProvider, EngineProactiveGenerator, ProactiveScheduler
+            from .app_push import APNsProvider
 
             provider = APNsProvider.from_settings(
                 settings, on_invalid_token=store.invalidate_push_token
             )
-            providers = {provider.platform: provider}
-            # Android is opt-in: without FCM configured the iOS half still runs,
-            # and any Android delivery stays pending rather than being buried.
-            if settings.fcm_configured:
-                from .app_push_fcm import FCMProvider
+            providers[provider.platform] = provider
+        # Android is opt-in: without FCM configured the iOS half still runs,
+        # and any Android delivery stays pending rather than being buried.
+        if settings.fcm_configured:
+            from .app_push_fcm import FCMProvider
 
-                fcm = FCMProvider.from_settings(
-                    settings, on_invalid_token=store.invalidate_push_token
-                )
-                providers[fcm.platform] = fcm
-            else:
-                log.info("FCM not configured; Android push delivery is disabled")
-            scheduler = ProactiveScheduler(
-                store, providers, EngineProactiveGenerator(
-                    cfg, data_root=settings.data_root,
-                    memory_db_path=settings.memory_db_path,
-                ), lock_root=settings.data_root,
-                delivery_budget_seconds=settings.push_delivery_budget_seconds,
+            fcm = FCMProvider.from_settings(
+                settings, on_invalid_token=store.invalidate_push_token
             )
-        else:
-            log.warning("APNs/proactive delivery disabled in explicit development mode")
+            providers[fcm.platform] = fcm
+        if not providers:
+            # Push providers are optional outside production: proactive
+            # moments are still generated and wait for in-app polling on
+            # /v1/proactive/current instead of never existing at all.
+            log.warning(
+                "no push providers configured; proactive moments rely on in-app polling"
+            )
+        scheduler = ProactiveScheduler(
+            store, providers, EngineProactiveGenerator(
+                cfg, data_root=settings.data_root,
+                memory_db_path=settings.memory_db_path,
+            ), lock_root=settings.data_root,
+            delivery_budget_seconds=settings.push_delivery_budget_seconds,
+        )
         AppWorker(store, cfg, settings, scheduler=scheduler).serve_forever()
 
 
