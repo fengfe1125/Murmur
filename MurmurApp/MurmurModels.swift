@@ -88,6 +88,22 @@ struct MurmurFailure: Error, Equatable, Sendable {
     }
 }
 
+/// What is left on screen after an outgoing turn failed: why it never landed,
+/// and whether saying it again is on offer.
+///
+/// Distinct from `MurmurFailure`, which is an error in flight.  This one belongs
+/// to a single transcript row and outlives the moment that produced it, so the
+/// mark beside the bubble can explain itself without the app having to hold a
+/// whole error somewhere global.
+struct MurmurSendFailure: Equatable, Sendable {
+    let message: String
+    let canResend: Bool
+
+    /// A row that was still sending when the app was last killed.  The verdict
+    /// survived in the transcript; the reason and the submission did not.
+    static let interrupted = MurmurSendFailure(message: "这条没有发出去。", canResend: false)
+}
+
 /// How fast Murmur's bubbles are allowed to land.
 ///
 /// The server streams a whole reply the instant it is ready, which reads as a

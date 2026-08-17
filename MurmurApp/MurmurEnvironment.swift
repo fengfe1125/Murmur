@@ -112,10 +112,20 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
     /// two replies the same message id, and the transcript's `ForEach` then
     /// draws only the first of them.
     private var moments = 0
+    /// Under `--murmur-fail-first-send` the first send of the run does not
+    /// land and every one after it does.  That is what makes the failure mark
+    /// reachable on screen, and testable as an offer rather than a dead end:
+    /// press it and the same row goes through.
+    private let failsFirstSend = ProcessInfo.processInfo.arguments.contains("--murmur-fail-first-send")
+    private var sends = 0
 
     func storedIdentity() async throws -> MurmurIdentity? { identity }
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity { identity }
     func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String) async throws -> MomentReceipt {
+        sends += 1
+        if failsFirstSend, sends == 1 {
+            throw MurmurFailure(code: "network_error", message: "暂时没有连上 Murmur。", retryable: true)
+        }
         moments += 1
         return .init(momentID: "ui-moment-\(moments)", status: "queued")
     }

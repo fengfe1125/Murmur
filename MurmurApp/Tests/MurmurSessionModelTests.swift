@@ -223,12 +223,38 @@ final class MurmurSessionModelTests: XCTestCase {
         model.submit()
         try await waitUntil { model.phase == .error }
         XCTAssertEqual(model.messages.filter { $0.text == "重发" }.count, 1)
-        XCTAssertEqual(model.messages.first?.delivery, .failed)
+        let failed = try XCTUnwrap(model.messages.first)
+        XCTAssertEqual(failed.delivery, .failed)
+        // The row itself carries the mark and the offer — nothing global does.
+        XCTAssertEqual(model.sendFailures[failed.id]?.canResend, true)
 
-        model.retry()
+        model.resend(failed.id)
         try await waitUntil { model.phase == .complete }
         XCTAssertEqual(model.messages.filter { $0.text == "重发" }.count, 1)
         XCTAssertNotEqual(model.messages.first?.delivery, .failed)
+        XCTAssertNil(model.sendFailures[failed.id])
+    }
+
+    func testOnlyTheFailedRowIsMarkedWhenALaterSendSucceeds() async throws {
+        let api = FakeMurmurAPIClient(mode: .terminalFailureThenSuccess)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
+        await model.bootstrap()
+
+        model.draftText = "第一条"
+        model.submit()
+        try await waitUntil { model.phase == .error }
+        let failed = try XCTUnwrap(model.messages.first)
+
+        model.draftText = "第二条"
+        model.submit()
+        try await waitUntil { model.phase == .complete }
+
+        // The second line succeeded and must not inherit the first one's mark,
+        // and the first one must not lose it.
+        let succeeded = try XCTUnwrap(model.messages.first { $0.text == "第二条" })
+        XCTAssertEqual(model.messages.first { $0.id == failed.id }?.delivery, .failed)
+        XCTAssertNotNil(model.sendFailures[failed.id])
+        XCTAssertNil(model.sendFailures[succeeded.id])
     }
 
     func testProactiveMessageJoinsTheTranscript() async throws {
@@ -251,6 +277,20 @@ final class MurmurSessionModelTests: XCTestCase {
         // Arriving twice must not say it twice.
         await model.handleNotification(momentID: "proactive-1")
         XCTAssertEqual(model.messages.count, 1)
+    }
+
+    func testCheckProactivePollsWithoutANotification() async throws {
+        let api = FakeMurmurAPIClient(mode: .proactiveReply)
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
+        await model.bootstrap()
+
+        await model.checkProactive()
+
+        let proactiveCalls = await api.proactiveCalls
+        XCTAssertEqual(proactiveCalls, 1)
+        XCTAssertEqual(model.messages.map(\.text), ["想到你了"])
+        let acknowledgements = await api.acknowledgements
+        XCTAssertEqual(acknowledgements.map(\.momentID), ["proactive-1"])
     }
 
     func testCancellingMarksStrandedSendsFailedRatherThanLeavingThemSpinning() async throws {
@@ -276,6 +316,11 @@ final class MurmurSessionModelTests: XCTestCase {
         // that never left is called failed.
         XCTAssertEqual(model.messages.map(\.delivery), [.sent, .failed])
         XCTAssertFalse(model.isAwaitingReply)
+        // Cancelling is deliberate, so the mark states what happened without
+        // offering to undo the person's own decision.
+        let stranded = try XCTUnwrap(model.messages.last)
+        XCTAssertEqual(model.sendFailures[stranded.id]?.canResend, false)
+        XCTAssertEqual(model.sendFailures[stranded.id]?.message, "已取消发送。")
     }
 
     func testRetryReusesIdempotencyKeyAndDoesNotDuplicateBubbles() async throws {
@@ -286,7 +331,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
         model.submit()
         try await waitUntil { model.phase == .error }
-        model.retry()
+        model.resend(try XCTUnwrap(model.messages.first).id)
         try await waitUntil { model.phase == .complete }
 
         let keys = await api.idempotencyKeys
@@ -317,7 +362,7 @@ final class MurmurSessionModelTests: XCTestCase {
 
         model.submit()
         try await waitUntil { model.phase == .error }
-        model.retry()
+        model.resend(try XCTUnwrap(model.messages.first).id)
         try await waitUntil { model.phase == .complete }
 
         let keys = await api.idempotencyKeys
@@ -334,7 +379,11 @@ final class MurmurSessionModelTests: XCTestCase {
 
         model.submit()
         try await waitUntil { model.phase == .error }
-        model.retry()
+        let failed = try XCTUnwrap(model.messages.first)
+        // The row is marked, but the mark is not a button: pressing it must do
+        // nothing rather than send the same key with different content again.
+        XCTAssertEqual(model.sendFailures[failed.id]?.canResend, false)
+        model.resend(failed.id)
 
         XCTAssertEqual(model.failure?.code, "idempotency_conflict")
         XCTAssertEqual(model.failure?.retryable, false)
@@ -515,7 +564,7 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertFalse(model.phase.isBusy)
     }
 
-    func testPhotoSelectionFailureIsNotRetryable() async {
+    func testPhotoSelectionFailureBelongsToTheDraftNotTheTranscript() async {
         let api = FakeMurmurAPIClient()
         let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
@@ -523,8 +572,12 @@ final class MurmurSessionModelTests: XCTestCase {
         model.failPhotoSelection()
         XCTAssertEqual(model.phase, .error)
         XCTAssertEqual(model.failure?.retryable, false)
-        model.retry()
-        XCTAssertEqual(model.phase, .error)
+        // Nothing was ever sent, so there is no row to mark; the composer says
+        // it instead, and the next attempt takes the line away again.
+        XCTAssertEqual(model.draftFailure, "没有读取到这张图片。")
+        XCTAssertTrue(model.sendFailures.isEmpty)
+        model.beginPhotoSelection()
+        XCTAssertNil(model.draftFailure)
     }
 
     func testSSEPreservesBubbleOrder() async throws {
