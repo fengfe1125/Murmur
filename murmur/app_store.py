@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import secrets
 import sqlite3
 import threading
@@ -31,6 +32,16 @@ def _iso(value: datetime | None = None) -> str:
 # A "permanent" invitation still carries a concrete expiry so that the ordinary
 # comparisons keep working; the year 9999 simply never arrives.
 PERMANENT_EXPIRY = datetime(9999, 12, 31, tzinfo=UTC)
+
+# A job reclaimed this many times killed the worker process itself (PIL
+# segfault, OOM kill) before any Python-level fail_job() could run.  Past the
+# cap the moment goes terminally failed instead of re-burning the model on
+# every lease expiry.
+MAX_JOB_ATTEMPTS = 5
+
+# Push retries back off exponentially with jitter and give up here; the 24h
+# moment expiry stays as the last resort, not the primary stop.
+MAX_PUSH_ATTEMPTS = 12
 
 
 def _hash_secret(value: str) -> str:
@@ -419,11 +430,12 @@ class AppStore:
         where = "" if include_closed else (
             "WHERE revoked_at IS NULL AND (max_uses IS NULL OR use_count < max_uses)"
         )
-        return [dict(row) for row in self.conn.execute(
-            "SELECT id,kind,user_id,alias,created_at,expires_at,redeemed_at,revoked_at,"
-            "max_uses,use_count "
-            f"FROM app_invites {where} ORDER BY created_at DESC"
-        ).fetchall()]
+        with self._lock:
+            return [dict(row) for row in self.conn.execute(
+                "SELECT id,kind,user_id,alias,created_at,expires_at,redeemed_at,revoked_at,"
+                "max_uses,use_count "
+                f"FROM app_invites {where} ORDER BY created_at DESC"
+            ).fetchall()]
 
     def revoke_invite(self, invite_id: str) -> bool:
         with self._tx() as db:
@@ -521,13 +533,14 @@ class AppStore:
         return Enrollment(user_id, device_id, key_id)
 
     def auth_key(self, key_id: str) -> AuthKey:
-        row = self.conn.execute(
-            "SELECT k.*,d.id AS device_id FROM app_attest_keys k "
-            "JOIN app_devices d ON d.key_id=k.key_id "
-            "JOIN app_users u ON u.id=k.user_id "
-            "WHERE k.key_id=? AND k.active=1 AND d.active=1 AND u.active=1",
-            (key_id,),
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT k.*,d.id AS device_id FROM app_attest_keys k "
+                "JOIN app_devices d ON d.key_id=k.key_id "
+                "JOIN app_users u ON u.id=k.user_id "
+                "WHERE k.key_id=? AND k.active=1 AND d.active=1 AND u.active=1",
+                (key_id,),
+            ).fetchone()
         if not row:
             raise NotFound("unknown app key")
         return AuthKey(
@@ -724,20 +737,27 @@ class AppStore:
         return MomentResult(moment_id, True, "queued")
 
     def moment_for_user(self, moment_id: str, user_id: str) -> dict:
-        row = self.conn.execute(
-            "SELECT * FROM app_moments WHERE id=? AND user_id=?", (moment_id, user_id)
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM app_moments WHERE id=? AND user_id=?", (moment_id, user_id)
+            ).fetchone()
         if not row:
             raise NotFound("moment not found")
         return dict(row)
 
-    def events_after(self, moment_id: str, user_id: str, sequence: int = 0) -> list[dict]:
-        self.moment_for_user(moment_id, user_id)
-        rows = self.conn.execute(
-            "SELECT sequence,event,data,created_at FROM app_events "
-            "WHERE moment_id=? AND sequence>? ORDER BY sequence",
-            (moment_id, sequence),
-        ).fetchall()
+    def events_after(
+        self, moment_id: str, user_id: str, sequence: int = 0, verify: bool = True
+    ) -> list[dict]:
+        with self._lock:
+            # SSE 轮询每 0.25s 调一次；入口已验过 ownership 的调用方传
+            # verify=False，省掉每轮重复的 moment_for_user 鉴权查询。
+            if verify:
+                self.moment_for_user(moment_id, user_id)
+            rows = self.conn.execute(
+                "SELECT sequence,event,data,created_at FROM app_events "
+                "WHERE moment_id=? AND sequence>? ORDER BY sequence",
+                (moment_id, sequence),
+            ).fetchall()
         return [
             {"sequence": int(r["sequence"]), "event": r["event"],
              "data": json.loads(r["data"]), "created_at": r["created_at"]}
@@ -827,28 +847,50 @@ class AppStore:
     def claim_job(self, worker_id: str, lease: timedelta = timedelta(minutes=3)) -> Job | None:
         now, until = _iso(), _iso(_now() + lease)
         with self._tx() as db:
-            row = db.execute(
-                "SELECT j.id,j.moment_id,m.user_id,m.note,m.image_path "
-                "FROM app_jobs j JOIN app_moments m ON m.id=j.moment_id "
-                "JOIN app_users u ON u.id=m.user_id "
-                "WHERE (j.status='queued' OR (j.status='processing' AND j.lease_until<?)) "
-                "AND u.active=1 AND u.deleting=0 "
-                "ORDER BY j.created_at LIMIT 1",
-                (now,),
-            ).fetchone()
-            if not row:
-                return None
-            db.execute(
-                "UPDATE app_jobs SET status='processing',worker_id=?,lease_until=?,"
-                "attempts=attempts+1,updated_at=? WHERE id=?",
-                (worker_id, until, now, row["id"]),
-            )
-            db.execute(
-                "UPDATE app_moments SET status='processing',updated_at=? WHERE id=?",
-                (now, row["moment_id"]),
-            )
-            return Job(row["id"], row["moment_id"], row["user_id"], row["note"],
-                       row["image_path"])
+            while True:
+                row = db.execute(
+                    "SELECT j.id,j.moment_id,j.attempts,m.user_id,m.note,m.image_path "
+                    "FROM app_jobs j JOIN app_moments m ON m.id=j.moment_id "
+                    "JOIN app_users u ON u.id=m.user_id "
+                    "WHERE (j.status='queued' OR (j.status='processing' AND j.lease_until<?)) "
+                    "AND u.active=1 AND u.deleting=0 "
+                    "ORDER BY j.created_at LIMIT 1",
+                    (now,),
+                ).fetchone()
+                if not row:
+                    return None
+                if int(row["attempts"]) >= MAX_JOB_ATTEMPTS:
+                    # Each past claim ended in a process-level crash, so no
+                    # error event was ever written.  Failing the moment here
+                    # gives the client its terminal event and breaks the
+                    # crash/reclaim loop.
+                    db.execute(
+                        "UPDATE app_jobs SET status='failed',lease_until=NULL,"
+                        "last_error='attempts_exceeded',updated_at=? WHERE id=?",
+                        (now, row["id"]),
+                    )
+                    db.execute(
+                        "UPDATE app_moments SET status='failed',note=NULL,image_path=NULL,"
+                        "failure_retryable=0,updated_at=? WHERE id=?",
+                        (now, row["moment_id"]),
+                    )
+                    self._append_event_tx(db, row["moment_id"], "error", {
+                        "code": "attempts_exceeded",
+                        "message": "Murmur 暂时没有接住，请重新发送一次。",
+                        "retryable": False,
+                    })
+                    continue
+                db.execute(
+                    "UPDATE app_jobs SET status='processing',worker_id=?,lease_until=?,"
+                    "attempts=attempts+1,updated_at=? WHERE id=?",
+                    (worker_id, until, now, row["id"]),
+                )
+                db.execute(
+                    "UPDATE app_moments SET status='processing',updated_at=? WHERE id=?",
+                    (now, row["moment_id"]),
+                )
+                return Job(row["id"], row["moment_id"], row["user_id"], row["note"],
+                           row["image_path"])
 
     def renew_job(
         self, job: Job, worker_id: str, lease: timedelta = timedelta(minutes=3)
@@ -955,17 +997,18 @@ class AppStore:
     # ---- Current proactive moment and preferences --------------------------------
 
     def current_proactive(self, user_id: str) -> dict | None:
-        row = self.conn.execute(
-            "SELECT id,push_preview,created_at FROM app_moments "
-            "WHERE user_id=? AND source='proactive' AND status='complete' AND acked=0 "
-            "ORDER BY created_at DESC LIMIT 1", (user_id,),
-        ).fetchone()
-        if not row:
-            return None
-        bubbles = [e["data"]["text"] for e in self.events_after(row["id"], user_id)
-                   if e["event"] == "bubble" and e["data"].get("text")]
-        return {"moment_id": row["id"], "bubbles": bubbles,
-                "preview": row["push_preview"], "created_at": row["created_at"]}
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT id,push_preview,created_at FROM app_moments "
+                "WHERE user_id=? AND source='proactive' AND status='complete' AND acked=0 "
+                "ORDER BY created_at DESC LIMIT 1", (user_id,),
+            ).fetchone()
+            if not row:
+                return None
+            bubbles = [e["data"]["text"] for e in self.events_after(row["id"], user_id)
+                       if e["event"] == "bubble" and e["data"].get("text")]
+            return {"moment_id": row["id"], "bubbles": bubbles,
+                    "preview": row["push_preview"], "created_at": row["created_at"]}
 
     def create_proactive(
         self, user_id: str, bubbles: list[str], *, scene: str = "",
@@ -1039,10 +1082,11 @@ class AppStore:
             return dict(row)
 
     def preferences(self, user_id: str) -> dict:
-        row = self.conn.execute(
-            "SELECT daily_frequency,quiet_start,quiet_end,consecutive_missed "
-            "FROM app_preferences WHERE user_id=?", (user_id,),
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT daily_frequency,quiet_start,quiet_end,consecutive_missed "
+                "FROM app_preferences WHERE user_id=?", (user_id,),
+            ).fetchone()
         if not row:
             raise NotFound("preferences not found")
         return dict(row)
@@ -1119,22 +1163,24 @@ class AppStore:
                     "WHERE app_push_deliveries.status='dead'",
                     (device["id"], now, now, now, device["user_id"]),
                 )
-        row = self.conn.execute(
-            "SELECT id,user_id,environment,platform,timezone,device_name,"
-            "push_token IS NOT NULL AS push_enabled "
-            "FROM app_devices WHERE key_id=?", (key_id,),
-        ).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT id,user_id,environment,platform,timezone,device_name,"
+                "push_token IS NOT NULL AS push_enabled "
+                "FROM app_devices WHERE key_id=?", (key_id,),
+            ).fetchone()
         result = dict(row)
         result["push_enabled"] = bool(result["push_enabled"])
         return result
 
     def devices(self, user_id: str) -> list[dict]:
-        devices = [dict(row) for row in self.conn.execute(
-            "SELECT id,key_id,environment,platform,timezone,device_name,"
-            "push_token IS NOT NULL AS push_enabled,last_seen_at,created_at "
-            "FROM app_devices WHERE user_id=? AND active=1 ORDER BY created_at",
-            (user_id,),
-        ).fetchall()]
+        with self._lock:
+            devices = [dict(row) for row in self.conn.execute(
+                "SELECT id,key_id,environment,platform,timezone,device_name,"
+                "push_token IS NOT NULL AS push_enabled,last_seen_at,created_at "
+                "FROM app_devices WHERE user_id=? AND active=1 ORDER BY created_at",
+                (user_id,),
+            ).fetchall()]
         for device in devices:
             device["push_enabled"] = bool(device["push_enabled"])
         return devices
@@ -1186,19 +1232,20 @@ class AppStore:
         self, now: datetime | None = None, *, limit: int = 100
     ) -> list[dict]:
         now = now or _now()
-        return [dict(row) for row in self.conn.execute(
-            "SELECT q.moment_id,q.device_id,q.attempts,d.push_token,d.platform,"
-            "m.push_preview,m.user_id FROM app_push_deliveries q "
-            "JOIN app_devices d ON d.id=q.device_id "
-            "JOIN app_moments m ON m.id=q.moment_id "
-            "JOIN app_users u ON u.id=m.user_id "
-            "WHERE q.status='pending' AND q.next_attempt_at<=? "
-            "AND d.active=1 AND d.push_token IS NOT NULL "
-            "AND m.source='proactive' AND m.status='complete' AND m.acked=0 "
-            "AND u.active=1 AND u.deleting=0 "
-            "ORDER BY q.next_attempt_at LIMIT ?",
-            (_iso(now), max(1, min(limit, 500))),
-        ).fetchall()]
+        with self._lock:
+            return [dict(row) for row in self.conn.execute(
+                "SELECT q.moment_id,q.device_id,q.attempts,d.push_token,d.platform,"
+                "m.push_preview,m.user_id FROM app_push_deliveries q "
+                "JOIN app_devices d ON d.id=q.device_id "
+                "JOIN app_moments m ON m.id=q.moment_id "
+                "JOIN app_users u ON u.id=m.user_id "
+                "WHERE q.status='pending' AND q.next_attempt_at<=? "
+                "AND d.active=1 AND d.push_token IS NOT NULL "
+                "AND m.source='proactive' AND m.status='complete' AND m.acked=0 "
+                "AND u.active=1 AND u.deleting=0 "
+                "ORDER BY q.next_attempt_at LIMIT ?",
+                (_iso(now), max(1, min(limit, 500))),
+            ).fetchall()]
 
     def pending_push_delivery(
         self, moment_id: str, device_id: str, now: datetime | None = None
@@ -1256,7 +1303,16 @@ class AppStore:
             if not row:
                 return
             attempts = int(row["attempts"]) + 1
-            delay = min(3600, 30 * (2 ** min(attempts - 1, 7)))
+            if attempts >= MAX_PUSH_ATTEMPTS:
+                db.execute(
+                    "UPDATE app_push_deliveries SET status='dead',attempts=?,"
+                    "last_status=?,updated_at=? WHERE moment_id=? AND device_id=? "
+                    "AND status='pending'",
+                    (attempts, status, _iso(now), moment_id, device_id),
+                )
+                return
+            # ±20% jitter keeps a fleet of devices from retrying in lockstep.
+            delay = min(3600, 30 * (2 ** min(attempts - 1, 7)) * random.uniform(0.8, 1.2))
             db.execute(
                 "UPDATE app_push_deliveries SET attempts=?,next_attempt_at=?,"
                 "last_status=?,updated_at=? WHERE moment_id=? AND device_id=? "
@@ -1266,37 +1322,41 @@ class AppStore:
             )
 
     def push_devices(self, user_id: str) -> list[dict]:
-        return [dict(r) for r in self.conn.execute(
-            "SELECT * FROM app_devices WHERE user_id=? AND active=1 AND push_token IS NOT NULL",
-            (user_id,),
-        ).fetchall()]
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT * FROM app_devices WHERE user_id=? AND active=1 "
+                "AND push_token IS NOT NULL",
+                (user_id,),
+            ).fetchall()]
 
     def active_users(self) -> list[dict]:
-        return [dict(r) for r in self.conn.execute(
-            "SELECT u.id,u.alias,p.daily_frequency,p.quiet_start,p.quiet_end,"
-            "p.consecutive_missed,"
-            "COALESCE((SELECT d.timezone FROM app_devices d WHERE d.user_id=u.id "
-            "AND d.active=1 ORDER BY d.last_seen_at DESC,d.created_at DESC "
-            "LIMIT 1),'Asia/Shanghai') AS timezone "
-            "FROM app_users u JOIN app_preferences p ON p.user_id=u.id "
-            "WHERE u.active=1 AND u.deleting=0"
-        ).fetchall()]
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT u.id,u.alias,p.daily_frequency,p.quiet_start,p.quiet_end,"
+                "p.consecutive_missed,"
+                "COALESCE((SELECT d.timezone FROM app_devices d WHERE d.user_id=u.id "
+                "AND d.active=1 ORDER BY d.last_seen_at DESC,d.created_at DESC "
+                "LIMIT 1),'Asia/Shanghai') AS timezone "
+                "FROM app_users u JOIN app_preferences p ON p.user_id=u.id "
+                "WHERE u.active=1 AND u.deleting=0"
+            ).fetchall()]
 
     def proactive_users(self) -> list[dict]:
-        return [dict(r) for r in self.conn.execute(
-            "SELECT u.id,u.alias,p.daily_frequency,p.quiet_start,p.quiet_end,"
-            "p.consecutive_missed,"
-            "COALESCE((SELECT d.timezone FROM app_devices d WHERE d.user_id=u.id "
-            "AND d.active=1 ORDER BY d.last_seen_at DESC,d.created_at DESC "
-            "LIMIT 1),'Asia/Shanghai') AS timezone "
-            "FROM app_users u JOIN app_preferences p ON p.user_id=u.id "
-            "WHERE u.active=1 AND u.deleting=0 "
-            "AND p.daily_frequency>0 "
-            "AND EXISTS(SELECT 1 FROM app_moments m WHERE m.user_id=u.id "
-            "AND m.source='inbound' AND m.status='complete') "
-            "AND EXISTS(SELECT 1 FROM app_devices pd WHERE pd.user_id=u.id "
-            "AND pd.active=1 AND pd.push_token IS NOT NULL)"
-        ).fetchall()]
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT u.id,u.alias,p.daily_frequency,p.quiet_start,p.quiet_end,"
+                "p.consecutive_missed,"
+                "COALESCE((SELECT d.timezone FROM app_devices d WHERE d.user_id=u.id "
+                "AND d.active=1 ORDER BY d.last_seen_at DESC,d.created_at DESC "
+                "LIMIT 1),'Asia/Shanghai') AS timezone "
+                "FROM app_users u JOIN app_preferences p ON p.user_id=u.id "
+                "WHERE u.active=1 AND u.deleting=0 "
+                "AND p.daily_frequency>0 "
+                "AND EXISTS(SELECT 1 FROM app_moments m WHERE m.user_id=u.id "
+                "AND m.source='inbound' AND m.status='complete') "
+                "AND EXISTS(SELECT 1 FROM app_devices pd WHERE pd.user_id=u.id "
+                "AND pd.active=1 AND pd.push_token IS NOT NULL)"
+            ).fetchall()]
 
     def expire_stale_proactive(
         self, max_age: timedelta = timedelta(hours=24), *, now: datetime | None = None
@@ -1332,23 +1392,26 @@ class AppStore:
             )
 
     def has_slots(self, user_id: str, local_day: date) -> bool:
-        return self.conn.execute(
-            "SELECT 1 FROM app_proactive_slots WHERE user_id=? AND local_day=? LIMIT 1",
-            (user_id, local_day.isoformat()),
-        ).fetchone() is not None
+        with self._lock:
+            return self.conn.execute(
+                "SELECT 1 FROM app_proactive_slots WHERE user_id=? AND local_day=? LIMIT 1",
+                (user_id, local_day.isoformat()),
+            ).fetchone() is not None
 
     def due_slots(self, now: datetime) -> list[dict]:
-        return [dict(r) for r in self.conn.execute(
-            "SELECT s.user_id,s.slot_at FROM app_proactive_slots s "
-            "JOIN app_preferences p ON p.user_id=s.user_id "
-            "JOIN app_users u ON u.id=s.user_id "
-            "WHERE s.delivered_at IS NULL AND s.slot_at<=? AND p.daily_frequency>0 "
-            "AND p.consecutive_missed<4 AND u.active=1 AND u.deleting=0 "
-            "AND EXISTS(SELECT 1 FROM app_moments m WHERE m.user_id=s.user_id "
-            "AND m.source='inbound' AND m.status='complete') "
-            "AND EXISTS(SELECT 1 FROM app_devices pd WHERE pd.user_id=s.user_id "
-            "AND pd.active=1 AND pd.push_token IS NOT NULL) ORDER BY s.slot_at", (_iso(now),),
-        ).fetchall()]
+        with self._lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT s.user_id,s.slot_at FROM app_proactive_slots s "
+                "JOIN app_preferences p ON p.user_id=s.user_id "
+                "JOIN app_users u ON u.id=s.user_id "
+                "WHERE s.delivered_at IS NULL AND s.slot_at<=? AND p.daily_frequency>0 "
+                "AND p.consecutive_missed<4 AND u.active=1 AND u.deleting=0 "
+                "AND EXISTS(SELECT 1 FROM app_moments m WHERE m.user_id=s.user_id "
+                "AND m.source='inbound' AND m.status='complete') "
+                "AND EXISTS(SELECT 1 FROM app_devices pd WHERE pd.user_id=s.user_id "
+                "AND pd.active=1 AND pd.push_token IS NOT NULL) ORDER BY s.slot_at",
+                (_iso(now),),
+            ).fetchall()]
 
     def mark_slot_delivered(self, user_id: str, slot_at: str) -> None:
         with self._tx() as db:
@@ -1376,6 +1439,20 @@ class AppStore:
                 "SELECT image_path,preview_path,memory_entry_id FROM app_moments WHERE user_id=?",
                 (user_id,),
             ).fetchall()
+            # A moment cancelled mid-flight must still end its SSE stream with a
+            # terminal event; otherwise the client only finds out via the 120s
+            # stream deadline.
+            inflight = db.execute(
+                "SELECT id FROM app_moments WHERE user_id=? "
+                "AND status IN ('queued','processing')",
+                (user_id,),
+            ).fetchall()
+            for moment in inflight:
+                self._append_event_tx(db, moment["id"], "error", {
+                    "code": "account_deleted",
+                    "message": "账号已删除。",
+                    "retryable": False,
+                })
             db.execute(
                 "UPDATE app_jobs SET status='cancelled',lease_until=NULL,updated_at=? "
                 "WHERE moment_id IN (SELECT id FROM app_moments WHERE user_id=?) "

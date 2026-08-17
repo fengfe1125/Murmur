@@ -16,14 +16,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from openai import OpenAI
-
 from .config import Config
+from .engine import _client
 from .memory import Entry, Memory
 
 log = logging.getLogger("murmur.dossier")
@@ -105,7 +106,18 @@ class Dossier:
         for name, (_hint, _limit) in BLOCKS.items():
             body = (self.blocks.get(name) or "").strip() or "（还不知道）"
             parts += [f"## {name}", "", body, ""]
-        self.path.write_text("\n".join(parts), encoding="utf-8")
+        # 先写临时文件再 os.replace：写一半进程死掉（watchdog、断电）
+        # 也不会留下截断的记忆文件——这份文件是唯一副本。
+        fd, tmp = tempfile.mkstemp(
+            dir=self.path.parent, prefix=self.path.name, suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(parts))
+            os.replace(tmp, self.path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -214,7 +226,9 @@ def refresh(
     spec = "\n".join(f"- 【{k}】{h}（上限 {n} 字）" for k, (h, n) in BLOCKS.items())
     current = d.as_prompt() or "（还是空的，这是第一次整理）"
 
-    client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=120.0)
+    # 复用 engine 的 client 缓存：每次整理新建 client 会重建底层连接池，
+    # 每张图多付一次 TCP+TLS 握手。
+    client = _client(cfg)
     # 整理记忆是"重写三块摘要"，不需要主模型的对话能力。
     # 默认跟随主模型，.env 里配 MURMUR_MEMORY_MODEL 可以换成更便宜的。
     resp = client.chat.completions.create(

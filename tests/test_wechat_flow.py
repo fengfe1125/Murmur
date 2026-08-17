@@ -241,5 +241,28 @@ with tempfile.TemporaryDirectory() as d:
     check("记忆分开", ka != kb and len(mem.recent(chat_id=ka)) > 0
           and len(mem.recent(chat_id=kb)) > 0)
 
+print("\n── 发到一半炸了，对话也已经落库 " + "─" * 25)
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    cfg, client, mem, h = setup(tmp)
+    key, _ = wechat.wechat_thread("u1@im.wechat")
+    mem.mark_greeted(key, "wx")
+
+    real_send_text = client.send_text
+    n_sent = {"n": 0}
+
+    def flaky_send(user_id, text, ctx):
+        n_sent["n"] += 1
+        if n_sent["n"] == 2:
+            raise RuntimeError("断网了")
+        real_send_text(user_id, text, ctx)
+
+    client.send_text = flaky_send
+    h.handle(msg(text="在吗"))   # 第二条气泡抛异常，handle 自己吞掉
+    check("第一条气泡到了", client.sent_texts == ["嗯"], f"实际 {client.sent_texts}")
+    check("这轮对话落库了", len(mem.recent(chat_id=key)) > 0)
+    check("_last_entry 设了，下一句还能接上", key in h._last_entry)
+    check("打字状态收干净了", client.typing[-1] == wechat.TYPING_OFF)
+
 print(f"\n{'─' * 60}\n通过 {ok}，失败 {fail}")
 sys.exit(1 if fail else 0)

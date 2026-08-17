@@ -267,12 +267,13 @@ class EngineProactiveGenerator:
         self.data_root = data_root or cfg.db_path.parent
         self.memory_db_path = memory_db_path or cfg.db_path
 
-    def __call__(self, user_id: str) -> GeneratedProactive:
+    def __call__(self, user_id: str, tz: ZoneInfo | None = None) -> GeneratedProactive:
         chat_id, label = thread_key("app", "direct", user_id)
         with Memory(self.memory_db_path) as memory:
             intent = pick_intent([e.intent for e in memory.recent_outbound(chat_id, limit=8)])
             dossier = Dossier.load(self.data_root / "dossiers", label)
-            moment = Moment.text_only(self.cfg.tz)
+            # 此刻要按用户设备的时区算：slot 是按它的本地时间排的。
+            moment = Moment.text_only(tz or self.cfg.tz)
             reply = initiate(
                 moment, memory, self.cfg, intent, chat_id=chat_id,
                 dossier=None if dossier.is_empty else dossier.as_prompt(),
@@ -296,26 +297,39 @@ class EngineProactiveGenerator:
 
 
 class ProactiveScheduler:
+    # 生成失败时的按用户指数退避：模型网关故障时，不能让每个到期 slot
+    # 每 30 秒重打一次完整的模型调用直到当天结束。
+    GEN_RETRY_BASE_SECONDS = 60.0
+    GEN_RETRY_MAX_SECONDS = 30 * 60.0
+
     def __init__(
         self,
         store: AppStore,
         providers: Mapping[str, PushProvider] | PushProvider,
-        generator: Callable[[str], tuple[list[str], str] | tuple[list[str], str, int | None]],
+        generator: Callable[[str, ZoneInfo], tuple[list[str], str] | tuple[list[str], str, int | None]],
         *,
         lock_root: Path | None = None,
+        delivery_budget_seconds: float = 30.0,
     ):
         if not isinstance(providers, Mapping):
             providers = {getattr(providers, "platform", "ios"): providers}
         self.store, self.providers, self.generator = store, dict(providers), generator
         self.lock_root = lock_root
+        self.delivery_budget_seconds = delivery_budget_seconds
+        self._gen_failures: dict[str, int] = {}
+        self._gen_retry_after: dict[str, float] = {}
+
+    @staticmethod
+    def _timezone(name: str | None) -> ZoneInfo:
+        try:
+            return ZoneInfo(name or "Asia/Shanghai")
+        except ZoneInfoNotFoundError:
+            return ZoneInfo("Asia/Shanghai")
 
     def ensure_schedules(self, now: datetime | None = None) -> None:
         now = now or datetime.now(UTC)
         for user in self.store.proactive_users():
-            try:
-                timezone = ZoneInfo(user["timezone"])
-            except ZoneInfoNotFoundError:
-                timezone = ZoneInfo("Asia/Shanghai")
+            timezone = self._timezone(user["timezone"])
             local_day = now.astimezone(timezone).date()
             if self.store.has_slots(user["id"], local_day):
                 continue
@@ -335,7 +349,19 @@ class ProactiveScheduler:
         """Replay durable per-device APNs work, including after a restart."""
         now = now or datetime.now(UTC)
         delivered = 0
-        for candidate in self.store.due_push_deliveries(now):
+        # A sick APNs/FCM must not starve the worker's moment processing: one
+        # round spends at most delivery_budget_seconds on sends.  Whatever is
+        # left keeps its past-due next_attempt_at, so due_push_deliveries
+        # picks it up again on the next round.
+        deadline = time.monotonic() + self.delivery_budget_seconds
+        candidates = self.store.due_push_deliveries(now)
+        for index, candidate in enumerate(candidates):
+            if index and time.monotonic() >= deadline:
+                log.warning(
+                    "push delivery budget exhausted; %d deliveries wait for next round",
+                    len(candidates) - index,
+                )
+                break
             user_id = candidate["user_id"]
             try:
                 # Re-check under the same lock as account erasure.  Network work
@@ -406,14 +432,17 @@ class ProactiveScheduler:
         self.deliver_pending(now)
         self.ensure_schedules(now)
         created = 0
+        timezones = {u["id"]: u["timezone"] for u in self.store.proactive_users()}
         for slot in self.store.due_slots(now):
             user_id = slot["user_id"]
+            if time.monotonic() < self._gen_retry_after.get(user_id, 0.0):
+                continue
             # Advisory check prevents needless model calls in the common case.
             if self.store.current_proactive(user_id):
                 self.store.mark_slot_delivered(user_id, slot["slot_at"])
                 continue
             try:
-                generated = self.generator(user_id)
+                generated = self.generator(user_id, self._timezone(timezones.get(user_id)))
                 if isinstance(generated, GeneratedProactive):
                     bubbles, scene = generated.bubbles, generated.scene
                 else:
@@ -438,6 +467,8 @@ class ProactiveScheduler:
                         user_id, bubbles, scene=scene, memory_entry_id=entry_id, now=now
                     )
                     self.store.mark_slot_delivered(user_id, slot["slot_at"])
+                    self._gen_failures.pop(user_id, None)
+                    self._gen_retry_after.pop(user_id, None)
                     created += 1
             except (AccountDeleting, NotFound):
                 # Account erasure owns the per-user lock and cascades its slots.
@@ -446,9 +477,17 @@ class ProactiveScheduler:
                 self.store.mark_slot_delivered(user_id, slot["slot_at"])
                 continue
             except Exception as error:
+                failures = self._gen_failures.get(user_id, 0) + 1
+                self._gen_failures[user_id] = failures
+                delay = min(
+                    self.GEN_RETRY_BASE_SECONDS * 2 ** (failures - 1),
+                    self.GEN_RETRY_MAX_SECONDS,
+                )
+                self._gen_retry_after[user_id] = time.monotonic() + delay
                 log.error(
-                    "could not create proactive moment user_id=%s error_type=%s",
-                    user_id, type(error).__name__,
+                    "could not create proactive moment user_id=%s error_type=%s "
+                    "(failures=%d, retry in %.0fs)",
+                    user_id, type(error).__name__, failures, delay,
                 )
                 continue
         self.deliver_pending(now)

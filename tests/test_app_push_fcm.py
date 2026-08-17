@@ -285,7 +285,7 @@ class FCMSchedulerTests(unittest.TestCase):
             on_invalid_token=self.store.invalidate_push_token,
         )
         scheduler = ProactiveScheduler(
-            self.store, {"android": provider}, lambda _u: (["在干嘛"], "傍晚")
+            self.store, {"android": provider}, lambda _u, _tz: (["在干嘛"], "傍晚")
         )
         self.assertEqual(scheduler.run_once(now), 1)
         self.assertEqual(len(transport.send_calls), 1)
@@ -324,7 +324,7 @@ class FCMSchedulerTests(unittest.TestCase):
             on_invalid_token=self.store.invalidate_push_token,
         )
         scheduler = ProactiveScheduler(
-            self.store, {"android": provider}, lambda _u: (["在干嘛"], "傍晚")
+            self.store, {"android": provider}, lambda _u, _tz: (["在干嘛"], "傍晚")
         )
         scheduler.run_once(now)
         row = self.store.conn.execute(

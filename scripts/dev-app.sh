@@ -133,9 +133,14 @@ print(ds[0]["udid"] if ds else "")')
 [ -n "$UDID" ] || { echo "没有已启动的模拟器，先在 Xcode 里开一个" >&2; exit 1; }
 
 DD="$ROOT/.build/dev-app"
-xcodebuild -project MurmurApp.xcodeproj -scheme "$SCHEME" -configuration Debug \
+# pipefail is on: without the if, a failed build still exits 0 here because
+# grep happily matches "BUILD FAILED", and simctl would install a stale .app.
+if ! xcodebuild -project MurmurApp.xcodeproj -scheme "$SCHEME" -configuration Debug \
   -sdk iphonesimulator -destination "id=$UDID" -derivedDataPath "$DD" build \
-  | grep -E "error:|BUILD" || true
+  | grep -E "error:|BUILD"; then
+  echo "构建失败：不安装残留的旧 .app，先修好上面的 error。" >&2
+  exit 1
+fi
 
 xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
 xcrun simctl install "$UDID" "$DD/Build/Products/Debug-iphonesimulator/$SCHEME.app"

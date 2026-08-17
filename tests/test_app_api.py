@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from murmur.app_api import RateLimiter, create_app, validate_bind_host  # noqa: E402
 from murmur.app_lock import UserOperationLock  # noqa: E402
 from murmur.app_settings import AppSettings  # noqa: E402
-from murmur.app_store import AppStore  # noqa: E402
+from murmur.app_store import AppStore, NotFound  # noqa: E402
 from murmur.app_worker import AppWorker, ProcessedMoment  # noqa: E402
 from murmur.engine import Reply  # noqa: E402
 from murmur.moment import Moment  # noqa: E402
@@ -307,6 +307,27 @@ class AppAPITests(unittest.TestCase):
         self.assertEqual(self.store.conn.execute(
             "SELECT COUNT(*) FROM app_users"
         ).fetchone()[0], 0)
+
+    def test_event_stream_ends_quietly_when_erasure_removes_the_moment(self):
+        created = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={"note": "边删边听", "idempotency_key": "api-stream-erase-01"},
+            files={"_multipart": (None, "1")},
+        )
+        self.assertEqual(created.status_code, 202, created.text)
+        moment_id = created.json()["moment_id"]
+        # Account erasure can delete the moment mid-stream; the SSE generator
+        # must end quietly instead of faulting the connection.
+        with patch.object(
+            self.store, "events_after", side_effect=NotFound("moment not found")
+        ):
+            with self.assertNoLogs("murmur.app_api", level="ERROR"):
+                stream = self.client.get(
+                    f"/v1/moments/{moment_id}/events",
+                    headers=self.authenticated_headers(),
+                )
+        self.assertEqual(stream.status_code, 200, stream.text)
+        self.assertEqual(stream.text, "")
 
     def test_unauthenticated_rate_limit_cannot_be_bypassed_with_random_key_headers(self):
         root = self.root / "rate-limit"

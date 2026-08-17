@@ -306,6 +306,12 @@ if (( MIGRATED_PLATFORM_VALUES )); then
   note "已把旧平台凭据移入隔离测试文件；测试开关仍保持关闭。"
 fi
 ENV_FILE="$PRODUCTION_ENV_FILE"
+# Strip the platform keys from the production file right after copying them
+# out: the wizard advertises Ctrl-C resumability, and exiting before the
+# final stages must not leave live credentials in production.  Idempotent,
+# so a rerun on an already-clean file is a no-op.
+"$PYTHON_BIN" "$ROOT_DIR/scripts/sanitize_production_env.py" "$PRODUCTION_ENV_FILE"
+note "生产 .env 已移除 Telegram / 钉钉 / 微信 / QQ 凭据。"
 if [[ -n "$SELECTED_PLATFORMS" ]]; then
   ENV_FILE="$TEST_BOT_ENV_FILE"
   write_env MURMUR_CHANNEL_MODE "transition"
@@ -406,8 +412,6 @@ fi
 
 # The remaining settings belong to the official App/dashboard environment.
 ENV_FILE="$PRODUCTION_ENV_FILE"
-"$PYTHON_BIN" "$ROOT_DIR/scripts/sanitize_production_env.py" "$PRODUCTION_ENV_FILE"
-note "生产 .env 已移除 Telegram / 钉钉 / 微信 / QQ 凭据。"
 
 stage "Official App API, dashboard and local data"
 ask MURMUR_TZ "时区（默认 Asia/Shanghai）："

@@ -15,6 +15,9 @@ ExecStart=/opt/murmur/.venv/bin/murmur web --host 127.0.0.1 --port 8765 --no-ope
 Restart=always
 RestartSec=10
 
+# 内存泄漏时只重启本服务，不让 OOM killer 在全局挑牺牲品；VPS 约 4G 内存。
+MemoryMax=512M
+
 # 看板会写额度快照、读取 SQLite / 照片 / 记忆文件和各通道日志。
 StandardOutput=append:/opt/murmur/logs/murmur_web.log
 StandardError=append:/opt/murmur/logs/murmur_web.log

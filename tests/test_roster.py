@@ -124,5 +124,61 @@ with tempfile.TemporaryDirectory() as d:
     check("roster 表自动建出来了", mem.roster("dt") == [])
     check("能往旧库里入册", mem.enroll("dt", "x", 1, "dt:oto:x") is True)
 
+print("\n── 聊天原文库只许本人读写 " + "─" * 32)
+with tempfile.TemporaryDirectory() as d:
+    p = Path(d) / "m.db"
+    mem = Memory(p)
+    mem.record(chat_id=1, shot_at=None, bucket=None, weekday=None,
+               spot=None, scene=None, move=None, said="hi", note=None)
+    check("db 文件是 0600", (p.stat().st_mode & 0o777) == 0o600)
+
+print("\n── 两个进程同时入册同一个人不炸 " + "─" * 26)
+with tempfile.TemporaryDirectory() as d:
+    import threading
+    p = Path(d) / "m.db"
+    # 两个连接模拟两个进程；它们各自的 SELECT 都可能抢在对方 INSERT 前跑完。
+    # 没有 ON CONFLICT 的话，后 INSERT 的那个必吃 IntegrityError。
+    instances = [Memory(p), Memory(p)]
+    errors: list[Exception] = []
+
+    def race_enroll(mem: Memory) -> None:
+        for _ in range(30):
+            try:
+                mem.enroll("dt", "racy", 9, "dt:oto:racy", "新人")
+            except Exception as exc:  # 结果本身就是断言
+                errors.append(exc)
+
+    threads = [threading.Thread(target=race_enroll, args=(m,)) for m in instances]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    check("没有人吃到 IntegrityError", errors == [], f"实际 {errors[:1]}")
+    check("名册里只有一行", len(instances[0].roster("dt")) == 1)
+
+print("\n── 多线程并发写不炸、不丢 " + "─" * 30)
+with tempfile.TemporaryDirectory() as d:
+    import threading
+    mem = Memory(Path(d) / "m.db")
+    errors: list[Exception] = []
+
+    def write_entries() -> None:
+        for i in range(30):
+            try:
+                mem.record(chat_id=1, shot_at=None, bucket=None, weekday=None,
+                           spot=None, scene=None, move="speak", said=f"句{i}",
+                           note=None)
+            except Exception as exc:  # 结果本身就是断言
+                errors.append(exc)
+
+    threads = [threading.Thread(target=write_entries) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    check("没有 cannot start a transaction 之类的错", errors == [],
+          f"实际 {errors[:1]}")
+    check("120 条一条没丢", len(mem.recent(chat_id=1, limit=200)) == 120)
+
 print(f"\n{'─' * 60}\n通过 {ok}，失败 {fail}")
 sys.exit(1 if fail else 0)

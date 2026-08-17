@@ -134,25 +134,31 @@ class QqHttp:
         self._until = 0.0
         self._seq: dict[str, int] = {}
         self._lock = threading.Lock()
+        self._token_lock = threading.Lock()
 
     def token(self) -> str:
         now = time.time()
         if self._token and now < self._until:
             return self._token
-        r = requests.post(
-            TOKEN_URL,
-            json={"appId": self.app_id, "clientSecret": self.secret},
-            timeout=20,
-        )
-        r.raise_for_status()
-        data = r.json()
-        tok = data.get("access_token")
-        if not tok:
-            raise RuntimeError(f"拿不到 QQ access_token：{data}")
-        ttl = int(data.get("expires_in") or 7200)
-        self._token = tok
-        self._until = now + max(60, ttl - 120)
-        return tok
+        with self._token_lock:
+            # 等锁的工夫别的线程可能已经刷新过了，再查一遍，
+            # 不然收发两条线程会各自刷一次 token
+            if self._token and now < self._until:
+                return self._token
+            r = requests.post(
+                TOKEN_URL,
+                json={"appId": self.app_id, "clientSecret": self.secret},
+                timeout=20,
+            )
+            r.raise_for_status()
+            data = r.json()
+            tok = data.get("access_token")
+            if not tok:
+                raise RuntimeError(f"拿不到 QQ access_token：{data}")
+            ttl = int(data.get("expires_in") or 7200)
+            self._token = tok
+            self._until = now + max(60, ttl - 120)
+            return tok
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -164,6 +170,10 @@ class QqHttp:
     def _next_seq(self, msg_id: str | None) -> int:
         key = msg_id or "_"
         with self._lock:
+            # _seq 以 msg_id 为键只增不减，长驻进程会慢慢涨内存（_seen 有清理，
+            # 它没有）。msg_seq 只是回复计数，清掉重来没有副作用。
+            if len(self._seq) > 200:
+                self._seq.clear()
             n = self._seq.get(key, 0) + 1
             self._seq[key] = n
             return n
@@ -286,24 +296,33 @@ def parse_ts(raw: str | None) -> datetime:
         return datetime.now(UTC)
 
 
+# 新人连发图+文字时两个处理线程会同时进来，都看到 has_greeted==False，
+# 自我介绍就发了两遍。按会话键加锁，第二个进来的会看到已经打过招呼。
+_greet_locks: dict[int, threading.Lock] = {}
+_greet_locks_guard = threading.Lock()
+
+
 def ensure_greeted(cfg: Config, mem: Memory, http: QqHttp,
                    uid: str, key: int, label: str) -> bool:
-    if mem.has_greeted(key):
-        return False
-    http.send_bubbles(uid, INTRO)
-    m = Moment.text_only(cfg.tz)
-    mem.record(chat_id=key, thread=label, shot_at=None, bucket=m.bucket,
-               weekday=m.weekday, spot=None, scene="（自我介绍）", move="speak",
-               said=JOINED, note=None, kind="out", intent="自我介绍")
-    mem.mark_greeted(key, label)
-    try:
-        d = Dossier.load(_dossier_root(cfg), label)
-        if not d.path.exists():
-            d.save()
-    except Exception as e:
-        log.warning("建记忆文件失败：%s", e)
-    log.info("已向新用户 %s 发送自我介绍", label)
-    return True
+    with _greet_locks_guard:
+        lock = _greet_locks.setdefault(key, threading.Lock())
+    with lock:
+        if mem.has_greeted(key):
+            return False
+        http.send_bubbles(uid, INTRO)
+        m = Moment.text_only(cfg.tz)
+        mem.record(chat_id=key, thread=label, shot_at=None, bucket=m.bucket,
+                   weekday=m.weekday, spot=None, scene="（自我介绍）", move="speak",
+                   said=JOINED, note=None, kind="out", intent="自我介绍")
+        mem.mark_greeted(key, label)
+        try:
+            d = Dossier.load(_dossier_root(cfg), label)
+            if not d.path.exists():
+                d.save()
+        except Exception as e:
+            log.warning("建记忆文件失败：%s", e)
+        log.info("已向新用户 %s 发送自我介绍", label)
+        return True
 
 
 class Handler:
@@ -487,69 +506,73 @@ def _initiative_loop(cfg: Config, mem: Memory, http: QqHttp) -> None:
     seen: set[str] = set()
 
     while True:
-        now = datetime.now(cfg.tz)
-        today = now.date().isoformat()
-        users = list(dict.fromkeys(
-            sorted(cfg.qq_allowed_users) + [r["user_id"] for r in mem.roster("qq")]
-        ))
-        if new := [u for u in users if u not in seen]:
-            seen.update(new)
-            log.info("QQ 主动消息收件人 +%s（共 %d 人）", new, len(users))
-        if not users:
-            time.sleep(60)
-            continue
-
-        for uid in users:
-            if planned_for.get(uid) != today:
-                times = plan_day(cfg.tz, now=now)
-                queue += [(t, uid) for t in times]
-                planned_for[uid] = today
-                log.info("QQ %s 今天排了 %d 条：%s", uid, len(times),
-                         " ".join(f"{t:%H:%M}" for t in times))
-        due, stale, pending = split_due(queue, now)
-        if stale:
-            log.info("错过了 %d 条主动消息（%s），迟到太久就不补了",
-                     len(stale), " ".join(f"{t:%H:%M}" for t, _ in stale))
-        queue = due + pending
-        if not queue:
-            time.sleep(60)
-            continue
-
-        when, uid = queue[0]
-        if when > now:
-            time.sleep(max(1.0, min((when - now).total_seconds(), 60)))
-            if datetime.now(cfg.tz) < when:
+        try:
+            now = datetime.now(cfg.tz)
+            today = now.date().isoformat()
+            users = list(dict.fromkeys(
+                sorted(cfg.qq_allowed_users) + [r["user_id"] for r in mem.roster("qq")]
+            ))
+            if new := [u for u in users if u not in seen]:
+                seen.update(new)
+                log.info("QQ 主动消息收件人 +%s（共 %d 人）", new, len(users))
+            if not users:
+                time.sleep(60)
                 continue
-        queue.pop(0)
 
-        key, label = oto_thread(uid)
-        if mem.is_opted_out(key):
-            continue
-        now = datetime.now(cfg.tz)
-        last_in = mem.last_inbound_at(key)
-        last_dt = datetime.fromisoformat(last_in).astimezone(cfg.tz) if last_in else None
-        if hold := should_hold(last_dt, mem.unanswered_outbound(key), now):
-            log.info("QQ 主动消息跳过（%s）%s", hold, uid)
-            continue
-        intent = pick_intent([e.intent for e in mem.recent_outbound(key)])
-        try:
-            reply = initiate(Moment.text_only(cfg.tz, received_at=now), mem, cfg,
-                             intent, chat_id=key, dossier=_load_dossier(cfg, label))
-        except Exception as e:
-            log.error("QQ 主动消息失败 %s: %s", type(e).__name__, e)
-            continue
-        if reply.silent:
-            continue
-        try:
-            http.send_bubbles(uid, reply.say)
-        except Exception as e:
-            log.error("QQ 投递失败 %s: %s", type(e).__name__, e)
-            continue
-        m = Moment.text_only(cfg.tz, received_at=now)
-        mem.record(chat_id=key, thread=label, shot_at=None, bucket=m.bucket,
-                   weekday=m.weekday, spot=None, scene=reply.scene, move=reply.move,
-                   said=reply.joined, note=None, kind="out", intent=intent.key)
-        log.info("QQ 主动发出 [%s] %s", intent.key, reply.joined)
+            for uid in users:
+                if planned_for.get(uid) != today:
+                    times = plan_day(cfg.tz, now=now)
+                    queue += [(t, uid) for t in times]
+                    planned_for[uid] = today
+                    log.info("QQ %s 今天排了 %d 条：%s", uid, len(times),
+                             " ".join(f"{t:%H:%M}" for t in times))
+            due, stale, pending = split_due(queue, now)
+            if stale:
+                log.info("错过了 %d 条主动消息（%s），迟到太久就不补了",
+                         len(stale), " ".join(f"{t:%H:%M}" for t, _ in stale))
+            queue = due + pending
+            if not queue:
+                time.sleep(60)
+                continue
+
+            when, uid = queue[0]
+            if when > now:
+                time.sleep(max(1.0, min((when - now).total_seconds(), 60)))
+                if datetime.now(cfg.tz) < when:
+                    continue
+            queue.pop(0)
+
+            key, label = oto_thread(uid)
+            if mem.is_opted_out(key):
+                continue
+            now = datetime.now(cfg.tz)
+            last_in = mem.last_inbound_at(key)
+            last_dt = datetime.fromisoformat(last_in).astimezone(cfg.tz) if last_in else None
+            if hold := should_hold(last_dt, mem.unanswered_outbound(key), now):
+                log.info("QQ 主动消息跳过（%s）%s", hold, uid)
+                continue
+            intent = pick_intent([e.intent for e in mem.recent_outbound(key)])
+            try:
+                reply = initiate(Moment.text_only(cfg.tz, received_at=now), mem, cfg,
+                                 intent, chat_id=key, dossier=_load_dossier(cfg, label))
+            except Exception as e:
+                log.error("QQ 主动消息失败 %s: %s", type(e).__name__, e)
+                continue
+            if reply.silent:
+                continue
+            try:
+                http.send_bubbles(uid, reply.say)
+            except Exception as e:
+                log.error("QQ 投递失败 %s: %s", type(e).__name__, e)
+                continue
+            m = Moment.text_only(cfg.tz, received_at=now)
+            mem.record(chat_id=key, thread=label, shot_at=None, bucket=m.bucket,
+                       weekday=m.weekday, spot=None, scene=reply.scene, move=reply.move,
+                       said=reply.joined, note=None, kind="out", intent=intent.key)
+            log.info("QQ 主动发出 [%s] %s", intent.key, reply.joined)
+        except Exception:
+            log.exception("QQ 主动消息循环出错，60 秒后继续")
+            time.sleep(60)
 
 
 def run() -> None:

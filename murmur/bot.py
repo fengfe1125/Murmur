@@ -38,6 +38,11 @@ def _dossier_root(cfg: Config):
     return cfg.db_path.parent / "dossiers"
 
 
+# 新人连发图+文字时两条处理路径会同时进来，都看到 has_greeted==False，
+# 自我介绍就发了两遍。按会话键加锁，第二个进来的会看到已经打过招呼。
+_GREET_LOCKS: dict[int, asyncio.Lock] = {}
+
+
 async def ensure_greeted(ctx, cfg: Config, mem: Memory, chat_id: int,
                          key: int, label: str) -> bool:
     """新人首次出现：入册 + 发自我介绍 + 建记忆文件。已打过招呼返回 False。"""
@@ -45,25 +50,28 @@ async def ensure_greeted(ctx, cfg: Config, mem: Memory, chat_id: int,
     # 不补一次的话他们永远不在册，主动消息就断了。
     if mem.enroll("tg", str(chat_id), key, label):
         log.info("新人入册｜chat=%s｜从下一轮起也会收到主动消息", chat_id)
-    if mem.has_greeted(key):
-        return False
-    for i, text in enumerate(INTRO):
-        if i:
-            await asyncio.sleep(1.8)
-        await ctx.bot.send_message(chat_id, text)
-    moment = Moment.text_only(cfg.tz)
-    mem.record(chat_id=key, thread=label, shot_at=None, bucket=moment.bucket,
-               weekday=moment.weekday, spot=None, scene="（自我介绍）", move="speak",
-               said=JOINED, note=None, kind="out", intent="自我介绍")
-    mem.mark_greeted(key, label)
-    try:
-        d = Dossier.load(_dossier_root(cfg), label)
-        if not d.path.exists():
-            d.save()
-    except Exception as e:
-        log.warning("建记忆文件失败：%s", e)
-    log.info("已向新用户 %s 发送自我介绍", label)
-    return True
+    # 单事件循环里 setdefault 不会被打断，不需要额外的守卫锁
+    lock = _GREET_LOCKS.setdefault(key, asyncio.Lock())
+    async with lock:
+        if mem.has_greeted(key):
+            return False
+        for i, text in enumerate(INTRO):
+            if i:
+                await asyncio.sleep(1.8)
+            await ctx.bot.send_message(chat_id, text)
+        moment = Moment.text_only(cfg.tz)
+        mem.record(chat_id=key, thread=label, shot_at=None, bucket=moment.bucket,
+                   weekday=moment.weekday, spot=None, scene="（自我介绍）", move="speak",
+                   said=JOINED, note=None, kind="out", intent="自我介绍")
+        mem.mark_greeted(key, label)
+        try:
+            d = Dossier.load(_dossier_root(cfg), label)
+            if not d.path.exists():
+                d.save()
+        except Exception as e:
+            log.warning("建记忆文件失败：%s", e)
+        log.info("已向新用户 %s 发送自我介绍", label)
+        return True
 
 
 async def _maybe_refresh(cfg: Config, mem: Memory, key: int, label: str) -> None:

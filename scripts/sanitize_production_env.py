@@ -15,7 +15,6 @@ import re
 import tempfile
 from pathlib import Path
 
-
 PLATFORM_KEYS = {
     "TELEGRAM_BOT_TOKEN", "MURMUR_ALLOWED_CHAT_IDS",
     "DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET", "DINGTALK_ALLOWED_USERS",

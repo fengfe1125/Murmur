@@ -7,8 +7,6 @@ the single source of delivery state.
 
 from __future__ import annotations
 
-import base64
-import io
 import logging
 import os
 import threading
@@ -21,7 +19,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 
-from PIL import Image, ImageOps
+from PIL import Image
 
 from .app_lock import UserOperationLock
 from .app_settings import AppSettings
@@ -31,15 +29,8 @@ from .dossier import Dossier, refresh
 from .engine import Reply, respond
 from .memory import Memory, thread_key
 from .moment import Moment
-from .photo import (
-    _EXIF_TAGS,
-    JPEG_QUALITY,
-    Photo,
-    _read_gps,
-    _read_shot_at,
-    _target_edge,
-    save_preview,
-)
+from .photo import Photo, PhotoTooLarge, save_preview
+from .photo import load as load_photo
 
 log = logging.getLogger("murmur.app_worker")
 
@@ -64,53 +55,20 @@ class InvalidAppImage(ValueError):
 
 
 def load_app_photo(path: str | Path, max_image_pixels: int) -> Photo:
-    """Decode an App upload with a bounded output raster and no EXIF copy.
+    """Decode an App upload, translating decode failures into client errors.
 
-    JPEG ``draft`` asks libjpeg to subsample during decode, which keeps a 48MP
-    phone photo from materialising as several full-size RGB buffers.  Other
-    formats still pass the pixel ceiling and are reduced immediately after the
-    decoder opens them.
+    The bounded-raster decode itself (JPEG ``draft`` + pixel ceiling) lives in
+    :func:`murmur.photo.load`; here we only map its exceptions onto the
+    permanent, client-actionable :class:`InvalidAppImage` codes.
     """
-    source_path = Path(path)
     try:
-        with Image.open(source_path) as source:
-            width, height = source.size
-            if width <= 0 or height <= 0:
-                raise InvalidAppImage("invalid_image", "图片文件无效。")
-            if width * height > max_image_pixels:
-                raise InvalidAppImage("image_too_large", "图片像素尺寸过大。")
-            exif = source.getexif()
-            lat, lon = _read_gps(exif)
-            make = exif.get(_EXIF_TAGS["Make"])
-            model = exif.get(_EXIF_TAGS["Model"])
-            camera = (
-                " ".join(str(value).strip() for value in (make, model) if value)
-                or None
-            )
-            shot_at = _read_shot_at(exif)
-            edge = _target_edge(width, height)
-            if (source.format or "").upper() in {"JPEG", "MPO"}:
-                source.draft("RGB", (edge, edge))
-            source.thumbnail((edge, edge), Image.Resampling.LANCZOS)
-            upright = ImageOps.exif_transpose(source) or source
-            if upright.mode != "RGB":
-                upright = upright.convert("RGB")
-            buffer = io.BytesIO()
-            upright.save(buffer, format="JPEG", quality=JPEG_QUALITY)
-    except InvalidAppImage:
-        raise
+        return load_photo(path, max_image_pixels=max_image_pixels)
+    except PhotoTooLarge as error:
+        raise InvalidAppImage("image_too_large", "图片像素尺寸过大。") from error
     except Image.DecompressionBombError as error:
         raise InvalidAppImage("image_too_large", "图片像素尺寸过大。") from error
     except (OSError, SyntaxError, ValueError) as error:
         raise InvalidAppImage("invalid_image", "图片文件无效。") from error
-    return Photo(
-        path=source_path,
-        shot_at=shot_at,
-        lat=lat,
-        lon=lon,
-        camera=camera,
-        image_b64=base64.standard_b64encode(buffer.getvalue()).decode("ascii"),
-    )
 
 
 @dataclass
@@ -284,6 +242,7 @@ class AppWorker:
         lost = threading.Event()
 
         def heartbeat() -> None:
+            failures = 0
             while not stop.wait(self.heartbeat_interval):
                 try:
                     if not self.store.renew_job(
@@ -291,13 +250,19 @@ class AppWorker:
                     ):
                         lost.set()
                         return
+                    failures = 0
                 except Exception as error:
-                    log.error(
+                    # 一次瞬时失败（比如 SQLite busy）不等于丢了租约。
+                    # 连续三次才置 lost：间隔 30s、租约 180s 时仍留有余量。
+                    failures += 1
+                    log.log(
+                        logging.ERROR if failures >= 3 else logging.WARNING,
                         "App worker heartbeat failed moment_id=%s error_type=%s",
                         job.moment_id, type(error).__name__,
                     )
-                    lost.set()
-                    return
+                    if failures >= 3:
+                        lost.set()
+                        return
 
         thread = threading.Thread(
             target=heartbeat,
@@ -566,6 +531,7 @@ def run() -> None:
                     cfg, data_root=settings.data_root,
                     memory_db_path=settings.memory_db_path,
                 ), lock_root=settings.data_root,
+                delivery_budget_seconds=settings.push_delivery_budget_seconds,
             )
         else:
             log.warning("APNs/proactive delivery disabled in explicit development mode")

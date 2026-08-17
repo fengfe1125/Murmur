@@ -51,6 +51,17 @@ unit_missing_paths() {
       ReadWritePaths)
         read -r -a paths <<<"$value"
         ;;
+      Environment)
+        # KEY=VALUE tokens; an absolute VALUE like OPENCLAW_STATE_DIR=/x is a
+        # path the service cannot start without. Quotes are stripped, not
+        # parsed, and the absolute-path filter below drops plain values.
+        paths=()
+        read -r -a assignments <<<"${value//\"/}"
+        for assignment in ${assignments[@]+"${assignments[@]}"}; do
+          [[ "$assignment" == *=* ]] || continue
+          paths+=("${assignment#*=}")
+        done
+        ;;
       StandardOutput|StandardError)
         [[ "$value" == append:* ]] || continue
         paths=("$(dirname "${value#append:}")")
@@ -95,6 +106,25 @@ git_murmur merge-base --is-ancestor "$current" "$target" || {
   echo "Refusing a non-fast-forward update; inspect the Git history first." >&2
   exit 1
 }
+
+# Snapshot the database before touching code: murmur.db is WAL, so a plain
+# file copy can be corrupt. MURMUR_DB may point off the default path, so
+# resolve it from .env the way config.py does (relative paths anchor at
+# APP_DIR). .backup is online, so services keep running; but a failed
+# snapshot aborts the update before anything changes.
+db_path=$(grep -m1 '^MURMUR_DB=' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2- || true)
+db_path=${db_path:-murmur.db}
+[[ "$db_path" == /* ]] || db_path="$APP_DIR/${db_path#./}"
+if [[ -f "$db_path" ]]; then
+  backup="$APP_DIR/backups/murmur-${current:0:12}-$(date +%Y%m%d-%H%M%S).db"
+  as_murmur mkdir -p "$APP_DIR/backups"
+  as_murmur sqlite3 "$db_path" ".backup '$backup'" || {
+    echo "Database snapshot failed; aborting the update before any code change." >&2
+    exit 1
+  }
+else
+  echo "No database at $db_path yet; skipping the pre-update snapshot."
+fi
 
 echo "Updating Murmur ${current:0:12} → ${target:0:12}"
 git_murmur merge --ff-only "$target"
@@ -169,6 +199,25 @@ fi
 if ((${#failed[@]})); then
   printf 'Did not come back up:\n' >&2
   printf '  %s\n' "${failed[@]}" >&2
-  printf 'Code is at %s; inspect with: systemctl status <service>\n' "${target:0:12}" >&2
+  # Same rollback as a failed check: restore the old tree, reinstall its
+  # dependencies, then give the failed services one more start on the old
+  # code. install_self already replaced the on-disk updater by rename, but
+  # this shell keeps reading the old inode, so the lines below still run.
+  echo "Rolling back to ${current:0:12}." >&2
+  git_murmur reset --hard "$current"
+  as_murmur bash -c "cd '$APP_DIR' && .venv/bin/pip install -e ."
+  declare -a still_failed=()
+  for entry in "${failed[@]}"; do
+    service=${entry%% (*}
+    systemctl restart "$service" && systemctl is-active --quiet "$service" \
+      || still_failed+=("$service")
+  done
+  if ((${#still_failed[@]})); then
+    printf 'Rolled back to %s, but these services are still down:\n' "${current:0:12}" >&2
+    printf '  %s\n' "${still_failed[@]}" >&2
+    printf 'Inspect with: systemctl status <service>\n' >&2
+  else
+    printf 'Rolled back to %s; update rejected, services are on the old code.\n' "${current:0:12}" >&2
+  fi
   exit 1
 fi

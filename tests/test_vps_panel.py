@@ -156,6 +156,24 @@ d = vps_panel.create_invite(cfg, runner=fake_runner(ok_=False, detail="超时"))
 check("远端失败不返回空码", d["ok"] is False and "code" not in d)
 d = vps_panel.create_invite(cfg, runner=fake_runner("  \n"))
 check("远端空输出是错误", d["ok"] is False)
+d = vps_panel.create_invite(
+    cfg, runner=fake_runner("WARNING: sudo: 有一行警告\nMUR-LAST-9999\n"))
+check("邀请码取最后一行非空输出（前面可能是警告）",
+      d["ok"] and d["code"] == "MUR-LAST-9999", str(d))
+
+print("\n── status 脱敏：.env 真值先精确擦，模式兜底 " + "─" * 14)
+
+# 这个密钥长得不像任何已知模式，只有按真值精确擦才能擦掉
+secret_sample = STATUS_SAMPLE.replace("sk-abcdef0123456789",
+                                      "plain-custom-secret-9")
+d = vps_panel.status(cfg, runner=fake_runner(secret_sample),
+                     secrets=["plain-custom-secret-9"])
+check("不像已知模式的密钥也按真值擦掉",
+      "plain-custom-secret-9" not in "\n".join(d["logs"]["app-api"]),
+      str(d["logs"]["app-api"]))
+d = vps_panel.status(cfg, runner=fake_runner(secret_sample))
+check("不传 secrets 时只剩模式层（对照组，证明是真值层在起作用）",
+      "plain-custom-secret-9" in "\n".join(d["logs"]["app-api"]))
 
 print("\n── VpsConfig / ssh 参数拼接 " + "─" * 30)
 
@@ -286,6 +304,93 @@ finally:
     httpd.shutdown()
     httpd.server_close()
     vps_panel.create_invite = real_create
+
+
+print("\n── web 层：/api/vps/status 有缓存，不叠加 ssh " + "─" * 14)
+
+real_status = vps_panel.status
+status_calls = []
+
+
+def stub_status(vcfg, runner=None, secrets=()):
+    status_calls.append({"secrets": list(secrets)})
+    return {"ok": True, "target": "stub"}
+
+
+vps_panel.status = stub_status
+Handler._vps_status_cache = None
+httpd = ThreadingHTTPServer(
+    ("127.0.0.1", 0),
+    partial(Handler,
+            make_config(web_token="s3cret", api_key="sk-live-secret-1"), cfg),
+)
+threading.Thread(target=httpd.serve_forever, daemon=True).start()
+base = f"http://127.0.0.1:{httpd.server_address[1]}"
+try:
+    req = urllib.request.Request(f"{base}/api/vps/status",
+                                 headers={"X-Murmur-Token": "s3cret"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        d1 = json.loads(r.read())
+    with urllib.request.urlopen(req, timeout=5) as r:
+        d2 = json.loads(r.read())
+    check("两次请求只打一次 ssh（20 秒内走缓存）",
+          len(status_calls) == 1, str(len(status_calls)))
+    check("缓存返回同样的内容", d1 == d2 == {"ok": True, "target": "stub"})
+    check(".env 里的密钥真值传给了远端日志脱敏",
+          "sk-live-secret-1" in status_calls[0]["secrets"],
+          str(status_calls))
+finally:
+    httpd.shutdown()
+    httpd.server_close()
+    vps_panel.status = real_status
+    Handler._vps_status_cache = None
+
+print("\n── web 层：/api/quota 的 hours 要校验、要有上限 " + "─" * 12)
+
+import sqlite3  # noqa: E402
+import tempfile  # noqa: E402
+
+from murmur.web import QUOTA_SCHEMA  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    dbp = Path(tmp) / "q.db"
+    conn = sqlite3.connect(dbp)
+    conn.executescript(QUOTA_SCHEMA)
+    conn.execute(
+        "INSERT INTO quota_snapshots (at, ok) VALUES (?, 1)",
+        (("2020-01-01T00:00:00+00:00"),))  # 远超任何合理窗口的旧点
+    conn.commit()
+    conn.close()
+
+    httpd = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        partial(Handler, make_config(dbp, web_token="s3cret"), cfg),
+    )
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def get_quota(qs: str):
+        req = urllib.request.Request(f"{base}/api/quota{qs}",
+                                     headers={"X-Murmur-Token": "s3cret"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    try:
+        code, d = get_quota("?hours=abc")
+        check("hours 不是整数返回 400 而不是 500", code == 400, str(code))
+        # 2020 年的点在 90 天上限之外：能查到它说明 hours 没被 clamp
+        code, d = get_quota("?hours=99999999")
+        check("hours 再大也被 clamp 到 90 天，不会全表扫",
+              code == 200 and d["points"] == [], str(d.get("points")))
+        code, d = get_quota("?hours=-5")
+        check("负数被抬到下限，不炸",
+              code == 200 and d["points"] == [], str(code))
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 print(f"\n{'─' * 60}\n通过 {ok}，失败 {fail}")

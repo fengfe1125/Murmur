@@ -76,6 +76,7 @@ class AppSettings:
     requests_per_minute: int = 30
     rate_limit_max_keys: int = 4096
     event_ttl_hours: int = 24
+    push_delivery_budget_seconds: float = 30.0
     timezone: ZoneInfo = ZoneInfo("Asia/Shanghai")
 
     @property
@@ -170,6 +171,9 @@ class AppSettings:
                 "MURMUR_APP_RATE_LIMIT_MAX_KEYS", "4096"
             )),
             event_ttl_hours=int(os.getenv("MURMUR_APP_EVENT_TTL_HOURS", "24")),
+            push_delivery_budget_seconds=float(os.getenv(
+                "MURMUR_APP_PUSH_DELIVERY_BUDGET_SECONDS", "30"
+            )),
             timezone=tz,
         )
 
@@ -212,6 +216,8 @@ class AppSettings:
             raise RuntimeError("App image pixel limit must accept 48MP photos")
         if self.requests_per_minute < 1 or self.rate_limit_max_keys < 128:
             raise RuntimeError("invalid App API rate limiter settings")
+        if self.push_delivery_budget_seconds <= 0:
+            raise RuntimeError("push delivery budget must be positive")
 
     def validate_android(self) -> None:
         missing = [

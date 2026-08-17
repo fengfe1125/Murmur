@@ -16,7 +16,7 @@ import os
 import re
 import shlex
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,7 +41,13 @@ _SECRET_PATTERNS = [
 ]
 
 
-def _redact(text: str) -> str:
+def _redact(text: str, secrets: Iterable[str | None] = ()) -> str:
+    """先按 .env 里的真值精确擦，再按模式兜底——和 web.py 的 _redact 同一套。
+    只有模式层的话，日志里出现的密钥只要长得不走样（比如自定义的
+    api key）就原样上页面了。"""
+    for secret in secrets:
+        if secret and len(secret) >= 8:
+            text = text.replace(secret, "***")
     for pat in _SECRET_PATTERNS:
         text = pat.sub(lambda m: m.group(0)[:6] + "***", text)
     return text
@@ -219,8 +225,15 @@ def _timeout(cfg: VpsConfig, fast: float) -> float:
     return fast * 3 if cfg.gcloud_instance else fast
 
 
-def status(cfg: VpsConfig, runner: Runner | None = None) -> dict:
-    """一条 SSH 拿全：服务状态、负载、内存、磁盘、两个日志尾巴。"""
+def status(
+    cfg: VpsConfig,
+    runner: Runner | None = None,
+    secrets: Iterable[str | None] = (),
+) -> dict:
+    """一条 SSH 拿全：服务状态、负载、内存、磁盘、两个日志尾巴。
+
+    secrets 是 .env 里的密钥真值（web.py 的 _secrets），日志尾巴脱敏
+    先按它们精确擦、再按模式兜底。"""
     run = runner or _run_remote
     res = run(cfg, _status_cmd(), _timeout(cfg, 45.0))
     if not res.ok:
@@ -252,7 +265,8 @@ def status(cfg: VpsConfig, runner: Runner | None = None) -> dict:
 
     logs = {}
     for name in LOG_FILES:
-        logs[name] = [_redact(x) for x in sec.get(f"log {name}", "").splitlines()]
+        logs[name] = [_redact(x, secrets)
+                      for x in sec.get(f"log {name}", "").splitlines()]
 
     return {
         "ok": True,
@@ -335,7 +349,9 @@ def create_invite(
     res = run(cfg, _murmur_cli(sub), _timeout(cfg, 30.0))
     if not res.ok:
         return {"ok": False, "detail": res.detail}
-    code = next((ln.strip() for ln in res.stdout.splitlines() if ln.strip()), "")
-    if not code:
+    # 邀请码约定为最后一行非空输出：CLI 万一先打印一行警告，
+    # 取第一行就会把警告当邀请码展示出去。
+    lines = [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
+    if not lines:
         return {"ok": False, "detail": "远端没有输出邀请码"}
-    return {"ok": True, "code": code, "days": days, "reusable": reusable}
+    return {"ok": True, "code": lines[-1], "days": days, "reusable": reusable}

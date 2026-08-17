@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from dataclasses import replace
 from pathlib import Path
+from zoneinfo import ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
+from openai import OpenAIError
 
 from .config import Config
 from .engine import build_context, respond
@@ -131,6 +134,12 @@ def cmd_poke(args) -> int:
             print("  ▹", b)
 
         if not args.dry_run:
+            # 先记后发：发完才记的话，中间进程一死，这条主动消息就不在
+            # 记忆里，去重失效，用户可能收到两条不一样的。
+            mem.record(chat_id=key, thread=label, shot_at=None, bucket=moment.bucket,
+                       weekday=moment.weekday, spot=None, scene=reply.scene,
+                       move=reply.move, said=reply.joined, note=None,
+                       kind="out", intent=intent.key)
             if args.to == "tg":
                 from telegram import Bot
                 bot = Bot(cfg.telegram_token)
@@ -145,11 +154,7 @@ def cmd_poke(args) -> int:
                 res = send_oto(cfg, [args.user], reply.say)
                 bad = res.get("invalidStaffIdList") or []
                 print("  钉钉已投递" + (f"（无效 userId: {bad}）" if bad else ""))
-            mem.record(chat_id=key, thread=label, shot_at=None, bucket=moment.bucket,
-                       weekday=moment.weekday, spot=None, scene=reply.scene,
-                       move=reply.move, said=reply.joined, note=None,
-                       kind="out", intent=intent.key)
-            print("  已发送并记入记忆")
+            print("  已记入记忆并发送")
     return 0
 
 
@@ -419,7 +424,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         return args.func(args)
-    except (RuntimeError, FileNotFoundError, ValueError) as e:
+    except (RuntimeError, FileNotFoundError, ValueError,
+            sqlite3.OperationalError, ZoneInfoNotFoundError, OpenAIError) as e:
         print(f"错误：{e}", file=sys.stderr)
         return 1
 

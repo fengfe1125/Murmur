@@ -16,6 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from murmur.app_store import (  # noqa: E402
+    MAX_JOB_ATTEMPTS,
+    MAX_PUSH_ATTEMPTS,
     AppStore,
     ChallengeInvalid,
     DeviceLimit,
@@ -423,6 +425,79 @@ class AppStoreTests(unittest.TestCase):
         ):
             count = self.store.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             self.assertEqual(count, 0, table)
+
+    def test_crash_reclaim_loop_is_terminal_after_attempt_cap(self):
+        # A job that kills the worker process (PIL segfault, OOM) never reaches
+        # fail_job(); its lease simply expires.  After MAX_JOB_ATTEMPTS such
+        # crashes the moment must fail terminally instead of looping forever.
+        result = self.store.create_moment(
+            user_id=self.enrollment.user_id, note="boom", image_path=None,
+            idempotency_key="crash-loop", request_digest="crash-loop",
+        )
+        for _ in range(MAX_JOB_ATTEMPTS):
+            job = self.store.claim_job("worker")
+            self.assertIsNotNone(job)
+            # Simulate the process dying: no terminal update, lease runs out.
+            self.store.conn.execute(
+                "UPDATE app_jobs SET lease_until='2000-01-01T00:00:00+00:00' WHERE id=?",
+                (job.id,),
+            )
+            self.store.conn.commit()
+        self.assertIsNone(self.store.claim_job("worker"))
+        moment = self.store.moment_for_user(result.moment_id, self.enrollment.user_id)
+        self.assertEqual(moment["status"], "failed")
+        self.assertEqual(moment["failure_retryable"], 0)
+        row = self.store.conn.execute(
+            "SELECT status,last_error FROM app_jobs WHERE moment_id=?",
+            (result.moment_id,),
+        ).fetchone()
+        self.assertEqual(tuple(row), ("failed", "attempts_exceeded"))
+        events = self.store.events_after(result.moment_id, self.enrollment.user_id)
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertEqual(events[-1]["data"]["code"], "attempts_exceeded")
+        self.assertFalse(events[-1]["data"]["retryable"])
+
+    def test_push_retry_jitters_backoff_and_gives_up_at_cap(self):
+        self.store.update_device(
+            self.enrollment.key_id, push_token="c" * 64, environment="development",
+            timezone="Asia/Shanghai", device_name="phone",
+        )
+        moment_id = self.store.create_proactive(self.enrollment.user_id, ["hello"])
+        device_id = self.enrollment.device_id
+        now = datetime.now(UTC)
+        self.store.retry_push(moment_id, device_id, status=500, now=now)
+        row = self.store.conn.execute(
+            "SELECT status,attempts,next_attempt_at FROM app_push_deliveries"
+        ).fetchone()
+        self.assertEqual((row["status"], row["attempts"]), ("pending", 1))
+        # First backoff is 30s with ±20% jitter.
+        delay = (datetime.fromisoformat(row["next_attempt_at"]) - now).total_seconds()
+        self.assertGreaterEqual(delay, 30 * 0.8 - 1)
+        self.assertLessEqual(delay, 30 * 1.2 + 1)
+        for _ in range(MAX_PUSH_ATTEMPTS + 2):
+            self.store.retry_push(moment_id, device_id, status=500, now=now)
+        row = self.store.conn.execute(
+            "SELECT status,attempts FROM app_push_deliveries"
+        ).fetchone()
+        self.assertEqual(tuple(row), ("dead", MAX_PUSH_ATTEMPTS))
+        # A dead delivery never comes due again.
+        self.assertEqual(self.store.due_push_deliveries(now + timedelta(hours=2)), [])
+
+    def test_erasure_appends_terminal_error_event_to_inflight_moment(self):
+        result = self.store.create_moment(
+            user_id=self.enrollment.user_id, note="erase me", image_path=None,
+            idempotency_key="erase-inflight", request_digest="erase-inflight",
+        )
+        self.store.claim_job("worker")
+        self.store.begin_user_erasure(self.enrollment.user_id)
+        moment = self.store.moment_for_user(result.moment_id, self.enrollment.user_id)
+        self.assertEqual(moment["status"], "cancelled")
+        # The SSE stream ends on done/error; without this event a client
+        # watching the cancelled moment would wait out the 120s deadline.
+        events = self.store.events_after(result.moment_id, self.enrollment.user_id)
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertEqual(events[-1]["data"]["code"], "account_deleted")
+        self.assertFalse(events[-1]["data"]["retryable"])
 
 
 class SchemaMigrationTests(unittest.TestCase):

@@ -134,7 +134,7 @@ class APNsTests(unittest.TestCase):
             )
             transport = Transport([Response()])
             scheduler = ProactiveScheduler(
-                store, self.provider(transport), lambda _user: (["在干嘛"], "傍晚"),
+                store, self.provider(transport), lambda _user, _tz: (["在干嘛"], "傍晚"),
             )
             # Force one due slot rather than depending on the deterministic jitter.
             now = datetime(2026, 8, 14, 12, tzinfo=UTC)
@@ -191,7 +191,7 @@ class APNsTests(unittest.TestCase):
             store.replace_slots(enrolled.user_id, now.date(), [now - timedelta(seconds=1)])
             scheduler = ProactiveScheduler(
                 store, self.provider(LeakyTransport()),
-                lambda _user: (["hello"], "scene"),
+                lambda _user, _tz: (["hello"], "scene"),
             )
             with self.assertLogs("murmur.app_push", level="ERROR") as captured:
                 scheduler.run_once(now)
@@ -236,7 +236,7 @@ class APNsTests(unittest.TestCase):
             scheduler = ProactiveScheduler(
                 store,
                 {"ios": self.provider(apns), "android": android_provider},
-                lambda _user: (["routed"], "scene"),
+                lambda _user, _tz: (["routed"], "scene"),
             )
             self.assertEqual(scheduler.run_once(now), 1)
             self.assertEqual(len(apns.calls), 1)
@@ -255,7 +255,7 @@ class APNsTests(unittest.TestCase):
             apns = Transport([Response(200)])
             # Only iOS is configured, so the Android delivery has nowhere to go.
             scheduler = ProactiveScheduler(
-                store, {"ios": self.provider(apns)}, lambda _user: (["stranded"], "scene")
+                store, {"ios": self.provider(apns)}, lambda _user, _tz: (["stranded"], "scene")
             )
             self.assertEqual(scheduler.run_once(now), 1)
             self.assertEqual(len(apns.calls), 0)
@@ -294,7 +294,7 @@ class APNsTests(unittest.TestCase):
             first_transport = Transport([Response(500, "InternalServerError")])
             first = ProactiveScheduler(
                 store, self.provider(first_transport),
-                lambda _user: (["durable hello"], "scene"),
+                lambda _user, _tz: (["durable hello"], "scene"),
             )
             self.assertEqual(first.run_once(now), 1)
             row = store.conn.execute(
@@ -310,11 +310,12 @@ class APNsTests(unittest.TestCase):
             second_transport = Transport([Response(200)])
             second = ProactiveScheduler(
                 reopened, self.provider(second_transport),
-                lambda _user: (_ for _ in ()).throw(
+                lambda _user, _tz: (_ for _ in ()).throw(
                     AssertionError("must not generate another proactive moment")
                 ),
             )
-            self.assertEqual(second.run_once(now + timedelta(seconds=31)), 0)
+            # Backoff carries ±20% jitter (24–36s here); 40s is past the worst case.
+            self.assertEqual(second.run_once(now + timedelta(seconds=40)), 0)
             self.assertEqual(len(second_transport.calls), 1)
             row = reopened.conn.execute(
                 "SELECT status,attempts FROM app_push_deliveries WHERE moment_id=?",
@@ -326,6 +327,102 @@ class APNsTests(unittest.TestCase):
             ).fetchone()[0], 1)
         finally:
             reopened.close()
+
+    def test_delivery_round_stops_when_the_time_budget_is_exhausted(self):
+        store = AppStore(self.root / "budget.db")
+        now = datetime(2026, 8, 14, 12, tzinfo=UTC)
+        try:
+            for key_id, token in (("dev-budget-a", "a" * 64), ("dev-budget-b", "b" * 64)):
+                enrolled = self.enrolled_device_on(store, "ios", token=token, key_id=key_id)
+                store.replace_slots(
+                    enrolled.user_id, now.date(), [now - timedelta(seconds=1)]
+                )
+            transport = Transport([Response(200), Response(200)])
+            # A zero budget still delivers the first candidate, then stops.
+            scheduler = ProactiveScheduler(
+                store, self.provider(transport), lambda _user, _tz: (["budget"], "scene"),
+                delivery_budget_seconds=0.0,
+            )
+            self.assertEqual(scheduler.run_once(now), 2)
+            self.assertEqual(len(transport.calls), 1)
+            # The skipped delivery kept its past-due next_attempt_at, so the
+            # next round picks it up without waiting out a backoff.
+            self.assertEqual(scheduler.deliver_pending(now), 1)
+            self.assertEqual(len(transport.calls), 2)
+        finally:
+            store.close()
+
+    def test_failed_generation_backs_off_instead_of_hammering_the_model(self):
+        store = AppStore(self.root / "gen-backoff.db")
+        now = datetime(2026, 8, 14, 12, tzinfo=UTC)
+        try:
+            enrolled = self.enrolled_device_on(
+                store, "ios", token="a" * 64, key_id="dev-gen-backoff"
+            )
+            store.replace_slots(
+                enrolled.user_id, now.date(), [now - timedelta(seconds=1)]
+            )
+            calls = []
+
+            def failing(_user, _tz):
+                calls.append(1)
+                raise RuntimeError("model gateway down")
+
+            scheduler = ProactiveScheduler(store, self.provider(Transport()), failing)
+            with self.assertLogs("murmur.app_push", level="ERROR"):
+                self.assertEqual(scheduler.run_once(now), 0)
+                # The slot is still due, but the per-user backoff suppresses
+                # an immediate second full model call.
+                self.assertEqual(scheduler.run_once(now), 0)
+            self.assertEqual(len(calls), 1)
+            row = store.conn.execute(
+                "SELECT delivered_at FROM app_proactive_slots"
+            ).fetchone()
+            self.assertIsNone(row["delivered_at"])
+            # Once the backoff expires the same-day slot is retried, not lost.
+            scheduler._gen_retry_after[enrolled.user_id] = 0.0
+            with self.assertLogs("murmur.app_push", level="ERROR"):
+                self.assertEqual(scheduler.run_once(now), 0)
+            self.assertEqual(len(calls), 2)
+        finally:
+            store.close()
+
+    def test_generator_receives_the_user_device_timezone(self):
+        store = AppStore(self.root / "gen-tz.db")
+        now = datetime(2026, 8, 14, 12, tzinfo=UTC)
+        try:
+            invite = store.create_invite()
+            enrolled = store.redeem_invite(
+                code=invite, key_id="dev-gen-tz", public_key=None, receipt=None,
+                counter=0, environment="development",
+            )
+            store.update_device(
+                enrolled.key_id, push_token="b" * 64, environment="development",
+                timezone="America/New_York", device_name="phone",
+            )
+            store.create_moment(
+                user_id=enrolled.user_id, note="hello", image_path=None,
+                idempotency_key="tz-inbound", request_digest="tz",
+            )
+            job = store.claim_job("test")
+            store.finish_job(job, scene="", move="speak", memory_entry_id=1,
+                             preview_path=None)
+            store.replace_slots(
+                enrolled.user_id, now.date(), [now - timedelta(seconds=1)]
+            )
+            seen = []
+
+            def generating(_user, tz):
+                seen.append(tz)
+                return (["morning"], "scene")
+
+            scheduler = ProactiveScheduler(
+                store, self.provider(Transport([Response()])), generating,
+            )
+            self.assertEqual(scheduler.run_once(now), 1)
+            self.assertEqual(seen, [ZoneInfo("America/New_York")])
+        finally:
+            store.close()
 
     def test_invalid_old_token_is_rearmed_when_device_registers_rotated_token(self):
         store = AppStore(self.root / "token-rotation.db")
@@ -354,7 +451,7 @@ class APNsTests(unittest.TestCase):
             scheduler = ProactiveScheduler(
                 store,
                 self.provider(invalid_transport, store.invalidate_push_token),
-                lambda _user: (["rotate me"], "scene"),
+                lambda _user, _tz: (["rotate me"], "scene"),
             )
             self.assertEqual(scheduler.run_once(now), 1)
             delivery = store.conn.execute(
@@ -374,7 +471,7 @@ class APNsTests(unittest.TestCase):
             rotated_transport = Transport([Response(200)])
             restarted = ProactiveScheduler(
                 store, self.provider(rotated_transport),
-                lambda _user: (_ for _ in ()).throw(
+                lambda _user, _tz: (_ for _ in ()).throw(
                     AssertionError("must reuse current proactive moment")
                 ),
             )

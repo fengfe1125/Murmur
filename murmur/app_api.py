@@ -249,6 +249,12 @@ def apply_stop_preference(store: AppStore, user_id: str, text: str | None) -> bo
     return True
 
 
+def record_memory_reply(settings: AppSettings, entry_id: int, reply: str) -> None:
+    """Attach the user's acknowledgement to the stored memory entry."""
+    with Memory(settings.memory_db_path) as memory:
+        memory.add_reply(entry_id, reply)
+
+
 def create_app(
     settings: AppSettings | None = None,
     *,
@@ -469,7 +475,7 @@ def create_app(
             finally:
                 spool.close()
 
-    def authenticate(
+    def _authenticate(
         request: Request,
         raw: bytes | None = b"",
         *,
@@ -494,6 +500,22 @@ def create_app(
             store.require_user_ready(context.user_id)
         return context
 
+    async def authenticate(
+        request: Request,
+        raw: bytes | None = b"",
+        *,
+        body_digest: bytes | None = None,
+        allow_deleting: bool = False,
+    ):
+        # consume_challenge and advance_counter are synchronous write
+        # transactions that may wait out the SQLite busy_timeout while the
+        # worker holds the write lock; keep them off the event loop, as
+        # delete_account already does for account erasure.
+        return await asyncio.to_thread(
+            _authenticate, request, raw,
+            body_digest=body_digest, allow_deleting=allow_deleting,
+        )
+
     @app.post("/v1/auth/challenges")
     async def issue_challenge(request: Request):
         raw = await limited_json_body(request)
@@ -510,8 +532,9 @@ def create_app(
                     request.headers.get("x-murmur-development-token")
                 )
         try:
-            challenge_id, challenge, expires_at = store.issue_challenge(
-                purpose, key_id=key_id if purpose == "request" else None
+            challenge_id, challenge, expires_at = await asyncio.to_thread(
+                store.issue_challenge,
+                purpose, key_id=key_id if purpose == "request" else None,
             )
         except NotFound as exc:
             if purpose == "request":
@@ -537,7 +560,11 @@ def create_app(
         platform = data.get("platform", "ios")
         if platform not in PLATFORMS:
             raise APIError(400, "validation_error", "platform 无效。")
-        result = authenticator.enroll(
+        # Android enrolment also pulls Google's revocation list over the
+        # network inside verify_attestation; the thread keeps that fetch and
+        # the SQLite writes below off the event loop.
+        result = await asyncio.to_thread(
+            authenticator.enroll,
             challenge_id=challenge_id,
             key_id=key_id,
             attestation_b64=data.get("attestation"),
@@ -546,7 +573,8 @@ def create_app(
         )
         if environment != result.environment:
             raise APIError(401, "invalid_attestation", "验证环境不匹配。")
-        enrollment = store.redeem_invite(
+        enrollment = await asyncio.to_thread(
+            store.redeem_invite,
             code=invite_code,
             key_id=key_id,
             public_key=result.public_key or None,
@@ -570,8 +598,8 @@ def create_app(
         """
         raw = await limited_json_body(request)
         _json(raw)
-        auth = authenticate(request, raw)
-        enrollment = store.enrollment_for_key(auth.key_id)
+        auth = await authenticate(request, raw)
+        enrollment = await asyncio.to_thread(store.enrollment_for_key, auth.key_id)
         return {
             "user_id": enrollment.user_id,
             "device_id": enrollment.device_id,
@@ -581,7 +609,7 @@ def create_app(
     @app.post("/v1/moments", status_code=202)
     async def create_moment(request: Request):
         async with limited_multipart_body(request) as wire_digest:
-            auth = authenticate(request, None, body_digest=wire_digest)
+            auth = await authenticate(request, None, body_digest=wire_digest)
             try:
                 form = await request.form(
                     max_files=1, max_fields=4, max_part_size=64 * 1024
@@ -638,11 +666,14 @@ def create_app(
                         400, "validation_error", "文字和图片至少要有一个。"
                     )
 
-                apply_stop_preference(store, auth.user_id, note)
+                await asyncio.to_thread(
+                    apply_stop_preference, store, auth.user_id, note
+                )
                 digest = hashlib.sha256(
                     note.encode("utf-8") + b"\x00" + image_hash.digest()
                 ).hexdigest()
-                result = store.create_moment(
+                result = await asyncio.to_thread(
+                    store.create_moment,
                     user_id=auth.user_id,
                     note=note or None,
                     image_path=str(temp_path) if temp_path else None,
@@ -663,8 +694,8 @@ def create_app(
     @app.get("/v1/moments/{moment_id}/events")
     async def moment_events(moment_id: str, request: Request):
         raw = b""
-        auth = authenticate(request, raw)
-        store.moment_for_user(moment_id, auth.user_id)
+        auth = await authenticate(request, raw)
+        await asyncio.to_thread(store.moment_for_user, moment_id, auth.user_id)
         last_header = request.headers.get("last-event-id", "0") or "0"
         try:
             last_sequence = max(0, int(last_header))
@@ -676,7 +707,17 @@ def create_app(
             last_keepalive = time.monotonic()
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
-                events = store.events_after(moment_id, auth.user_id, sequence)
+                try:
+                    events = await asyncio.to_thread(
+                        # Ownership was verified above; skip the per-poll
+                        # re-check inside events_after.
+                        store.events_after, moment_id, auth.user_id, sequence, False
+                    )
+                except NotFound:
+                    # Account erasure cancels in-flight moments; the stream
+                    # ends quietly instead of dropping the connection with a
+                    # server error.
+                    return
                 for event in events:
                     sequence = event["sequence"]
                     data = json.dumps(event["data"], ensure_ascii=False, separators=(",", ":"))
@@ -699,8 +740,8 @@ def create_app(
 
     @app.get("/v1/proactive/current")
     async def proactive_current(request: Request):
-        auth = authenticate(request, b"")
-        current = store.current_proactive(auth.user_id)
+        auth = await authenticate(request, b"")
+        current = await asyncio.to_thread(store.current_proactive, auth.user_id)
         if current is None:
             return Response(status_code=204)
         return current
@@ -708,29 +749,31 @@ def create_app(
     @app.post("/v1/moments/{moment_id}/ack")
     async def acknowledge(moment_id: str, request: Request):
         raw = await limited_json_body(request)
-        auth = authenticate(request, raw)
+        auth = await authenticate(request, raw)
         data = _json(raw)
         reply = data.get("reply")
         if reply is not None and (not isinstance(reply, str)
                                   or len(reply.strip()) > settings.max_note_chars):
             raise APIError(400, "validation_error", "reply 无效。")
-        moment = store.acknowledge(moment_id, auth.user_id)
+        moment = await asyncio.to_thread(store.acknowledge, moment_id, auth.user_id)
         reply = reply.strip() if isinstance(reply, str) else ""
         if reply and moment.get("memory_entry_id"):
-            with Memory(settings.memory_db_path) as memory:
-                memory.add_reply(int(moment["memory_entry_id"]), reply)
-        apply_stop_preference(store, auth.user_id, reply)
+            await asyncio.to_thread(
+                record_memory_reply, settings,
+                int(moment["memory_entry_id"]), reply,
+            )
+        await asyncio.to_thread(apply_stop_preference, store, auth.user_id, reply)
         return {"acknowledged": True}
 
     @app.put("/v1/device")
     async def update_device(request: Request):
         raw = await limited_json_body(request)
-        auth = authenticate(request, raw)
+        auth = await authenticate(request, raw)
         data = _json(raw)
         environment = data.get("environment")
         if environment not in {"development", "production"}:
             raise APIError(400, "validation_error", "environment 无效。")
-        key = store.auth_key(auth.key_id)
+        key = await asyncio.to_thread(store.auth_key, auth.key_id)
         if environment != key.environment:
             raise APIError(400, "validation_error", "设备环境与注册环境不匹配。")
         # `apns_token` is the name the shipped iOS client sends; `push_token` is
@@ -748,7 +791,8 @@ def create_app(
             ZoneInfo(timezone)
         except ZoneInfoNotFoundError as exc:
             raise APIError(400, "validation_error", "timezone 无效。") from exc
-        device = store.update_device(
+        device = await asyncio.to_thread(
+            store.update_device,
             auth.key_id,
             push_token=token,
             environment=environment,
@@ -760,20 +804,20 @@ def create_app(
 
     @app.get("/v1/devices")
     async def list_devices(request: Request):
-        auth = authenticate(request, b"")
-        return {"devices": store.devices(auth.user_id)}
+        auth = await authenticate(request, b"")
+        return {"devices": await asyncio.to_thread(store.devices, auth.user_id)}
 
     @app.delete("/v1/devices/{device_id}", status_code=204)
     async def revoke_device(device_id: str, request: Request):
-        auth = authenticate(request, b"")
-        if not store.revoke_device(auth.user_id, device_id):
+        auth = await authenticate(request, b"")
+        if not await asyncio.to_thread(store.revoke_device, auth.user_id, device_id):
             raise APIError(404, "not_found", "没有找到对应设备。")
         return Response(status_code=204)
 
     @app.get("/v1/preferences")
     async def get_preferences(request: Request):
-        auth = authenticate(request, b"")
-        prefs = store.preferences(auth.user_id)
+        auth = await authenticate(request, b"")
+        prefs = await asyncio.to_thread(store.preferences, auth.user_id)
         return {
             "daily_frequency": prefs["daily_frequency"],
             "quiet_start": prefs["quiet_start"],
@@ -783,14 +827,15 @@ def create_app(
     @app.patch("/v1/preferences")
     async def update_preferences(request: Request):
         raw = await limited_json_body(request)
-        auth = authenticate(request, raw)
+        auth = await authenticate(request, raw)
         data = _json(raw)
-        current = store.preferences(auth.user_id)
+        current = await asyncio.to_thread(store.preferences, auth.user_id)
         frequency = data.get("daily_frequency", current["daily_frequency"])
         if not isinstance(frequency, int) or isinstance(frequency, bool):
             raise APIError(400, "validation_error", "daily_frequency 无效。")
         try:
-            return store.update_preferences(
+            return await asyncio.to_thread(
+                store.update_preferences,
                 auth.user_id,
                 daily_frequency=frequency,
                 quiet_start=str(data.get("quiet_start", current["quiet_start"])),
@@ -802,7 +847,7 @@ def create_app(
     @app.delete("/v1/account", status_code=204)
     async def delete_account(request: Request):
         raw = await limited_json_body(request)
-        auth = authenticate(request, raw, allow_deleting=True)
+        auth = await authenticate(request, raw, allow_deleting=True)
         # flock, SQLite and filesystem cleanup are intentionally synchronous;
         # keep them off the ASGI event loop so one deletion cannot stall every
         # other user's API requests while waiting for a worker's user lock.
@@ -822,7 +867,12 @@ def run(host: str = "127.0.0.1", port: int = 8766) -> None:
     settings = AppSettings.from_env(cfg)
     validate_bind_host(settings, host)
     app = create_app(settings, cfg=cfg)
-    uvicorn.run(app, host=host, port=port, proxy_headers=True, server_header=False)
+    uvicorn.run(
+        app, host=host, port=port, proxy_headers=True, server_header=False,
+        # Only the loopback reverse proxy may assert the client IP; without
+        # this, any caller could spoof X-Forwarded-For past the IP rate limit.
+        forwarded_allow_ips="127.0.0.1,::1",
+    )
 
 
 def main() -> None:

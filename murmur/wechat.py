@@ -574,25 +574,34 @@ def _load_dossier(cfg: Config, label: str) -> str | None:
     return None if d.is_empty else d.as_prompt()
 
 
+# 新人连发图+文字时线程池里两个任务会同时进来，都看到 has_greeted==False，
+# 自我介绍就发了两遍。按会话键加锁，第二个进来的会看到已经打过招呼。
+_greet_locks: dict[int, threading.Lock] = {}
+_greet_locks_guard = threading.Lock()
+
+
 def ensure_greeted(cfg: Config, mem: Memory, client: WeChatClient,
                    uid: str, key: int, label: str) -> bool:
     """新人首次出现：建记忆线、发自我介绍。已经打过就什么都不做。"""
-    if mem.has_greeted(key):
-        return False
-    client.send_bubbles(uid, INTRO)
-    m = Moment.text_only(cfg.tz)
-    mem.record(chat_id=key, thread=label, shot_at=None, bucket=m.bucket,
-               weekday=m.weekday, spot=None, scene="（自我介绍）", move="speak",
-               said=JOINED, note=None, kind="out", intent="自我介绍")
-    mem.mark_greeted(key, label)
-    try:
-        d = Dossier.load(_dossier_root(cfg), label)
-        if not d.path.exists():
-            d.save()
-    except Exception as e:
-        log.warning("建记忆文件失败：%s", e)
-    log.info("已向新用户 %s 发送自我介绍", label)
-    return True
+    with _greet_locks_guard:
+        lock = _greet_locks.setdefault(key, threading.Lock())
+    with lock:
+        if mem.has_greeted(key):
+            return False
+        client.send_bubbles(uid, INTRO)
+        m = Moment.text_only(cfg.tz)
+        mem.record(chat_id=key, thread=label, shot_at=None, bucket=m.bucket,
+                   weekday=m.weekday, spot=None, scene="（自我介绍）", move="speak",
+                   said=JOINED, note=None, kind="out", intent="自我介绍")
+        mem.mark_greeted(key, label)
+        try:
+            d = Dossier.load(_dossier_root(cfg), label)
+            if not d.path.exists():
+                d.save()
+        except Exception as e:
+            log.warning("建记忆文件失败：%s", e)
+        log.info("已向新用户 %s 发送自我介绍", label)
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -699,12 +708,9 @@ class Handler:
             self.client.send_bubbles(uid, [f"（出错了：{type(e).__name__}）"])
             return
 
-        if reply.silent:
-            self.client._typing(uid, TYPING_OFF)
-            log.info("thread=%s quiet | %s", label, reply.scene)
-        else:
-            self.client.send_bubbles(uid, reply.say)
-
+        # 先落库再发——和 bot.py 一个顺序。发到一半抛异常（限速重试失败、
+        # 断网）时他可能已经收到部分气泡，但这轮对话至少已经在记忆里，
+        # _last_entry 也指好了，下一句还能接上。
         entry_id = self.mem.record(
             chat_id=key, thread=label, shot_at=shot_at, bucket=moment.bucket,
             weekday=moment.weekday, spot=spot,
@@ -717,8 +723,16 @@ class Handler:
                 photo_mod.save_preview(self.cfg.db_path.parent, entry_id, ph)
             except Exception as e:
                 log.warning("存图失败：%s", e)
-        if not reply.silent:
+        if reply.silent:
+            self.client._typing(uid, TYPING_OFF)
+            log.info("thread=%s quiet | %s", label, reply.scene)
+        else:
             self._last_entry[key] = entry_id
+            try:
+                self.client.send_bubbles(uid, reply.say)
+            finally:
+                # 发到一半炸了也得把"正在输入"收掉，不然他那边一直停在上面
+                self.client._typing(uid, TYPING_OFF)
         try:
             refresh(self.cfg, self.mem, key, label, _dossier_root(self.cfg))
         except Exception as e:
@@ -749,80 +763,84 @@ def _initiative_loop(cfg: Config, mem: Memory, client: WeChatClient) -> None:
     seen: set[str] = set()
 
     while True:
-        now = datetime.now(cfg.tz)
-        today = now.date().isoformat()
+        try:
+            now = datetime.now(cfg.tz)
+            today = now.date().isoformat()
 
-        # 名册是活的，今天新认识的人今天就排上
-        users = list(dict.fromkeys(
-            sorted(cfg.wechat_allowed_users) + [r["user_id"] for r in mem.roster("wx")]
-        ))
-        if new := [u for u in users if u not in seen]:
-            seen.update(new)
-            log.info("微信主动消息收件人 +%s（共 %d 人）", new, len(users))
-        if not users:
-            time.sleep(60)
-            continue
-
-        for uid in users:
-            if planned_for.get(uid) != today:
-                times = plan_day(cfg.tz, now=now)
-                queue += [(t, uid) for t in times]
-                planned_for[uid] = today
-                log.info("微信 %s 今天排了 %d 条：%s", uid, len(times),
-                         " ".join(f"{t:%H:%M}" for t in times))
-        due, stale, pending = split_due(queue, now)
-        if stale:
-            log.info("错过了 %d 条主动消息（%s），迟到太久就不补了",
-                     len(stale), " ".join(f"{t:%H:%M}" for t, _ in stale))
-        queue = due + pending
-
-        if not queue:
-            time.sleep(60)    # 别贴着看门狗 300 秒的判死阈值
-            continue
-
-        when, uid = queue[0]
-        if when > now:
-            time.sleep(max(1.0, min((when - now).total_seconds(), 60)))
-            if datetime.now(cfg.tz) < when:
+            # 名册是活的，今天新认识的人今天就排上
+            users = list(dict.fromkeys(
+                sorted(cfg.wechat_allowed_users) + [r["user_id"] for r in mem.roster("wx")]
+            ))
+            if new := [u for u in users if u not in seen]:
+                seen.update(new)
+                log.info("微信主动消息收件人 +%s（共 %d 人）", new, len(users))
+            if not users:
+                time.sleep(60)
                 continue
-        queue.pop(0)
 
-        key, label = wechat_thread(uid)
-        if mem.is_opted_out(key):
-            continue
-        # 没有 context_token 就发不出去——他从来没跟机器人说过话。
-        # 这时候只能等他先开口，硬发必然失败。
-        if not client.ctx_tokens.get(uid):
-            log.info("微信 %s 还没有 context_token（他没先说过话），这条跳过", uid)
-            continue
+            for uid in users:
+                if planned_for.get(uid) != today:
+                    times = plan_day(cfg.tz, now=now)
+                    queue += [(t, uid) for t in times]
+                    planned_for[uid] = today
+                    log.info("微信 %s 今天排了 %d 条：%s", uid, len(times),
+                             " ".join(f"{t:%H:%M}" for t in times))
+            due, stale, pending = split_due(queue, now)
+            if stale:
+                log.info("错过了 %d 条主动消息（%s），迟到太久就不补了",
+                         len(stale), " ".join(f"{t:%H:%M}" for t, _ in stale))
+            queue = due + pending
 
-        now = datetime.now(cfg.tz)
-        last_in = mem.last_inbound_at(key)
-        last_dt = datetime.fromisoformat(last_in).astimezone(cfg.tz) if last_in else None
-        if hold := should_hold(last_dt, mem.unanswered_outbound(key), now):
-            log.info("微信主动消息跳过（%s）%s", hold, uid)
-            continue
+            if not queue:
+                time.sleep(60)    # 别贴着看门狗 300 秒的判死阈值
+                continue
 
-        intent = pick_intent([e.intent for e in mem.recent_outbound(key)])
-        try:
-            reply = initiate(Moment.text_only(cfg.tz, received_at=now), mem, cfg,
-                             intent, chat_id=key, dossier=_load_dossier(cfg, label))
-        except Exception as e:
-            log.error("微信主动消息失败 %s: %s", type(e).__name__, e)
-            continue
-        if reply.silent:
-            continue
+            when, uid = queue[0]
+            if when > now:
+                time.sleep(max(1.0, min((when - now).total_seconds(), 60)))
+                if datetime.now(cfg.tz) < when:
+                    continue
+            queue.pop(0)
 
-        try:
-            client.send_bubbles(uid, reply.say)
-        except Exception as e:
-            log.error("微信投递失败 %s: %s", type(e).__name__, e)
-            continue
-        m = Moment.text_only(cfg.tz, received_at=now)
-        mem.record(chat_id=key, thread=label, shot_at=None, bucket=m.bucket,
-                   weekday=m.weekday, spot=None, scene=reply.scene, move=reply.move,
-                   said=reply.joined, note=None, kind="out", intent=intent.key)
-        log.info("微信主动发出 [%s] %s", intent.key, reply.joined)
+            key, label = wechat_thread(uid)
+            if mem.is_opted_out(key):
+                continue
+            # 没有 context_token 就发不出去——他从来没跟机器人说过话。
+            # 这时候只能等他先开口，硬发必然失败。
+            if not client.ctx_tokens.get(uid):
+                log.info("微信 %s 还没有 context_token（他没先说过话），这条跳过", uid)
+                continue
+
+            now = datetime.now(cfg.tz)
+            last_in = mem.last_inbound_at(key)
+            last_dt = datetime.fromisoformat(last_in).astimezone(cfg.tz) if last_in else None
+            if hold := should_hold(last_dt, mem.unanswered_outbound(key), now):
+                log.info("微信主动消息跳过（%s）%s", hold, uid)
+                continue
+
+            intent = pick_intent([e.intent for e in mem.recent_outbound(key)])
+            try:
+                reply = initiate(Moment.text_only(cfg.tz, received_at=now), mem, cfg,
+                                 intent, chat_id=key, dossier=_load_dossier(cfg, label))
+            except Exception as e:
+                log.error("微信主动消息失败 %s: %s", type(e).__name__, e)
+                continue
+            if reply.silent:
+                continue
+
+            try:
+                client.send_bubbles(uid, reply.say)
+            except Exception as e:
+                log.error("微信投递失败 %s: %s", type(e).__name__, e)
+                continue
+            m = Moment.text_only(cfg.tz, received_at=now)
+            mem.record(chat_id=key, thread=label, shot_at=None, bucket=m.bucket,
+                       weekday=m.weekday, spot=None, scene=reply.scene, move=reply.move,
+                       said=reply.joined, note=None, kind="out", intent=intent.key)
+            log.info("微信主动发出 [%s] %s", intent.key, reply.joined)
+        except Exception:
+            log.exception("微信主动消息循环出错，60 秒后继续")
+            time.sleep(60)
 
 
 # ---------------------------------------------------------------------------

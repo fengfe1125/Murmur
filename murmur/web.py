@@ -23,6 +23,8 @@ import shutil
 import sqlite3
 import subprocess
 import threading
+import time
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -55,6 +57,10 @@ QUOTA_EVERY = 300.0
 # 看不出中间其实没有数据。
 QUOTA_HEARTBEAT = timedelta(hours=1)
 
+# /api/vps/status 的结果缓存：前端 30 秒一轮询，直连 ssh 最长要 45 秒，
+# 弱网下不缓存的话请求会叠在一起（ThreadingHTTPServer 没有线程上限）。
+VPS_STATUS_TTL = 20.0
+
 QUOTA_SCHEMA = """
 CREATE TABLE IF NOT EXISTS quota_snapshots (
     id            INTEGER PRIMARY KEY,
@@ -85,11 +91,16 @@ _SECRET_PATTERNS = [
 ]
 
 
+def _secrets(cfg: Config) -> tuple[str | None, ...]:
+    """.env 里的密钥真值。vps_panel 脱敏远端日志时复用同一份。"""
+    return (cfg.telegram_token, cfg.api_key, cfg.dingtalk_client_secret,
+            cfg.wechat_token, cfg.qq_client_secret)
+
+
 def _redact(text: str, cfg: Config) -> str:
     """先按配置里的真值精确擦，再按模式兜底。顺序不能反——
     精确擦掉之后，模式匹配剩下的才是没预料到的那些。"""
-    for secret in (cfg.telegram_token, cfg.api_key, cfg.dingtalk_client_secret,
-                   cfg.wechat_token, cfg.qq_client_secret):
+    for secret in _secrets(cfg):
         if secret and len(secret) >= 8:
             text = text.replace(secret, "***")
     for pat in _SECRET_PATTERNS:
@@ -791,7 +802,8 @@ class Handler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             pass  # 用户刷新页面时前一个请求会断，这不是错误
         except Exception as e:  # noqa: BLE001
-            log.exception("请求出错 %s", self.path)
+            # self.path 可能带着 ?token= 凭证，整串写进日志等于把钥匙存起来
+            log.exception("请求出错 %s", url.path)
             self._json({"error": f"{type(e).__name__}: {e}"}, 500)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -816,7 +828,7 @@ class Handler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             pass
         except Exception as e:  # noqa: BLE001
-            log.exception("请求出错 %s", self.path)
+            log.exception("请求出错 %s", url.path)  # 同 do_GET，不记 query
             self._json({"error": f"{type(e).__name__}: {e}"}, 500)
 
     def _route(self, path: str, q: dict) -> None:
@@ -831,18 +843,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, (UI_DIR / "vps.html").read_bytes(),
                               "text/html; charset=utf-8")
         if path == "/api/vps/status":
-            return self._json(vps_panel.status(self.vps))
+            return self._json(self._vps_status())
         if path == "/api/vps/invites":
             return self._json(vps_panel.list_invites(self.vps))
         if path == "/api/overview":
             return self._json(self.overview())
         if path == "/api/quota":
-            return self._json(self.quota(int(q.get("hours", ["168"])[0])))
+            try:
+                hours = int(q.get("hours", ["168"])[0])
+            except ValueError:
+                return self._json({"error": "hours 得是整数"}, 400)
+            # 没上限的话一个 hours=99999999 就是一次全表扫
+            return self._json(self.quota(min(max(hours, 1), 24 * 90)))
         if path == "/api/people":
-            with self.db() as c:
+            with closing(self.db()) as c:
                 return self._json({"people": _people(c, self.cfg)})
         if path == "/api/person":
-            with self.db() as c:
+            with closing(self.db()) as c:
                 return self._json(_person(c, self.cfg, q["key"][0],
                                           int(q.get("limit", ["400"])[0])))
         if path == "/api/logs":
@@ -868,6 +885,21 @@ class Handler(BaseHTTPRequestHandler):
         conn.execute("PRAGMA busy_timeout=10000")
         return conn
 
+    # ThreadingHTTPServer 每个请求新建一个 Handler，缓存只能挂在类上。
+    _vps_status_cache: tuple[float, dict] | None = None
+    _vps_status_lock = threading.Lock()
+
+    def _vps_status(self) -> dict:
+        """带缓存的 vps_panel.status()。锁拿全程：ssh 期间并发的请求
+        排队等同一份结果，而不是各自再开一条 ssh。"""
+        with self._vps_status_lock:
+            cache = type(self)._vps_status_cache
+            if cache and time.monotonic() - cache[0] < VPS_STATUS_TTL:
+                return cache[1]
+            result = vps_panel.status(self.vps, secrets=_secrets(self.cfg))
+            type(self)._vps_status_cache = (time.monotonic(), result)
+            return result
+
     def overview(self) -> dict:
         cfg = self.cfg
         procs = _processes()
@@ -891,7 +923,7 @@ class Handler(BaseHTTPRequestHandler):
                 "health": _health(configured, insts, log_state),
             })
 
-        with self.db() as c:
+        with closing(self.db()) as c:
             c.executescript(QUOTA_SCHEMA)
             today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
             # logged_at 存的是 UTC，按本地日期筛要先转过去
@@ -967,7 +999,7 @@ class Handler(BaseHTTPRequestHandler):
     def quota(self, hours: int) -> dict:
         since = (datetime.now(UTC)
                  - timedelta(hours=hours)).isoformat(timespec="seconds")
-        with self.db() as c:
+        with closing(self.db()) as c:
             c.executescript(QUOTA_SCHEMA)
             rows = c.execute(
                 "SELECT * FROM quota_snapshots WHERE at >= ? ORDER BY at",
@@ -993,14 +1025,18 @@ class Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 def _poller(cfg: Config, stop: threading.Event) -> None:
-    """后台按 QUOTA_EVERY 采一次额度。放独立线程，别拖慢页面。"""
-    conn = sqlite3.connect(cfg.db_path, timeout=10.0, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=10000")
-    conn.executescript(QUOTA_SCHEMA)
+    """后台按 QUOTA_EVERY 采一次额度。放独立线程，别拖慢页面。
+
+    每轮重建连接：备份恢复会整个换掉 db 文件，长驻连接感知不到，
+    会一直往已删除的 inode 上写。
+    """
     while not stop.is_set():
         try:
-            _snapshot(conn, fetch_quota(cfg))
+            with closing(sqlite3.connect(cfg.db_path, timeout=10.0)) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA busy_timeout=10000")
+                conn.executescript(QUOTA_SCHEMA)
+                _snapshot(conn, fetch_quota(cfg))
         except Exception as e:  # noqa: BLE001
             log.warning("采额度失败：%s: %s", type(e).__name__, e)
         stop.wait(QUOTA_EVERY)

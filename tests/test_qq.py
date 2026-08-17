@@ -196,5 +196,57 @@ with tempfile.TemporaryDirectory() as d:
     check("两句叠在一起不会各回一轮", n_respond["n"] <= 2, str(n_respond["n"]))
     check("发出去的不乱成两套", http.sent.count("回") <= 2, str(http.sent))
 
+print("\n── QqHttp：token 缓存、加锁和 _seq 清理 " + "─" * 20)
+
+
+class FakeResp:
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._data
+
+
+token_calls = {"n": 0}
+real_post = qq.requests.post
+
+
+def fake_token_post(url, json=None, timeout=None, headers=None):
+    token_calls["n"] += 1
+    time.sleep(0.05)   # 让并发刷新的竞争有机会暴露
+    return FakeResp({"access_token": f"T{token_calls['n']}", "expires_in": 7200})
+
+
+qq.requests.post = fake_token_post
+try:
+    http = qq.QqHttp("app", "sec")
+    t1 = http.token()
+    check("token 没过期就不重复取", http.token() == t1 and token_calls["n"] == 1,
+          str(token_calls["n"]))
+    http._until = 0   # 强制过期
+    check("过期了会重新取", http.token() == "T2" and token_calls["n"] == 2)
+
+    http2 = qq.QqHttp("app", "sec")
+    before = token_calls["n"]
+    ts = [threading.Thread(target=http2.token) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    check("并发刷新只取一次", token_calls["n"] == before + 1,
+          f"实际取了 {token_calls['n'] - before} 次")
+finally:
+    qq.requests.post = real_post
+
+http3 = qq.QqHttp("app", "sec")
+for i in range(300):
+    http3._next_seq(f"m{i}")
+check("_seq 涨到上限会清理，长驻不涨内存", len(http3._seq) <= 201,
+      str(len(http3._seq)))
+check("清理后计数照常用", http3._next_seq("m0") >= 1)
+
 print(f"\n{'─' * 60}\n通过 {ok}，失败 {fail}")
 sys.exit(1 if fail else 0)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -114,6 +115,11 @@ class Memory:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10.0)
         self.conn.row_factory = sqlite3.Row
+        # 连接是跨线程共享的（wechat 线程池、qq to_thread、bot 回调都踩同一个
+        # Memory）。写方法必须整段持锁，否则一个线程的 execute(DML) 和 commit()
+        # 之间会插进另一个线程的写，撞上 "cannot start a transaction within
+        # a transaction"。
+        self._lock = threading.RLock()
         # Telegram 和钉钉是两个独立进程，写的是同一个库。默认的 rollback journal
         # 会让写操作互相独占，撞上就是 "database is locked"。
         # WAL 允许一写多读，busy_timeout 让偶发冲突自己等而不是直接抛。
@@ -124,6 +130,15 @@ class Memory:
         self._migrate()
         self.conn.executescript(INDEXES)   # 补完列才能建索引，顺序不能换
         self.conn.commit()
+        # 聊天原文库，跟 AppStore 一样只许本人读写。
+        try:
+            self.path.chmod(0o600)
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(self.path) + suffix)
+                if sidecar.exists():
+                    sidecar.chmod(0o600)
+        except OSError:
+            pass
 
     def _migrate(self) -> None:
         """v0.1 的库里是 place 列、没有 chat_id。补上缺的列，别让旧库炸掉。"""
@@ -161,37 +176,39 @@ class Memory:
         intent: str | None = None,
         has_photo: bool = False,
     ) -> int:
-        cur = self.conn.execute(
-            """INSERT INTO entries
-               (chat_id, thread, logged_at, shot_at, bucket, weekday, spot,
-                scene, move, said, note, kind, intent, has_photo)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                chat_id,
-                thread,
-                datetime.now(UTC).isoformat(timespec="seconds"),
-                shot_at.isoformat(timespec="seconds") if shot_at else None,
-                bucket,
-                weekday,
-                spot,
-                scene,
-                move,
-                said,
-                note,
-                kind,
-                intent,
-                1 if has_photo else 0,
-            ),
-        )
-        self.conn.commit()
-        return cur.lastrowid
+        with self._lock:
+            cur = self.conn.execute(
+                """INSERT INTO entries
+                   (chat_id, thread, logged_at, shot_at, bucket, weekday, spot,
+                    scene, move, said, note, kind, intent, has_photo)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    chat_id,
+                    thread,
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                    shot_at.isoformat(timespec="seconds") if shot_at else None,
+                    bucket,
+                    weekday,
+                    spot,
+                    scene,
+                    move,
+                    said,
+                    note,
+                    kind,
+                    intent,
+                    1 if has_photo else 0,
+                ),
+            )
+            self.conn.commit()
+            return cur.lastrowid
 
     def add_reply(self, entry_id: int, text: str) -> None:
         """用户在它说完之后回的话。判断"这句说得对不对"最直接的信号。"""
-        self.conn.execute(
-            "UPDATE entries SET reply = ? WHERE id = ?", (text, entry_id)
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "UPDATE entries SET reply = ? WHERE id = ?", (text, entry_id)
+            )
+            self.conn.commit()
 
     def recent(self, chat_id: int = 0, limit: int = 6) -> list[Entry]:
         rows = self.conn.execute(
@@ -250,23 +267,25 @@ class Memory:
         ).fetchone() is not None
 
     def mark_greeted(self, chat_id: int, thread: str | None) -> None:
-        self.conn.execute(
-            "INSERT OR IGNORE INTO greeted(chat_id, thread, at) VALUES (?,?,?)",
-            (chat_id, thread,
-             datetime.now(UTC).isoformat(timespec="seconds")),
-        )
-        self.conn.commit()
-
-    def set_optout(self, chat_id: int, thread: str | None, on: bool = True) -> None:
-        if on:
+        with self._lock:
             self.conn.execute(
-                "INSERT OR REPLACE INTO optouts(chat_id, thread, since) VALUES (?,?,?)",
+                "INSERT OR IGNORE INTO greeted(chat_id, thread, at) VALUES (?,?,?)",
                 (chat_id, thread,
                  datetime.now(UTC).isoformat(timespec="seconds")),
             )
-        else:
-            self.conn.execute("DELETE FROM optouts WHERE chat_id = ?", (chat_id,))
-        self.conn.commit()
+            self.conn.commit()
+
+    def set_optout(self, chat_id: int, thread: str | None, on: bool = True) -> None:
+        with self._lock:
+            if on:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO optouts(chat_id, thread, since) VALUES (?,?,?)",
+                    (chat_id, thread,
+                     datetime.now(UTC).isoformat(timespec="seconds")),
+                )
+            else:
+                self.conn.execute("DELETE FROM optouts WHERE chat_id = ?", (chat_id,))
+            self.conn.commit()
 
     def is_opted_out(self, chat_id: int) -> bool:
         return self.conn.execute(
@@ -288,26 +307,24 @@ class Memory:
         返回值是有用的：调用方据此决定要不要打日志、要不要发自我介绍。
         已经在册的人重复调用是安全的，昵称会顺手更新（对方改名了也跟得上）。
         """
-        row = self.conn.execute(
-            "SELECT 1 FROM roster WHERE platform = ? AND user_id = ?",
-            (platform, user_id),
-        ).fetchone()
-        if row is not None:
-            if nick:
-                self.conn.execute(
-                    "UPDATE roster SET nick = ? WHERE platform = ? AND user_id = ?",
-                    (nick, platform, user_id),
-                )
-                self.conn.commit()
-            return False
-        self.conn.execute(
-            "INSERT INTO roster(platform, user_id, chat_id, thread, nick, added_at)"
-            " VALUES (?,?,?,?,?,?)",
-            (platform, user_id, chat_id, thread, nick,
-             datetime.now(UTC).isoformat(timespec="seconds")),
-        )
-        self.conn.commit()
-        return True
+        with self._lock:
+            is_new = self.conn.execute(
+                "SELECT 1 FROM roster WHERE platform = ? AND user_id = ?",
+                (platform, user_id),
+            ).fetchone() is None
+            # 先 SELECT 后 INSERT 在跨进程同时入册时会撞主键吃 IntegrityError
+            # （调用方没捕获的话整条消息都丢了）。ON CONFLICT 把"见过就顺手
+            # 更新昵称"压成一条语句，谁先来都安全。
+            self.conn.execute(
+                "INSERT INTO roster(platform, user_id, chat_id, thread, nick, added_at)"
+                " VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(platform, user_id) DO UPDATE SET"
+                " nick = COALESCE(excluded.nick, roster.nick)",
+                (platform, user_id, chat_id, thread, nick,
+                 datetime.now(UTC).isoformat(timespec="seconds")),
+            )
+            self.conn.commit()
+            return is_new
 
     def roster(self, platform: str) -> list[dict]:
         """在册的人。主动消息的收件人列表就是从这里来的。

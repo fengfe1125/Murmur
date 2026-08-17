@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import sqlite3
 import struct
 import sys
 import tempfile
@@ -194,6 +195,46 @@ class AppWorkerTests(unittest.TestCase):
             ))
         release.set()
         thread.join(2)
+        self.assertFalse(thread.is_alive())
+        events = self.store.events_after(result.moment_id, self.enrollment.user_id)
+        self.assertEqual(events[-1]["event"], "done")
+
+    def test_heartbeat_tolerates_a_transient_renew_failure(self):
+        result, _ = self.queue()
+        started = threading.Event()
+        release = threading.Event()
+
+        def processor(_job, _memory, _on_bubble):
+            started.set()
+            self.assertTrue(release.wait(2))
+            return ProcessedMoment(
+                Reply("desk", "speak", ["done"]),
+                Moment.text_only(self.cfg.tz), None,
+            )
+
+        worker = AppWorker(
+            self.store, self.cfg, self.settings, processor=processor,
+            heartbeat_interval=0.01, lease_seconds=0.05,
+        )
+        original_renew = self.store.renew_job
+        calls = []
+
+        def flaky_renew(job, worker_id, lease):
+            calls.append(1)
+            if len(calls) == 2:
+                raise sqlite3.OperationalError("database is locked")
+            return original_renew(job, worker_id, lease=lease)
+
+        with patch.object(self.store, "renew_job", flaky_renew):
+            thread = threading.Thread(target=worker.process_one)
+            thread.start()
+            self.assertTrue(started.wait(1))
+            deadline = time.monotonic() + 1
+            while len(calls) < 3 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertGreaterEqual(len(calls), 3)
+            release.set()
+            thread.join(2)
         self.assertFalse(thread.is_alive())
         events = self.store.events_after(result.moment_id, self.enrollment.user_id)
         self.assertEqual(events[-1]["event"], "done")

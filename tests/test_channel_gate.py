@@ -17,12 +17,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from _helpers import make_config  # noqa: E402
+
 from murmur import cli  # noqa: E402
 from murmur.config import Config  # noqa: E402
 from murmur.memory import Memory  # noqa: E402
-
-from _helpers import make_config  # noqa: E402
-
 
 ok = fail = 0
 

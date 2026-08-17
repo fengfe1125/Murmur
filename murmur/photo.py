@@ -37,6 +37,14 @@ PHOTO_EDGE = 1024
 SCREEN_EDGE = 1568
 JPEG_QUALITY = 82
 
+# 像素上限：一张 20MB 的压缩炸弹能解码出几百 MB 的 RGB 栅格，
+# 解码前先按 EXIF 里的宽高原样挡掉。
+MAX_IMAGE_PIXELS = 100_000_000
+
+
+class PhotoTooLarge(ValueError):
+    """图片像素数超过上限。"""
+
 
 def _target_edge(w: int, h: int) -> int:
     """按宽高比挑档位。阈值故意保守：只把明确是普通照片的降档。
@@ -116,20 +124,16 @@ def _read_shot_at(exif) -> datetime | None:
         return None
 
 
-def _encode(img: Image.Image) -> str:
-    img = img.copy()
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    edge = _target_edge(*img.size)
-    img.thumbnail((edge, edge), Image.Resampling.LANCZOS)
-    buf = io.BytesIO()
-    # 不带 exif 保存——元数据已经单独提取了，没必要再发一份给模型。
-    img.save(buf, format="JPEG", quality=JPEG_QUALITY)
-    return base64.standard_b64encode(buf.getvalue()).decode()
+def _build(img: Image.Image, path: Path | None, max_image_pixels: int) -> Photo:
+    width, height = img.size
+    if width <= 0 or height <= 0:
+        raise ValueError("图片尺寸无效")
+    if width * height > max_image_pixels:
+        raise PhotoTooLarge(
+            f"图片像素 {width}x{height} 超过上限 {max_image_pixels}"
+        )
 
-
-def _build(img: Image.Image, path: Path | None) -> Photo:
-    # 先读元数据：exif_transpose 会重建图像，之后再取容易丢东西。
+    # 先读元数据：draft/exif_transpose 会重建图像，之后再取容易丢东西。
     exif = img.getexif()
     lat, lon = _read_gps(exif)
     make = exif.get(_EXIF_TAGS["Make"])
@@ -137,29 +141,41 @@ def _build(img: Image.Image, path: Path | None) -> Photo:
     camera = " ".join(str(x).strip() for x in (make, model) if x) or None
     shot_at = _read_shot_at(exif)
 
+    # JPEG draft 让 libjpeg 解码时就按目标尺寸降采样，48MP 原图不会
+    # 物化成几份全尺寸 RGB 栅格；其他格式在 thumbnail 里立刻缩小。
+    edge = _target_edge(width, height)
+    if (img.format or "").upper() in {"JPEG", "MPO"}:
+        img.draft("RGB", (edge, edge))
+    img.thumbnail((edge, edge), Image.Resampling.LANCZOS)
+
     # 再按 Orientation 摆正，否则竖拍的照片会横着发给模型。
     upright = ImageOps.exif_transpose(img) or img
+    if upright.mode != "RGB":
+        upright = upright.convert("RGB")
+    buf = io.BytesIO()
+    # 不带 exif 保存——元数据已经单独提取了，没必要再发一份给模型。
+    upright.save(buf, format="JPEG", quality=JPEG_QUALITY)
     return Photo(
         path=path,
         shot_at=shot_at,
         lat=lat,
         lon=lon,
         camera=camera,
-        image_b64=_encode(upright),
+        image_b64=base64.standard_b64encode(buf.getvalue()).decode(),
     )
 
 
-def load(path: str | Path) -> Photo:
+def load(path: str | Path, max_image_pixels: int = MAX_IMAGE_PIXELS) -> Photo:
     path = Path(path).expanduser()
     with Image.open(path) as img:
-        return _build(img, path)
+        return _build(img, path, max_image_pixels)
 
 
-def from_bytes(data: bytes) -> Photo:
+def from_bytes(data: bytes, max_image_pixels: int = MAX_IMAGE_PIXELS) -> Photo:
     """Telegram 收到的图。压缩过的 photo 没有 EXIF，
     以 document 发的原图通常还留着。"""
     with Image.open(io.BytesIO(data)) as img:
-        return _build(img, None)
+        return _build(img, None, max_image_pixels)
 
 
 def save_preview(root: Path, entry_id: int, photo: Photo) -> Path:

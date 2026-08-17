@@ -180,7 +180,10 @@ sudo systemctl disable --now \
 
 ## 更新与迁移
 
-`murmur-update` 只接受 `main` 的快进提交，安装依赖并运行全部
+`murmur-update` 只接受 `main` 的快进提交。合并代码前会先用
+`sqlite3 .backup` 给数据库做在线快照，存到 `backups/murmur-<旧sha>-<时间戳>.db`
+（WAL 库不能直接拷贝；`MURMUR_DB` 指向非默认路径时从 `.env` 解析；服务不用停，
+快照失败则直接中止更新）。之后安装依赖并运行全部
 `tests/test_*.py`。成功后只重启管理员已经 enable 的服务；失败会回滚代码，不会启用任何
 新服务，更不会根据平台凭据启用 Bot。
 
@@ -203,7 +206,11 @@ Units left in place, repo copy needs paths this host lacks:
 
 要采用隔离布局就按上面「测试 Bot 隔离」建好路径，下次更新会自动装上对应单元；
 在此之前旧单元继续读 `/opt/murmur/.env` 和 `/opt/murmur/logs/`，Bot 不会被改瘫。
-重启阶段也不再中途放弃：每个 enable 的服务都会重启，没起来的按名字列出并以非零码退出。
+重启阶段也不再中途放弃：每个 enable 的服务都会重启。若有服务没起来（例如新版本
+需要的 env 变量未配置），更新会执行与测试失败相同的回滚——代码 reset 回旧提交、
+重装依赖，再重启一轮这些服务：全部恢复则报告已回滚到旧版本、更新被拒绝；仍有
+服务起不来则按名字列出并说明回滚后服务仍没起来。两种情况都以非零码退出，不会把
+代码停在新版本、服务瘫着的状态留给无人值守的主机。
 
 ```bash
 sudo systemctl start murmur-update
