@@ -127,6 +127,12 @@ for service in murmur-app-worker murmur-app-api murmur-web murmur-telegram murmu
   systemctl stop "\$service" 2>/dev/null || true
 done
 sudo -u murmur -H git -C "\$APP_DIR" reset --hard "origin/\$BRANCH"
+# 仓库同时装着 iOS/Android 客户端代码，VPS 只需要服务端目录；cone 模式的
+# sparse-checkout 会把刚检出或旧布局残留的 App 目录从工作区清掉。根目录
+# 文件（pyproject.toml 等）始终保留。scripts/ 必须保留：测试套件会读它，
+# 缺了 murmur-update 的测试阶段会失败回滚。murmur-update 每次更新也会
+# 重复这一步。
+sudo -u murmur -H git -C "\$APP_DIR" sparse-checkout set --cone murmur deploy tests scripts
 chown -R murmur:murmur "\$APP_DIR"
 chmod 600 "\$APP_DIR/.env"
 sudo -u murmur -H bash -c '

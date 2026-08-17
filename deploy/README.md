@@ -184,6 +184,14 @@ sudo systemctl disable --now \
 `tests/test_*.py`。成功后只重启管理员已经 enable 的服务；失败会回滚代码，不会启用任何
 新服务，更不会根据平台凭据启用 Bot。
 
+仓库里的 App 代码（`MurmurApp/`、`android/` 等）不会落到 VPS：每次更新都会先执行
+`git sparse-checkout set --cone murmur deploy tests scripts`，只有服务端目录和根目录
+文件留在 `/opt/murmur`。`scripts/` 不能少——`test_channel_gate` 和 `test_env_sanitizer`
+会读它，缺了更新流程的测试阶段会失败回滚。若某台 VPS 早年是全量检出，第一次跑到这
+一步时会把 App 目录从磁盘清掉（前提是它们与 Git 一致；有本地改动会拒绝更新并列出路径）。
+根目录的未跟踪文件（如 `backups/`、`botpy.log`）不在 sparse 管辖范围内，同样会挡住
+更新前的干净检查。
+
 更新不会把服务单元强推到布局不同的主机上。单元文件里写死了 env 文件和日志目录，
 仓库里的四个 Bot 单元指向隔离布局（`.env.test-bots`、`/opt/murmur/test/logs`）：
 更新只会安装本机已经具备这些路径的单元，其余原样保留并在结尾列出，例如
@@ -234,6 +242,25 @@ tail -f /opt/murmur/logs/murmur_app_api.log
 tail -f /opt/murmur/logs/murmur_app_worker.log
 ssh -N -L 8765:127.0.0.1:8765 user@server
 ```
+
+## 模型降级备案
+
+- 主模型（`MURMUR_MODEL`）抛网关错误（503/连接失败等）或吐不出 JSON 时，
+  Worker 自动换 `MURMUR_FALLBACK_MODEL`（默认 `deepseek-v4-flash`）重试一次；
+  降级调用不带 `response_format`（该模型在 OpenCode 网关不支持 json_schema）。
+- 带图消息直接走 `MURMUR_IMAGE_MODEL`（默认 `mimo-v2.5`，多模态）；它同样
+  不支持 json_schema。mimo 也挂掉时退回 `MURMUR_FALLBACK_MODEL`，**不带图**
+  纯文本重试——EXIF/时间/文字仍会进上下文，回复质量下降但不会断。
+- 每一次降级都会在 `murmur_app_worker.log` 打一条
+  `模型 <name> 失败（<错误类型>），尝试降级`；巡检日志看到成片出现就说明
+  主模型上游出问题了（2026-08-16 Qwen 上游 503 整场中断即前例）。
+- 模型偶尔无视 json_schema 直接吐短句气泡（kimi-k2.6 在 OpenCode 网关
+  实测约 1/3 概率把思考写进正文）——内容是对的就不会丢：无花括号且
+  ≤150 字、每行 ≤60 字的输出会按行收下当气泡（日志记
+  `模型没按 JSON 返回，抢救出 N 条气泡`），只有更长或带花括号的垃圾
+  才会交给降级模型。
+- 换模型只改 `.env` 三项然后重启 `murmur-app-worker murmur-app-api`，
+  代码默认值已覆盖，不写这三行也按上面默认行为跑。
 
 - `.env`、Apple 密钥、SQLite、日志、dossier、照片预览和测试环境文件都不得进 Git。
 - `/opt/murmur/murmur.db` 使用 WAL；备份用

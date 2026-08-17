@@ -66,6 +66,17 @@ unit_missing_paths() {
   done <"$1" | sort -u
 }
 
+# The repo also carries the iOS/Android client sources; the VPS only needs the
+# server tree. Sparse-checkout keeps app code off this host, and prunes app
+# directories left behind by a full checkout from before this split. Root-level
+# files (pyproject.toml, README, .env.example, .gitignore) are always part of a
+# cone checkout. scripts/ must stay: test_channel_gate and test_env_sanitizer
+# read files from it, and without them the update's test step fails and rolls
+# back. Sparse set itself never fails on dirty files outside the cone — it
+# leaves those paths behind with a warning, and the clean check below is what
+# actually refuses the update.
+git_murmur sparse-checkout set --cone murmur deploy tests scripts
+
 [[ -z "$(git_murmur status --porcelain)" ]] || {
   echo "Refusing to update: $APP_DIR has uncommitted source changes." >&2
   exit 1
