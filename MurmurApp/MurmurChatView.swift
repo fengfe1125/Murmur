@@ -479,6 +479,7 @@ private struct MomentWorkbench: View {
     /// Only to know when we have come back from the background, which is the
     /// other moment the keyboard has to be loaded from scratch.
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private func closePhotoSource() {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
@@ -510,34 +511,49 @@ private struct MomentWorkbench: View {
                         .accessibilityLabel("关闭添加照片菜单")
                 }
             }
-            // The strip carries no paper of its own — only the rounded field
-            // and, when something has gone wrong, a card.  The conversation
-            // runs underneath and stays readable between them.  The inset is
+            // The photo waits here, pinned over the conversation just above
+            // the field, at the size of a thing you are about to send.  It is
+            // not part of the strip below: whatever grows the inset bar joins
+            // the safe-area accounting the keyboard lift lives in, and past a
+            // point SwiftUI adds the overflow back on top of that lift — the
+            // field ended up a band of paper above the keyboard.  A floating
+            // tile is not part of that accounting.  The transcript keeps a
+            // spacer of the same height at its foot so nothing hides under it.
+            .overlay(alignment: .bottom) {
+                if model.draftPhoto != nil || model.isPreparingPhoto {
+                    DraftPhotoTile(
+                        photo: model.draftPhoto,
+                        onOpen: { photo in
+                            openPhoto = .init(id: photo.id.uuidString, url: photo.originalURL)
+                        },
+                        onRemove: { model.removeDraftPhoto() }
+                    )
+                    .frame(maxWidth: MurmurTheme.contentWidth, alignment: .leading)
+                    .padding(.leading, MurmurTheme.pageInset)
+                    .padding(.bottom, 2)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
+            }
+            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.draftPhoto?.id)
+            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.isPreparingPhoto)
+            // The strip carries no paper of its own — only the rounded field,
+            // and above it a single line when the draft itself is the problem.
+            // A failed *send* is not shown here at all: it belongs to its own
+            // bubble up in the conversation, where the person can see which
+            // line it was and press the mark to send it again.  The inset is
             // what reserves the room, so at rest nothing is hidden, and the
             // padding at its foot is what moves the field when the keyboard
             // arrives — on the keyboard's own curve, not SwiftUI's.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
-                    if model.phase == .error, let failure = model.failure {
-                        MurmurNotice(
-                            message: failure.message,
-                            retryTitle: failure.retryable ? "再试一次" : nil,
-                            identifier: "moment-error",
-                            onRetry: { model.retry() }
-                        )
-                        .padding(12)
-                        .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 16))
-                        .overlay { RoundedRectangle(cornerRadius: 16).stroke(MurmurTheme.rule, lineWidth: 1) }
-                        .frame(maxWidth: MurmurTheme.contentWidth)
-                        .padding(.horizontal, MurmurTheme.pageInset)
-                        .padding(.bottom, 10)
-                        .frame(maxWidth: .infinity)
+                    if let draftFailure = model.draftFailure {
+                        DraftFailureLine(message: draftFailure)
+                            .transition(.opacity)
                     }
                     MomentComposer(
                         model: model,
                         showCamera: $showCamera,
                         showPhotoSource: $showPhotoSource,
-                        onOpenPhoto: { openPhoto = $0 },
                         onFocus: { focusPulse += 1 },
                         onPickFromLibrary: { showLibrary = true },
                         focused: $composerFocused
@@ -548,6 +564,10 @@ private struct MomentWorkbench: View {
                 // bottom anchor carries the conversation with it, in step,
                 // instead of correcting itself afterwards.
                 .padding(.bottom, keyboard.overlap)
+                .animation(
+                    reduceMotion ? nil : .easeInOut(duration: 0.18),
+                    value: model.draftFailure
+                )
             }
             // SwiftUI's own avoidance would be a second, differently timed
             // motion on top of the one above; two of them are what left the
@@ -573,7 +593,13 @@ private struct MomentWorkbench: View {
                 }
             }
         }
-        .task { await model.loadTranscript() }
+        .task {
+            await model.loadTranscript()
+            await model.checkProactive()
+#if DEBUG
+            stubPhotoIfAsked()
+#endif
+        }
         // The keyboard is loaded before it is wanted, not when the field is
         // tapped.  Once on arrival, and again on the way back from the
         // background, where iOS may have reclaimed it while we were away.
@@ -581,6 +607,7 @@ private struct MomentWorkbench: View {
         .onChange(of: scenePhase, initial: false) { _, phase in
             guard phase == .active else { return }
             warmKeyboard()
+            Task { await model.checkProactive() }
         }
     }
 
@@ -592,13 +619,33 @@ private struct MomentWorkbench: View {
         guard !composerFocused else { return }
         keyboard.warm()
     }
+
+#if DEBUG
+    /// `--murmur-stub-photo` hangs a generated picture on the draft at launch,
+    /// through the same prepare path the picker uses, so a UI test can put the
+    /// composer in the photo-and-keyboard state without driving the
+    /// out-of-process picker.
+    private func stubPhotoIfAsked() {
+        guard ProcessInfo.processInfo.arguments.contains("--murmur-stub-photo") else { return }
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 300))
+        let image = renderer.image { ctx in
+            UIColor.systemMint.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 400, height: 300))
+        }
+        guard let data = image.pngData() else { return }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("murmur-stub-photo.png")
+        try? data.write(to: url)
+        model.beginPhotoSelection()
+        model.preparePhoto(at: url)
+    }
+#endif
 }
 
 private struct MomentComposer: View {
     @ObservedObject var model: MurmurSessionModel
     @Binding var showCamera: Bool
     @Binding var showPhotoSource: Bool
-    let onOpenPhoto: (MurmurPhotoPreview) -> Void
     let onFocus: () -> Void
     let onPickFromLibrary: () -> Void
     /// Owned by the workbench, so tapping the conversation can drop focus in the
@@ -611,24 +658,9 @@ private struct MomentComposer: View {
     @State private var focusClock = FocusClock()
 
     var body: some View {
-        VStack(spacing: 10) {
-            // The photo waits here, at the size of a thing you are about to
-            // send, rather than taking over the screen it came from.
-            if model.draftPhoto != nil || model.isPreparingPhoto {
-                DraftPhotoTile(
-                    photo: model.draftPhoto,
-                    onOpen: { photo in
-                        onOpenPhoto(.init(id: photo.id.uuidString, url: photo.originalURL))
-                    },
-                    onRemove: { model.removeDraftPhoto() }
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-
-            // Both controls live inside the field as equal discs, so the row is
-            // one container instead of a square button beside a taller pill.
-            HStack(alignment: .bottom, spacing: 6) {
+        // Both controls live inside the field as equal discs, so the row is
+        // one container instead of a square button beside a taller pill.
+        HStack(alignment: .bottom, spacing: 6) {
                 Button {
                     focused = false
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
@@ -725,7 +757,6 @@ private struct MomentComposer: View {
                     )
                 }
             }
-        }
         .frame(maxWidth: MurmurTheme.contentWidth)
         .padding(.horizontal, MurmurTheme.pageInset)
         .padding(.top, 8)
@@ -737,8 +768,6 @@ private struct MomentComposer: View {
             MurmurDiagnostics.composerTop = $0
         }
 #endif
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.draftPhoto?.id)
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.isPreparingPhoto)
         .onChange(of: focused, initial: false) { _, isFocused in
 #if DEBUG
             MurmurDiagnostics.record("field focus -> \(isFocused)")
@@ -768,9 +797,15 @@ private struct MomentComposer: View {
         }
     }
 
+    /// The keyboard stays up.  Sending a line is not the end of the thought —
+    /// the next one is usually already half-written — and dropping focus made
+    /// every sentence cost a fresh tap on the field and a fresh rise of the
+    /// keyboard.  Nothing here needs focus gone: the send button rides above
+    /// the keyboard on the inset, the transcript scrolls itself to the newest
+    /// line, and putting the keyboard away is still one tap on the
+    /// conversation.
     private func submit() {
         guard model.canSubmit else { return }
-        focused = false
         model.submit()
     }
 }
@@ -1177,11 +1212,38 @@ private struct PhotoSourceMenu: View {
     }
 }
 
+/// Something wrong with what is still in the composer — a photo that could not
+/// be read.  One coral line, not a card: the draft is right there under it, so
+/// the line only has to name the problem, and a box the height of a paragraph
+/// would push the whole conversation up to say one sentence.
+private struct DraftFailureLine: View {
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .accessibilityHidden(true)
+            Text(message)
+                .font(MurmurTheme.body(.footnote))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(MurmurTheme.coral)
+        .frame(maxWidth: MurmurTheme.contentWidth, alignment: .leading)
+        .padding(.horizontal, MurmurTheme.pageInset)
+        .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("draft-error")
+    }
+}
+
+/// The failure block on a screen that has nothing else on it — enrolment.  A
+/// screen with a conversation or a composer says it smaller and closer to the
+/// thing that failed; this is the one place where the failure *is* the content.
 private struct MurmurNotice: View {
     let message: String
-    var retryTitle: String? = nil
     var identifier: String
-    var onRetry: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -1189,20 +1251,11 @@ private struct MurmurNotice: View {
                 .fill(MurmurTheme.coral)
                 .frame(width: 2)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 10) {
-                Text(message)
-                    .font(MurmurTheme.body(.body))
-                    .foregroundStyle(MurmurTheme.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier(identifier)
-                if let retryTitle, let onRetry {
-                    Button(retryTitle, action: onRetry)
-                        .font(MurmurTheme.body(.subheadline, weight: .semibold))
-                        .foregroundStyle(MurmurTheme.olive)
-                        .frame(minHeight: 44)
-                        .buttonStyle(MurmurPressStyle())
-                }
-            }
+            Text(message)
+                .font(MurmurTheme.body(.body))
+                .foregroundStyle(MurmurTheme.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier(identifier)
         }
         .accessibilityElement(children: .contain)
     }
@@ -1224,7 +1277,10 @@ private struct MurmurMark: View {
     }
 }
 
-private struct MurmurPressStyle: ButtonStyle {
+/// The app's press feedback, shared by every control that is not a floating
+/// disc — including the failure mark in the transcript, which is why this is
+/// not file-private.
+struct MurmurPressStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {

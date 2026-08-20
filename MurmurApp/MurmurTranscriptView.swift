@@ -36,10 +36,10 @@ private struct DeliveryTicks: View {
                 .foregroundStyle(MurmurTheme.secondaryInk.opacity(0.7))
                 .accessibilityLabel("发送中")
         case .failed:
-            Image(systemName: "exclamationmark.circle")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(MurmurTheme.coral)
-                .accessibilityLabel("发送失败")
+            // Nothing here: a failed row says so beside the bubble, where the
+            // mark is big enough to press and the reason is written out in
+            // full.  See `SendFailureMark`.
+            EmptyView()
         case .sent, .answered:
             // Two overlapping checks, WhatsApp-style: the second slides in and
             // the pair turns colour once Murmur starts composing.
@@ -57,6 +57,121 @@ private struct DeliveryTicks: View {
             .animation(.spring(response: 0.32, dampingFraction: 0.72), value: state)
             .accessibilityLabel(state == .answered ? "已送达，Murmur 正在回应" : "已送达")
         }
+    }
+}
+
+// MARK: - Send failure
+
+/// The mark on an outgoing row that never landed: a coral exclamation outside
+/// the bubble, on the side the message left from.
+///
+/// It is a button exactly when pressing it would do something — the app still
+/// holds the turn, with its original idempotency key — and plain ink otherwise.
+/// The line under the bubble says which of the two it is, so the mark never has
+/// to be guessed at.
+///
+/// Pressing it asks first.  The mark is small and sits right beside the text a
+/// finger reaches for, and a send is not a free action: it can put a
+/// full-resolution photo back on the wire.  The question itself is put up by
+/// the transcript, not from here — see `MurmurTranscriptView`; all this does is
+/// hand over where it is on screen.
+private struct SendFailureMark: View {
+    let failure: MurmurSendFailure
+    /// Reports the mark's own rectangle inside the transcript whenever it
+    /// moves.  The question hangs off it and keeps hanging off it, so a
+    /// conversation that scrolls under an open card carries the card along
+    /// rather than leaving it pointing at where the row used to be.
+    let onFrame: (CGRect) -> Void
+    let onAsk: () -> Void
+    /// Grows with the conversation it sits in — a fixed 19pt mark beside a
+    /// bubble set at Accessibility XXXL reads as a speck.  Capped, because past
+    /// that it starts to outweigh the message it belongs to.
+    @ScaledMetric(relativeTo: .body) private var rawGlyph: CGFloat = 19
+
+    private var glyph: CGFloat { min(rawGlyph, 32) }
+    /// 44pt of target at every size, and more once the mark itself needs it.
+    private var side: CGFloat { max(44, glyph + 22) }
+
+    var body: some View {
+        if failure.canResend {
+            Button(action: onAsk) { mark }
+                .buttonStyle(MurmurPressStyle())
+                .accessibilityLabel("重新发送")
+                .accessibilityIdentifier("resend-moment")
+                .onGeometryChange(for: CGRect.self) {
+                    $0.frame(in: .named(MurmurTranscriptView.anchorSpace))
+                } action: { onFrame($0) }
+        } else {
+            // Nothing to press, and the row's own label already says it
+            // failed — a second stop that only reads "感叹号" is noise.
+            mark.accessibilityHidden(true)
+        }
+    }
+
+    private var mark: some View {
+        Image(systemName: "exclamationmark.circle.fill")
+            .font(.system(size: glyph, weight: .regular))
+            .foregroundStyle(MurmurTheme.coral)
+            // The margin the target leaves around the mark is also what
+            // separates it from the bubble, so the row needs no spacing here.
+            .frame(width: side, height: side)
+            .contentShape(Rectangle())
+    }
+}
+
+/// The row currently being asked about.  Where to draw the question is looked
+/// up separately, from the mark's own live rectangle, so the card stays on the
+/// mark rather than on wherever it was when the finger came down.
+private struct ResendPrompt: Equatable {
+    let id: String
+    let reason: String
+}
+
+/// What the mark asks before it sends: the question, why it failed, and the one
+/// thing to do about it.
+///
+/// Drawn in Murmur's own paper rather than system chrome — the same decision
+/// the add-photo menu makes, for the same reason: it rises out of one line of
+/// the conversation and should look like it belongs to that line.  There is no
+/// 取消 button because a tap anywhere off the card is one, the way the add-photo
+/// menu closes.
+private struct ResendQuestion: View {
+    let reason: String
+    let onResend: () -> Void
+
+    /// Sized like the add-photo menu: wide enough for the question on one line,
+    /// narrow enough to stay a note pinned to a bubble.  Text wraps inside it at
+    /// the larger type sizes rather than the card growing.
+    static let width: CGFloat = 240
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("重新发送这一条？")
+                    .font(MurmurTheme.display(.subheadline))
+                    .foregroundStyle(MurmurTheme.ink)
+                Text(reason)
+                    .font(MurmurTheme.body(.footnote))
+                    .foregroundStyle(MurmurTheme.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button(action: onResend) {
+                Text("重新发送")
+                    .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                    .foregroundStyle(MurmurTheme.paper)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(MurmurTheme.ink, in: RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(MurmurPressStyle())
+            .accessibilityIdentifier("confirm-resend")
+        }
+        .padding(16)
+        .frame(width: Self.width)
+        .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 16))
+        .overlay { RoundedRectangle(cornerRadius: 16).stroke(MurmurTheme.rule, lineWidth: 1) }
+        .shadow(color: MurmurTheme.ink.opacity(0.10), radius: 10, y: 4)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("resend-question")
     }
 }
 
@@ -97,7 +212,19 @@ private struct TypingIndicator: View {
 private struct MessageRow: View {
     let message: MurmurMessage
     let imageURL: URL?
+    /// Set only on a row the person sent that did not land.  Its presence is
+    /// what draws the mark, so `delivery == .failed` never shows ticks.
+    let sendFailure: MurmurSendFailure?
+    /// Carried in rather than applied outside, because the row is no longer a
+    /// single accessibility element: the mark beside it is a button of its own,
+    /// and the identifier has to land on the message, not on the container that
+    /// holds both.
+    let identifier: String
     let onOpenImage: (MurmurPhotoPreview) -> Void
+    /// Carries up where the mark is, whenever it moves, so the transcript can
+    /// keep the question on it.
+    let onMarkFrame: (CGRect) -> Void
+    let onAsk: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var appeared = false
 
@@ -105,39 +232,95 @@ private struct MessageRow: View {
 
     var body: some View {
         HStack {
-            if isOutgoing { Spacer(minLength: 56) }
+            // A failed row keeps a narrower gutter: the mark is a 44pt target,
+            // and the usual 56 on top of it would leave the bubble visibly
+            // thinner than the ones above it.
+            if isOutgoing { Spacer(minLength: sendFailure == nil ? 56 : 20) }
             VStack(alignment: isOutgoing ? .trailing : .leading, spacing: 7) {
-                if let imageURL {
-                    TranscriptPhoto(url: imageURL) {
+                HStack(spacing: 0) {
+                    if let sendFailure {
+                        SendFailureMark(
+                            failure: sendFailure,
+                            onFrame: onMarkFrame,
+                            onAsk: onAsk
+                        )
+                    }
+                    VStack(alignment: isOutgoing ? .trailing : .leading, spacing: 7) {
+                        if let imageURL {
+                            TranscriptPhoto(url: imageURL) {
+                                onOpenImage(.init(id: message.id, url: imageURL))
+                            }
+                            .accessibilityLabel(isOutgoing ? "你发送的照片，轻点放大" : "Murmur 发来的照片，轻点放大")
+                        }
+                        if !message.text.isEmpty {
+                            Text(message.text)
+                                .font(MurmurTheme.body(.body))
+                                .foregroundStyle(isOutgoing ? Color.white : MurmurTheme.ink)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(
+                                    isOutgoing ? MurmurTheme.outgoingBubble : MurmurTheme.raisedPaper,
+                                    in: BubbleShape(isOutgoing: isOutgoing)
+                                )
+                                .overlay {
+                                    if !isOutgoing {
+                                        BubbleShape(isOutgoing: false).stroke(MurmurTheme.rule, lineWidth: 1)
+                                    }
+                                }
+                        }
+                    }
+                    // The message is one element; the mark beside it is its own,
+                    // so a resend is a button VoiceOver can find rather than an
+                    // action hidden inside a combined row.
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(accessibilityLabel)
+                    .accessibilityIdentifier(identifier)
+                    // Combining swallows the photo's own button, so the way to
+                    // open it has to be offered back explicitly.
+                    .accessibilityAction(named: "查看照片") {
+                        guard let imageURL else { return }
                         onOpenImage(.init(id: message.id, url: imageURL))
                     }
-                    .accessibilityLabel(isOutgoing ? "你发送的照片，轻点放大" : "Murmur 发来的照片，轻点放大")
                 }
-                if !message.text.isEmpty {
-                    Text(message.text)
-                        .font(MurmurTheme.body(.body))
-                        .foregroundStyle(isOutgoing ? Color.white : MurmurTheme.ink)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(
-                            isOutgoing ? MurmurTheme.outgoingBubble : MurmurTheme.raisedPaper,
-                            in: BubbleShape(isOutgoing: isOutgoing)
-                        )
-                        .overlay {
-                            if !isOutgoing {
-                                BubbleShape(isOutgoing: false).stroke(MurmurTheme.rule, lineWidth: 1)
-                            }
-                        }
-                }
+                // The line under the bubble: the time, and then either the
+                // transport ticks or — when the send failed — why, in words.
+                // The mark alone would only say "something"; this says what,
+                // and whether pressing it is worth anything.
                 HStack(spacing: 5) {
-                    Text(message.sentAt, format: .dateTime.hour().minute())
+                    if let sendFailure {
+                        // One run of text rather than two views side by side:
+                        // at Accessibility XXXL a reason long enough to wrap
+                        // would otherwise be pushed to the far side of the row
+                        // with the time stranded across a gap from it.
+                        (
+                            Text(message.sentAt, format: .dateTime.hour().minute())
+                                .foregroundStyle(MurmurTheme.secondaryInk.opacity(0.85))
+                            + Text("  ")
+                            + Text(caption(for: sendFailure))
+                                .foregroundStyle(MurmurTheme.coral)
+                        )
                         .font(MurmurTheme.body(.caption2))
-                        .foregroundStyle(MurmurTheme.secondaryInk.opacity(0.85))
-                    if isOutgoing { DeliveryTicks(state: message.delivery) }
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(isOutgoing ? .trailing : .leading)
+                    } else {
+                        Text(message.sentAt, format: .dateTime.hour().minute())
+                            .font(MurmurTheme.body(.caption2))
+                            .foregroundStyle(MurmurTheme.secondaryInk.opacity(0.85))
+                        if isOutgoing {
+                            DeliveryTicks(state: message.delivery)
+                        }
+                    }
                 }
                 .padding(.horizontal, 4)
+                // Left as its own stop, which is what it has always been on
+                // this screen.  Hiding it was tried — `accessibilityHidden`,
+                // with and without `accessibilityElement(children: .ignore)` —
+                // and neither reaches the text inside, so the modifiers only
+                // looked like they were doing something.  It reads the time and
+                // the reason a second time after the message's own label; a
+                // little repetition beats a lie in the source.
             }
             if !isOutgoing { Spacer(minLength: 56) }
         }
@@ -148,20 +331,31 @@ private struct MessageRow: View {
             guard !reduceMotion, !appeared else { appeared = true; return }
             withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) { appeared = true }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel)
-        // Combining the row into one element hides the photo's own button, so
-        // the way to open it has to be offered back explicitly.
-        .accessibilityAction(named: "查看照片") {
-            guard let imageURL else { return }
-            onOpenImage(.init(id: message.id, url: imageURL))
-        }
+        // The mark arriving widens the row, so it fades in rather than
+        // snapping — and under Reduce Motion it simply is there.
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: sendFailure)
+    }
+
+    /// 「暂时没有连上 Murmur · 轻点重新发送」.  The reason keeps its own wording
+    /// and loses only its full stop, so the offer reads as part of the same
+    /// line instead of a second sentence.  The verb is the one the mark's own
+    /// question and its confirming button use, so the line, the dialog and the
+    /// button never disagree about what is about to happen.
+    private func caption(for failure: MurmurSendFailure) -> String {
+        let reason = failure.message.hasSuffix("。")
+            ? String(failure.message.dropLast())
+            : failure.message
+        return failure.canResend ? "\(reason) · 轻点重新发送" : reason
     }
 
     private var accessibilityLabel: String {
         let photo = imageURL == nil ? "" : "一张照片。"
         let body = message.text.isEmpty ? photo : "\(photo)\(message.text)"
-        return isOutgoing ? "你说：\(body)" : "Murmur 说：\(body)"
+        let said = isOutgoing ? "你说：\(body)" : "Murmur 说：\(body)"
+        guard let sendFailure else { return said }
+        return sendFailure.canResend
+            ? "\(said) 发送失败。\(sendFailure.message)可以重新发送。"
+            : "\(said) 发送失败。\(sendFailure.message)"
     }
 }
 
@@ -199,8 +393,28 @@ struct MurmurTranscriptView: View {
     /// Fingers own the scroll view while they are on it; the re-pin below
     /// only ever acts when they are not.
     @State private var scrollPhase = ScrollPhase.idle
+    /// The row currently being asked about.
+    @State private var question: ResendPrompt?
+    /// Where each failed row's mark is right now, kept live by the marks
+    /// themselves.  Only failed rows have one, so this is empty in the ordinary
+    /// case and never more than a handful.
+    @State private var markFrames: [String: CGRect] = [:]
+    /// The question card's own height, so it can be lifted to rest on the mark.
+    /// Starts at roughly what the card measures rather than zero: the real
+    /// height only arrives after a layout pass, and from zero the first card of
+    /// a session would be drawn one frame low and then jump.
+    @State private var questionHeight: CGFloat = 140
+    /// The viewport, for keeping the card inside the page.
+    @State private var transcriptSize: CGSize = .zero
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var showsTyping: Bool { model.isAwaitingReply }
+
+    /// The transcript's own coordinate space, which the marks measure
+    /// themselves in and the question is positioned against.  It is the
+    /// viewport rather than the scrolled content, so a rectangle taken from it
+    /// is where the mark is on screen right now.
+    fileprivate static let anchorSpace = "murmur-transcript-anchor"
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -220,10 +434,18 @@ struct MurmurTranscriptView: View {
                         MessageRow(
                             message: message,
                             imageURL: message.imageFile.map { model.transcriptStore.imageURL(for: $0) },
-                            onOpenImage: onOpenImage
+                            sendFailure: sendFailure(for: message),
+                            identifier: "murmur-message-\(index)",
+                            onOpenImage: onOpenImage,
+                            onMarkFrame: { markFrames[message.id] = $0 },
+                            onAsk: {
+                                question = .init(
+                                    id: message.id,
+                                    reason: sendFailure(for: message)?.message ?? ""
+                                )
+                            }
                         )
                         .id(message.id)
-                        .accessibilityIdentifier("murmur-message-\(index)")
                     }
                     if showsTyping {
                         HStack {
@@ -232,6 +454,16 @@ struct MurmurTranscriptView: View {
                         }
                         .id(Self.typingAnchor)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+                    // The draft photo floats over the foot of the conversation
+                    // (see MomentWorkbench), so the foot reserves the room it
+                    // covers: the tile's own height plus the gaps above and
+                    // below it.  Without this the newest line would rest under
+                    // the tile until the next scroll.
+                    if model.draftPhoto != nil || model.isPreparingPhoto {
+                        Color.clear
+                            .frame(height: Self.draftPhotoReserve)
+                            .transition(.opacity)
                     }
                     Color.clear.frame(height: 1).id(Self.bottomAnchor)
                 }
@@ -274,6 +506,12 @@ struct MurmurTranscriptView: View {
             .onTapGesture { onDismissKeyboard() }
             .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.messages.count)
             .animation(.easeInOut(duration: 0.22), value: showsTyping)
+            // The draft-photo reserve arrives and leaves on the same spring as
+            // the tile it makes room for, so the two move as one piece.
+            .animation(
+                .spring(response: 0.32, dampingFraction: 0.86),
+                value: model.draftPhoto != nil || model.isPreparingPhoto
+            )
             .onChange(of: model.messages.count) { _, _ in scrollToBottom(proxy) }
             .onChange(of: showsTyping) { _, _ in scrollToBottom(proxy) }
             // One signal, one animation.  The re-pin below already carries
@@ -319,10 +557,91 @@ struct MurmurTranscriptView: View {
 #endif
             }
         }
+        // Measured against this, not against the scrolled content: a rectangle
+        // taken here is where the mark sits in the window right now, which is
+        // what the question is placed against.
+        .coordinateSpace(.named(Self.anchorSpace))
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { transcriptSize = $0 }
+        // A tap anywhere off the card closes it, the way the add-photo menu
+        // does.  Under the card, so the card's own button still gets its taps.
+        .overlay {
+            if question != nil {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { dismissQuestion() }
+                    // Gone the instant the question is: it has nothing to show,
+                    // so an animated removal would only leave an invisible
+                    // sheet of glass over the conversation for a third of a
+                    // second, swallowing the next tap.
+                    .transition(.identity)
+                    .accessibilityLabel("关闭重新发送")
+            }
+        }
+        // Placed by hand rather than by `popover` or `confirmationDialog`.
+        // Both of those resolve their anchor to the whole row when the row is
+        // inside a lazy stack — whatever `attachmentAnchor` says, including an
+        // explicit rectangle — so beside a tall photo the card came up level
+        // with the top of the picture, a good 60pt clear of the mark it was
+        // meant to belong to.  The mark measures itself; the card sits on it.
+        .overlay(alignment: .topLeading) {
+            if let question, let anchor = markFrames[question.id] {
+                ResendQuestion(reason: question.reason) {
+                    let id = question.id
+                    dismissQuestion()
+                    model.resend(id)
+                }
+                // Lifted by its own measured height so its foot rests just
+                // above the mark, whatever the question ends up saying.
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                    questionHeight = $0
+                }
+                .offset(
+                    x: questionX(for: anchor),
+                    y: anchor.minY - questionHeight - 8
+                )
+                .transition(
+                    reduceMotion
+                        ? .opacity
+                        : .scale(scale: 0.9, anchor: .bottom).combined(with: .opacity)
+                )
+            }
+        }
+        .animation(
+            reduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.3, dampingFraction: 0.82),
+            value: question
+        )
+    }
+
+    private func dismissQuestion() {
+        question = nil
+    }
+
+    /// The card's leading edge: centred on the mark, then kept inside the page
+    /// so a failed line with a very short bubble — where the mark sits far over
+    /// to the right — does not push the card off the screen.
+    private func questionX(for anchor: CGRect) -> CGFloat {
+        let inset = MurmurTheme.pageInset
+        let centred = anchor.midX - ResendQuestion.width / 2
+        let rightmost = max(inset, transcriptSize.width - ResendQuestion.width - inset)
+        return min(max(centred, inset), rightmost)
     }
 
     private static let bottomAnchor = "murmur-transcript-bottom"
     private static let typingAnchor = "murmur-transcript-typing"
+    /// The room the floating draft photo covers at the foot of the
+    /// conversation: the 76pt tile and its 11pt overhang for the cross, plus
+    /// the gaps that keep it off the field and off the newest line.
+    private static let draftPhotoReserve: CGFloat = 76 + 11 + 20
+
+    /// One rule for the mark: a row of the person's own that ended in `.failed`
+    /// always carries one, and never carries ticks.  The model's reason is used
+    /// when it has one; a row read back from disk kept the verdict but not the
+    /// reason — the app was restarted since — and there is nothing left to send
+    /// again, so it says only that much.
+    private func sendFailure(for message: MurmurMessage) -> MurmurSendFailure? {
+        guard message.author == .you, message.delivery == .failed else { return nil }
+        return model.sendFailures[message.id] ?? .interrupted
+    }
 
     /// One display pass back to the newest line, taken only when the window
     /// has come off the end it was resting on.  A finger — down, dragging,

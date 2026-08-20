@@ -24,6 +24,18 @@ final class MurmurSessionModel: ObservableObject {
     /// The scrollback the person reads.  Held here rather than derived from
     /// `bubbles`, which only ever describes the moment in flight.
     @Published private(set) var messages: [MurmurMessage] = []
+    /// Why an outgoing row never landed, keyed by that row.
+    ///
+    /// A send that failed belongs to the line the person wrote, not to the
+    /// screen: the mark and the reason sit on the bubble itself, so a second
+    /// message sent after the failure does not inherit the first one's error,
+    /// and two failed rows each say their own piece.  In memory only — reading
+    /// back 「暂时没有连上」 a week later would be a lie about now.
+    @Published private(set) var sendFailures: [String: MurmurSendFailure] = [:]
+    /// A problem with what is still in the composer — a photo that could not be
+    /// read.  Kept apart from `sendFailures` because a draft has no transcript
+    /// row to carry a mark; this is the one thing the composer says out loud.
+    @Published private(set) var draftFailure: String?
     /// Picking a photo runs on its own clock.  A photo can be chosen while
     /// Murmur is still answering the previous message, so its progress cannot
     /// live in `phase`, which describes the moment in flight.
@@ -55,6 +67,11 @@ final class MurmurSessionModel: ObservableObject {
     /// Copies of sent photos into transcript storage, keyed by message, so the
     /// upload's cleanup can wait for the copy instead of racing it.
     private var adoptTasks: [String: Task<Void, Never>] = [:]
+    /// Failed sends that can still be tried again, keyed by the row they belong
+    /// to.  A row's mark is only an offer while its submission is here: the same
+    /// idempotency key and, for a photo, a temporary file that has not been
+    /// swept up yet.  Everything else shows the mark and no offer.
+    private var resendable: [String: Submission] = [:]
     private var lastBubbleAt: Date?
     private var lastSubmission: Submission?
     private var didBootstrap = false
@@ -91,6 +108,10 @@ final class MurmurSessionModel: ObservableObject {
         messages = []
         pendingMessageID = nil
         adoptTasks = [:]
+        // The marks belonged to rows that no longer exist; the originals those
+        // rows were holding for a resend go with them.
+        withdrawResendOffers()
+        sendFailures = [:]
         await transcriptStore.clear()
     }
 
@@ -195,6 +216,7 @@ final class MurmurSessionModel: ObservableObject {
         photoGeneration += 1
         isPreparingPhoto = true
         failure = nil
+        draftFailure = nil
         phase = .preparingPhoto
     }
 
@@ -202,7 +224,9 @@ final class MurmurSessionModel: ObservableObject {
         guard isPreparingPhoto else { return }
         photoGeneration += 1
         isPreparingPhoto = false
-        failure = .init(code: "photo_unavailable", message: "没有读取到这张图片。", retryable: false)
+        let mapped = MurmurFailure(code: "photo_unavailable", message: "没有读取到这张图片。", retryable: false)
+        failure = mapped
+        draftFailure = mapped.message
         phase = .error
     }
 
@@ -255,6 +279,7 @@ final class MurmurSessionModel: ObservableObject {
         photoTask?.cancel()
         photoGeneration += 1
         isPreparingPhoto = false
+        draftFailure = nil
         let old = draftPhoto
         draftPhoto = nil
         if phase == .ready || phase == .error || phase == .preparingPhoto {
@@ -269,6 +294,7 @@ final class MurmurSessionModel: ObservableObject {
         isPreparingPhoto = true
         phase = .preparingPhoto
         failure = nil
+        draftFailure = nil
         return photoGeneration
     }
 
@@ -294,7 +320,9 @@ final class MurmurSessionModel: ObservableObject {
     private func failPreparing(_ generation: Int, with error: Error) {
         guard generation == photoGeneration else { return }
         isPreparingPhoto = false
-        failure = MurmurFailure.from(error)
+        let mapped = MurmurFailure.from(error)
+        failure = mapped
+        draftFailure = mapped.message
         phase = .error
     }
 
@@ -319,6 +347,7 @@ final class MurmurSessionModel: ObservableObject {
         )
         draftText = ""
         draftPhoto = nil
+        draftFailure = nil
         proactiveMomentID = nil
         append(outgoing)
         if let photo {
@@ -336,17 +365,25 @@ final class MurmurSessionModel: ObservableObject {
         enqueue(submission)
     }
 
-    func retry() {
-        guard phase == .error, failure?.retryable == true, let lastSubmission else { return }
-        bubbles = []
-        move = nil
-        scene = nil
-        currentMomentID = nil
+    /// Send one failed row again.
+    ///
+    /// The row itself is the handle, not "the last error": by the time somebody
+    /// reaches for the mark they may have sent two more lines, and the one they
+    /// pressed is the one that has to go.  The submission keeps its original
+    /// idempotency key, so a moment the server did accept before the wire broke
+    /// is picked back up rather than said twice.  Anything the app no longer
+    /// holds a submission for is simply not on offer, and its mark is not a
+    /// button — see `sendFailures`.
+    func resend(_ messageID: String) {
+        guard let submission = resendable.removeValue(forKey: messageID) else { return }
+        sendFailures.removeValue(forKey: messageID)
         // The failed turn is already in the transcript; it goes back to
         // spinning rather than being said a second time.
-        pendingMessageID = lastSubmission.messageID
-        updatePending { $0.delivery = .sending }
-        enqueue(lastSubmission)
+        if let index = messages.firstIndex(where: { $0.id == messageID }) {
+            messages[index].delivery = .sending
+            persistTranscript()
+        }
+        enqueue(submission)
     }
 
     func cancelCurrentOperation() {
@@ -359,8 +396,10 @@ final class MurmurSessionModel: ObservableObject {
             isPreparingPhoto = false
         }
         cancelPump()
+        withdrawResendOffers()
         lastSubmission = nil
         failure = nil
+        draftFailure = nil
         phase = currentMomentID == nil && currentNote.isEmpty && currentPhoto == nil ? .idle : .ready
         Task { [photoLoader] in
             await photoLoader.discard(original)
@@ -372,6 +411,7 @@ final class MurmurSessionModel: ObservableObject {
         photoTask?.cancel()
         photoGeneration += 1
         cancelPump()
+        withdrawResendOffers()
         let oldDraft = draftPhoto
         let oldCurrent = currentPhoto
         draftText = ""
@@ -385,6 +425,7 @@ final class MurmurSessionModel: ObservableObject {
         currentMomentID = nil
         proactiveMomentID = nil
         failure = nil
+        draftFailure = nil
         lastSubmission = nil
         phase = .idle
         Task {
@@ -408,6 +449,12 @@ final class MurmurSessionModel: ObservableObject {
         for index in messages.indices
         where stranded.contains(messages[index].id) && messages[index].delivery == .sending {
             messages[index].delivery = .failed
+            // Cancelled on purpose, and no offer to say it again: the photo the
+            // turn carried is being thrown away in the same breath, so a mark
+            // that promised a resend would be promising an upload with nothing
+            // left to upload.
+            sendFailures[messages[index].id] = .init(message: "已取消发送。", canResend: false)
+            resendable.removeValue(forKey: messages[index].id)
             changed = true
         }
         if changed { persistTranscript() }
@@ -420,6 +467,13 @@ final class MurmurSessionModel: ObservableObject {
 
     func handleNotification(momentID: String) async {
         await refreshProactive(expectedMomentID: momentID)
+    }
+
+    /// Without APNs (development installs) no notification ever arrives, so
+    /// launch/foreground polls for whatever Murmur sent on its own. Errors are
+    /// swallowed by refreshProactive when no specific moment is expected.
+    func checkProactive() async {
+        await refreshProactive(expectedMomentID: nil)
     }
 
     func updatePushRegistration(token: String?) async {
@@ -551,8 +605,36 @@ final class MurmurSessionModel: ObservableObject {
         pendingMessageID = submission.messageID
         failure = nil
         phase = .uploading
-        if oldCurrent?.id != currentPhoto?.id {
+        // A moment taking over sweeps the last one's original — unless a failed
+        // row upstairs is still offering to send that same file again.  An
+        // offer whose file has been deleted is a button that cannot work.
+        if oldCurrent?.id != currentPhoto?.id, !isHeldForResend(oldCurrent) {
             Task { [photoLoader] in await photoLoader.discard(oldCurrent) }
+        }
+    }
+
+    private func isHeldForResend(_ photo: PhotoAttachment?) -> Bool {
+        guard let photo else { return false }
+        return resendable.values.contains { $0.photo?.id == photo.id }
+    }
+
+    /// Withdraw every standing resend offer and delete the originals they were
+    /// holding.  The marks stay — those rows really did fail — but they stop
+    /// promising a send the app can no longer perform.
+    ///
+    /// This is the terminal path for an original held by a failed row, and the
+    /// reason cancelling or clearing does not leave full-resolution photos
+    /// behind in the temporary directory.
+    private func withdrawResendOffers() {
+        guard !resendable.isEmpty else { return }
+        let photos = resendable.values.compactMap(\.photo)
+        for id in resendable.keys {
+            guard let standing = sendFailures[id] else { continue }
+            sendFailures[id] = .init(message: standing.message, canResend: false)
+        }
+        resendable = [:]
+        Task { [photoLoader] in
+            for photo in photos { await photoLoader.discard(photo) }
         }
     }
 
@@ -650,16 +732,24 @@ final class MurmurSessionModel: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
+            let mapped = MurmurFailure.from(error)
             updatePending { $0.delivery = .failed }
             pendingMessageID = nil
-            failure = MurmurFailure.from(error)
-            requiresDeviceReconnect = failure?.requiresDeviceReconnect == true
-            if failure?.retryable == false {
+            // The row carries its own verdict from here on.  It is only an
+            // offer while the submission survives with it — a turn that cannot
+            // be retried has its photo swept up just below.
+            sendFailures[submission.messageID] = .init(message: mapped.message, canResend: mapped.retryable)
+            if mapped.retryable {
+                resendable[submission.messageID] = submission
+            }
+            failure = mapped
+            requiresDeviceReconnect = mapped.requiresDeviceReconnect
+            if !mapped.retryable {
                 await discardAfterTranscriptCopy(submission)
                 lastSubmission = nil
             }
-            if failure?.requiresDeviceReconnect == true {
-                connection = .offline(failure?.message ?? "连接异常")
+            if mapped.requiresDeviceReconnect {
+                connection = .offline(mapped.message)
             }
             phase = .error
         }
@@ -714,11 +804,17 @@ final class MurmurSessionModel: ObservableObject {
             try await api.acknowledge(momentID: proactive.momentID, reply: nil)
         } catch {
             if expectedMomentID != nil {
-                failure = MurmurFailure.from(error)
-                if failure?.requiresDeviceReconnect == true {
-                    requiresDeviceReconnect = true
-                    connection = .offline(failure?.message ?? "设备验证失效")
-                }
+                let mapped = MurmurFailure.from(error)
+                failure = mapped
+                // Only ever escalates: a routine network blip while fetching a
+                // proactive message says nothing about whether the device's
+                // binding is still good.
+                if mapped.requiresDeviceReconnect { requiresDeviceReconnect = true }
+                // Fetching a message Murmur sent on its own is a connection
+                // problem, not a failed send: there is no row of the person's
+                // own to mark, so it belongs where every other connection
+                // trouble is already shown — the capsule at the top.
+                connection = .offline(mapped.message)
                 phase = .error
             }
         }

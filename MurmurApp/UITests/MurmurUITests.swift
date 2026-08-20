@@ -10,14 +10,14 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         enterMoment(composer, "今天的风")
         app.buttons["send-moment"].tap()
-        XCTAssertTrue(app.staticTexts["今天的风"].waitForExistence(timeout: 10))
+        XCTAssertTrue(line("今天的风", in: app).waitForExistence(timeout: 10))
 
         // The transcript lives on this device on purpose, so quitting the app
         // must not be a way of losing the conversation.
         app.terminate()
         app.launchArguments = ["--murmur-ui-testing"]
         app.launch()
-        XCTAssertTrue(app.staticTexts["今天的风"].waitForExistence(timeout: 10))
+        XCTAssertTrue(line("今天的风", in: app).waitForExistence(timeout: 10))
     }
 
     func testLandscapeComposerRemainsHittableAndCanSend() throws {
@@ -104,6 +104,25 @@ final class MurmurUITests: XCTestCase {
         )
     }
 
+    func testSendingLeavesTheKeyboardUpForTheNextLine() throws {
+        continueAfterFailure = false
+        let app = launchApp()
+        let composer = app.textFields["moment-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+
+        // Typing without tapping the field again is the whole point: `typeText`
+        // on an element that lost keyboard focus fails, so these two sends in a
+        // row are the guard against the composer resigning on submit.
+        for line in ["第一句", "第二句"] {
+            composer.typeText(line)
+            app.buttons["send-moment"].tap()
+            XCTAssertTrue(self.line(line, in: app).waitForExistence(timeout: 10))
+            XCTAssertTrue(app.keyboards.firstMatch.exists, "sending 「\(line)」 put the keyboard away")
+        }
+    }
+
     func testReachingForTheFieldBringsTheNewestLineBackAboveTheKeyboard() throws {
         continueAfterFailure = false
         let app = launchApp()
@@ -113,7 +132,7 @@ final class MurmurUITests: XCTestCase {
             composer.tap()
             composer.typeText(line)
             app.buttons["send-moment"].tap()
-            XCTAssertTrue(app.staticTexts[line].waitForExistence(timeout: 10))
+            XCTAssertTrue(self.line(line, in: app).waitForExistence(timeout: 10))
         }
         let newest = app.descendants(matching: .any)["murmur-message-7"].firstMatch
         XCTAssertTrue(newest.waitForExistence(timeout: 10))
@@ -143,7 +162,7 @@ final class MurmurUITests: XCTestCase {
             composer.tap()
             composer.typeText(line)
             app.buttons["send-moment"].tap()
-            XCTAssertTrue(app.staticTexts[line].waitForExistence(timeout: 10))
+            XCTAssertTrue(self.line(line, in: app).waitForExistence(timeout: 10))
         }
         let newest = app.descendants(matching: .any)["murmur-message-3"].firstMatch
         XCTAssertTrue(newest.waitForExistence(timeout: 10))
@@ -154,8 +173,14 @@ final class MurmurUITests: XCTestCase {
         let restingComposer = composer.frame.minY
         let restingNewest = newest.frame.maxY
 
+        // Asking for the keyboard back, rather than a first raise: it is being
+        // put away one step above, and how long iOS takes to bring it out again
+        // is not this test's business.  Waiting for it — instead of assuming a
+        // budget — is what keeps the measurement below about the layout.
         composer.tap()
-        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 8),
+                      "the keyboard did not come back when the field was reached for")
+        Thread.sleep(forTimeInterval: 1)
         XCTAssertLessThan(composer.frame.minY, restingComposer, "the keyboard did not raise the field")
 
         chat.tap()
@@ -186,10 +211,15 @@ final class MurmurUITests: XCTestCase {
             composer.tap()
             composer.typeText(line)
             app.buttons["send-moment"].tap()
-            XCTAssertTrue(app.staticTexts[line].waitForExistence(timeout: 10))
+            XCTAssertTrue(self.line(line, in: app).waitForExistence(timeout: 10))
         }
         let newest = app.descendants(matching: .any)["murmur-message-19"].firstMatch
         XCTAssertTrue(newest.waitForExistence(timeout: 10))
+        // Rest has to be asked for now: the keyboard survives a send, so the
+        // loop above leaves it up.  Put it away before reading the gap this
+        // whole test is measured against.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
+        Thread.sleep(forTimeInterval: 1.5)
         let restGap = composer.frame.minY - newest.frame.maxY
 
         composer.tap()
@@ -248,7 +278,7 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(menu.waitForExistence(timeout: 3))
         // It rises out of the composer rather than dropping over the top of it.
         XCTAssertGreaterThan(app.textFields["moment-composer"].frame.minY, menu.frame.minY)
-        XCTAssertTrue(app.staticTexts["先垫一句"].exists)
+        XCTAssertTrue(line("先垫一句", in: app).exists)
 
         // A tap anywhere off the menu puts it away again.  It has to go through
         // a coordinate rather than an element: the invisible catcher that
@@ -267,6 +297,86 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(bubble(in: app).waitForExistence(timeout: 10))
         // The outgoing line stays put once the reply lands beneath it.
         XCTAssertTrue(app.descendants(matching: .any)["murmur-message-0"].firstMatch.exists)
+    }
+
+    func testAFailedSendIsMarkedOnItsOwnBubbleAndCanBeSentAgain() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-fail-first-send"])
+        let composer = app.textFields["moment-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        enterMoment(composer, "没发出去的一句")
+        app.buttons["send-moment"].tap()
+
+        // The failure belongs to the bubble: a coral mark beside it with a full
+        // 44pt to press, and the row itself says what happened.
+        let resend = app.buttons["resend-moment"]
+        XCTAssertTrue(resend.waitForExistence(timeout: 15))
+
+        // Everything below is about where the mark and its question sit, and
+        // the keyboard now survives a send — so put it away first and let the
+        // conversation come to rest.  Left up, the tap that dismisses the
+        // question dismisses the keyboard too, and the next tap on the mark
+        // lands where the mark was 300pt ago.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)).tap()
+        Thread.sleep(forTimeInterval: 1.5)
+        assertMinimumHitArea(resend)
+        let row = app.descendants(matching: .any)["murmur-message-0"].firstMatch
+        XCTAssertTrue(row.label.contains("没发出去的一句"))
+        XCTAssertTrue(row.label.contains("发送失败"))
+        XCTAssertTrue(row.label.contains("可以重新发送"))
+
+        // And nothing takes over the strip above the composer to say it — that
+        // line is for a draft that could not be prepared, and this is not one.
+        XCTAssertFalse(app.descendants(matching: .any)["draft-error"].firstMatch.exists)
+
+        // The mark asks before it sends, and the question stands on the mark
+        // rather than somewhere near the row.  This is the assertion the whole
+        // hand-placed card exists for: `popover` and `confirmationDialog` both
+        // anchored to the row instead, which put the card level with the top of
+        // a tall photo — a good 60pt clear of the mark — so a loose bound here
+        // would not have caught it.
+        resend.tap()
+        let card = app.descendants(matching: .any)["resend-question"].firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        // The card's foot is 8pt above the mark; what is measured here is its
+        // accessibility frame, which is the content box inside the card's 16pt
+        // padding, so a correct placement reads as ~24.  The anchoring this
+        // replaced put it ~70 clear of the mark, which is what the bound has to
+        // separate — not a hair's breadth either side of 24.
+        XCTAssertLessThan(
+            resend.frame.minY - card.frame.maxY, 32,
+            "the question did not come to rest on the mark"
+        )
+        XCTAssertGreaterThan(resend.frame.minY - card.frame.maxY, 0, "the question covered the mark")
+
+        // Backing out of it leaves the row exactly as it was.  Dismissing goes
+        // through a tap away rather than a cancel button, the way the
+        // add-photo menu closes.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25)).tap()
+        XCTAssertTrue(card.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(resend.exists)
+        // The mark has to be reachable the moment the card is gone, not once
+        // some invisible catcher has finished animating off it.
+        XCTAssertTrue(resend.isHittable)
+
+        // Going through with it sends that same row again rather than adding a
+        // second copy of it.
+        resend.tap()
+        let confirm = app.buttons["confirm-resend"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.tap()
+        let reply = app.descendants(matching: .any)["murmur-message-1"].firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 15))
+        XCTAssertTrue(resend.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(
+            app.descendants(matching: .any)["murmur-message-0"].firstMatch.label.contains("发送失败")
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "label CONTAINS %@", "没发出去的一句")
+            ).count,
+            1
+        )
     }
 
     func testAPickedPhotoWaitsInTheComposerAndCanBeTakenBackOff() throws {
@@ -329,7 +439,18 @@ final class MurmurUITests: XCTestCase {
         // after the outgoing message rather than a bubble index of its own.
         let identified = app.descendants(matching: .any)["murmur-message-1"].firstMatch
         if identified.exists { return identified }
-        return app.staticTexts["这一刻，我收到了。"]
+        return line("这一刻，我收到了。", in: app)
+    }
+
+    /// The transcript row carrying this text.
+    ///
+    /// A message is one accessibility element with a spoken label — 「你说：…」 —
+    /// so the raw line is not an element of its own to look up.  Matching on
+    /// the label is what survives that, and it is also what a person hears.
+    private func line(_ text: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", text))
+            .firstMatch
     }
 
     private func enterMoment(_ composer: XCUIElement, _ text: String) {
@@ -351,4 +472,25 @@ final class MurmurUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(element.frame.width, 44, file: file, line: line)
         XCTAssertGreaterThanOrEqual(element.frame.height, 44, file: file, line: line)
     }
+
+    /// A photo waiting in the draft must not lift the composer off the
+    /// keyboard.  The tile floats over the transcript rather than growing the
+    /// inset bar — growing the bar joined the safe-area accounting the
+    /// keyboard lift lives in, and SwiftUI added the overflow back on top,
+    /// leaving a band of paper between field and keyboard.  The field-to-keyboard
+    /// distance without a photo measures ~70pt here; the regression took it
+    /// past 115.
+    func testDraftPhotoDoesNotLiftComposerOffTheKeyboard() throws {
+        let app = launchApp(arguments: ["--murmur-stub-photo"])
+        let composer = app.textFields["moment-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["draft-photo"].waitForExistence(timeout: 10))
+
+        composer.tap()
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertLessThan(keyboard.frame.minY - composer.frame.maxY, 95)
+    }
+
 }
