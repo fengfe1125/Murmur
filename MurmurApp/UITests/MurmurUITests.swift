@@ -493,4 +493,203 @@ final class MurmurUITests: XCTestCase {
         XCTAssertLessThan(keyboard.frame.minY - composer.frame.maxY, 95)
     }
 
+    // MARK: - 当年今日
+
+    /// The four authorization states each have their own UI, and the stub
+    /// drives them without the system photo library: a wrong PHFetchOptions
+    /// predicate or a missing branch here fails silently on a real phone, so
+    /// these are the only honest checks.
+    func testOnThisDayAsksInContextBeforeReadingTheLibrary() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday-ask"])
+        let entry = app.buttons["onthisday-button"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 5))
+        entry.tap()
+        XCTAssertTrue(app.buttons["onthisday-allow"].waitForExistence(timeout: 5))
+        app.buttons["onthisday-allow"].tap()
+        XCTAssertTrue(onThisDayPhoto(in: app).waitForExistence(timeout: 5))
+    }
+
+    func testOnThisDayDeniedStateOffersSystemSettings() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday-denied"])
+        let entry = app.buttons["onthisday-button"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 5))
+        entry.tap()
+        XCTAssertTrue(app.buttons["onthisday-open-settings"].waitForExistence(timeout: 5))
+    }
+
+    /// Limited access is a designed absence, not an error screen: the entry
+    /// hides rather than implying the day was empty.
+    func testOnThisDayHidesItsEntryUnderLimitedAccess() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday-limited"])
+        XCTAssertTrue(app.buttons["settings-button"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["onthisday-button"].exists)
+    }
+
+    /// A blank day is not a dead end any more: with nothing from this day in
+    /// any earlier year, the shelf starts on album photos and the card says so
+    /// rather than dressing an ordinary Tuesday up as an anniversary.
+    func testBlankDayFallsBackToTheAlbum() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday-empty"])
+        app.buttons["onthisday-button"].tap()
+        XCTAssertTrue(onThisDayPhoto(in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["相册里翻到的"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["相册里还没有照片。"].exists)
+    }
+
+    /// The one honest dead end left: full access, and nothing anywhere.
+    func testAnEmptyLibrarySaysSo() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday-barren"])
+        app.buttons["onthisday-button"].tap()
+        XCTAssertTrue(app.staticTexts["相册里还没有照片。"].waitForExistence(timeout: 5))
+    }
+
+    /// Past the last photo from this day the shelf carries on with the album
+    /// instead of looping back to the first card.
+    func testTheShelfCarriesOnPastTheDaysOwnPhotos() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday"])
+        app.buttons["onthisday-button"].tap()
+        let photo = readyOnThisDayPhoto(in: app)
+        XCTAssertTrue(app.staticTexts["去年的今天"].waitForExistence(timeout: 5))
+
+        // Three photos from this day, then the album.  A shelf that wrapped
+        // would be back on 去年的今天 by the fourth swipe.
+        for _ in 0..<3 { photo.swipeDown() }
+        XCTAssertTrue(app.staticTexts["相册里翻到的"].waitForExistence(timeout: 5))
+    }
+
+    /// One photo at a time: down moves to the next year, up carries the photo
+    /// into its own room.  Both directions are gated — |dy| > 60pt and clearly
+    /// vertical — which the stubbed shelf makes repeatable.
+    func testOnThisDaySwipesBetweenYearsAndOpensTheRoom() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday"])
+        app.buttons["onthisday-button"].tap()
+        let photo = readyOnThisDayPhoto(in: app)
+        XCTAssertTrue(app.staticTexts["去年的今天"].waitForExistence(timeout: 5))
+
+        photo.swipeDown()
+        XCTAssertTrue(app.staticTexts["2 年前的今天"].waitForExistence(timeout: 5))
+
+        openPhotoRoom(in: app)
+        // And nowhere near the conversation: the composer never sees it.
+        XCTAssertFalse(app.buttons["draft-photo"].exists)
+    }
+
+    // MARK: - 照片房间
+
+    /// The room's whole point: the server reads the photo, says what it thinks
+    /// the person came to say, and offers three ways in.  Picking one puts it
+    /// in the field rather than sending it — the person still decides.
+    func testThePhotoRoomShowsTheReadingAndItsThreeOpeners() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday"])
+        app.buttons["onthisday-button"].tap()
+        openPhotoRoom(in: app)
+
+        XCTAssertTrue(line("这是……刚下过雨？", in: app).waitForExistence(timeout: 10))
+        let opener = app.buttons["opener-0"]
+        XCTAssertTrue(opener.waitForExistence(timeout: 5))
+        opener.tap()
+
+        let composer = app.textFields["photo-room-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String, "那天的天气")
+        // Picked up, not sent: nothing has left yet.
+        XCTAssertTrue(app.buttons["opener-0"].exists)
+    }
+
+    /// Saying something closes the doors and gets an answer back — and it
+    /// stays in the room: the conversation behind it never sees a word of it.
+    func testSayingSomethingInTheRoomAnswersAndClosesTheOpeners() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday"])
+        app.buttons["onthisday-button"].tap()
+        openPhotoRoom(in: app)
+
+        // Through an opener rather than the keyboard: it is the way in the
+        // screen is built around, and it keeps the test off a software
+        // keyboard whose appearance is its own source of flake.
+        let opener = app.buttons["opener-0"]
+        XCTAssertTrue(opener.waitForExistence(timeout: 10))
+        opener.tap()
+        app.buttons["photo-room-send"].tap()
+
+        XCTAssertTrue(line("这一刻，我收到了。", in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["opener-0"].exists)
+        app.buttons["close-photo-room"].tap()
+        // Wait for the cover to be gone before looking for the room's words,
+        // or this only asks whether the fade had finished.
+        let roomGone = expectation(
+            for: NSPredicate(format: "exists == false"),
+            evaluatedWith: app.buttons["close-photo-room"]
+        )
+        wait(for: [roomGone], timeout: 5)
+        // The conversation is still on its empty state, which is the claim:
+        // a room that had leaked into the transcript would have put a row
+        // there and taken this line off the screen.
+        XCTAssertTrue(app.staticTexts["发来眼前的一刻。"].waitForExistence(timeout: 5))
+    }
+
+    /// A reading that never lands says why and offers the same upload again,
+    /// instead of leaving the room staring at a photo in silence.
+    func testAFailedReadingOffersToTryAgain() throws {
+        let app = launchApp(arguments: [
+            "--murmur-stub-onthisday", "--murmur-stub-reading-fails"
+        ])
+        app.buttons["onthisday-button"].tap()
+        openPhotoRoom(in: app)
+
+        XCTAssertTrue(app.buttons["retry-photo-room"].waitForExistence(timeout: 10))
+        // And it says why, rather than offering a button with no reason on it.
+        XCTAssertTrue(line("暂时没有连上 Murmur。", in: app).exists)
+    }
+
+    /// Closing the sheet while the photo is dissolving calls the send off.
+    /// The dissolve runs for most of a second and the close button stays live
+    /// for all of it, so the wait has to be cancellable: a moment created
+    /// behind someone who just tapped 关闭 is the one failure this feature
+    /// cannot have.  `--murmur-slow-dissolve` widens the window so the tap is
+    /// not racing the animation.
+    func testClosingDuringTheDissolveCallsTheSendOff() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday", "--murmur-slow-dissolve"])
+        app.buttons["onthisday-button"].tap()
+        let photo = readyOnThisDayPhoto(in: app)
+
+        photo.swipeUp()
+        app.buttons["close-onthisday"].tap()
+
+        // Long enough to outlast the widened dissolve: if the wait still fired
+        // its send, the room would have opened inside this window.
+        XCTAssertFalse(
+            app.descendants(matching: .any)["photo-room-photo"].waitForExistence(timeout: 6)
+        )
+    }
+
+    /// The photo card surfaces as an image element once its picture is in;
+    /// matching any type keeps the test out of SwiftUI's element-type choices.
+    private func onThisDayPhoto(in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["onthisday-photo"]
+    }
+
+    /// The card exists a beat before its pixels do, and 上滑 is not an offer
+    /// until they are in — the gesture is silently ignored, which reads in a
+    /// test as "the room never opened".  The card says which state it is in;
+    /// this waits for it to stop saying 正在载入.
+    @discardableResult
+    private func readyOnThisDayPhoto(in app: XCUIApplication) -> XCUIElement {
+        let photo = onThisDayPhoto(in: app)
+        XCTAssertTrue(photo.waitForExistence(timeout: 5))
+        let loaded = expectation(
+            for: NSPredicate(format: "NOT (label CONTAINS %@)", "正在载入"),
+            evaluatedWith: photo
+        )
+        wait(for: [loaded], timeout: 10)
+        return photo
+    }
+
+    /// The room, opened the way a person opens it.
+    private func openPhotoRoom(in app: XCUIApplication) {
+        readyOnThisDayPhoto(in: app).swipeUp()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["photo-room-photo"].waitForExistence(timeout: 10)
+        )
+    }
+
 }

@@ -77,6 +77,9 @@ struct MurmurChatView: View {
     @EnvironmentObject private var notifications: MurmurNotificationBridge
     @State private var showSettings = false
     @State private var showCamera = false
+    @State private var showOnThisDay = false
+    @StateObject private var onThisDay = OnThisDayModel()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var topChromeHeight: CGFloat = 0
     @State private var topFadeHeight: CGFloat = 0
     /// Ties the settings sheet to the gear it comes from.  See the transition
@@ -133,8 +136,10 @@ struct MurmurChatView: View {
             MurmurTopChrome(
                 connection: model.connection,
                 showsSettings: model.identity != nil,
+                showsOnThisDay: model.identity != nil && onThisDay.entryVisible,
                 settingsZoom: settingsZoom,
-                onSettings: { showSettings = true }
+                onSettings: { showSettings = true },
+                onOnThisDay: { showOnThisDay = true }
             )
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
                 topChromeHeight = frame.height
@@ -162,20 +167,37 @@ struct MurmurChatView: View {
             )
             .ignoresSafeArea()
         }
+        .fullScreenCover(isPresented: $showOnThisDay) {
+            // The photo swiped up here does not land in the composer.  It opens
+            // a room of its own, where the server reads it and the exchange is
+            // about that one picture — see `PhotoRoomView`.
+            OnThisDayFlowView(model: onThisDay) { image in
+                model.makePhotoRoom(image: image)
+            }
+        }
+        // The disc hides itself under .limited, so the chrome has to re-ask
+        // whenever the app comes back — that is when a settings change lands.
+        .task { await onThisDay.refreshAuthorization() }
+        .onChange(of: scenePhase, initial: false) { _, phase in
+            guard phase == .active else { return }
+            Task { await onThisDay.refreshAuthorization() }
+        }
         .tint(MurmurTheme.olive)
     }
 
     fileprivate static let settingsSource = "murmur-settings-disc"
 }
 
-/// Two independent discs floating over the transcript: the mark and the gear.
-/// Nothing behind them is painted, so the only thing between the reader and
-/// the conversation is the 44pt of each disc.
+/// Independent discs floating over the transcript: the mark, 当年今日 and the
+/// gear.  Nothing behind them is painted, so the only thing between the reader
+/// and the conversation is the 44pt of each disc.
 private struct MurmurTopChrome: View {
     let connection: MurmurConnectionState
     let showsSettings: Bool
+    let showsOnThisDay: Bool
     let settingsZoom: Namespace.ID
     let onSettings: () -> Void
+    let onOnThisDay: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -197,6 +219,21 @@ private struct MurmurTopChrome: View {
                     .frame(height: 28)
                     .background(MurmurTheme.raisedPaper, in: Capsule())
                     .overlay { Capsule().stroke(MurmurTheme.rule, lineWidth: 1) }
+            }
+            if showsOnThisDay {
+                // The third disc belongs to the top chrome, not the composer:
+                // the composer's row is "one action at a time", and browsing
+                // old photos is not an act of composing.
+                Button(action: onOnThisDay) {
+                    MurmurFloatingDisc {
+                        Image(systemName: "memories")
+                            .font(.system(size: 20, weight: .regular))
+                            .foregroundStyle(MurmurTheme.ink)
+                    }
+                }
+                .murmurDiscButtonStyle()
+                .accessibilityLabel("当年今日")
+                .accessibilityIdentifier("onthisday-button")
             }
             if showsSettings {
                 Button(action: onSettings) {
@@ -1339,7 +1376,7 @@ private struct CameraPicker: UIViewControllerRepresentable {
 private actor PreviewMurmurAPIClient: MurmurAPIClient {
     func storedIdentity() async throws -> MurmurIdentity? { .init(userID: "preview", deviceID: "preview", keyID: "preview") }
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity { .init(userID: "preview", deviceID: "preview", keyID: "preview") }
-    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String) async throws -> MomentReceipt { .init(momentID: "preview", status: "queued") }
+    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?) async throws -> MomentReceipt { .init(momentID: "preview", status: "queued") }
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> { AsyncThrowingStream { $0.finish() } }
     func currentProactive() async throws -> ProactiveMoment? { nil }
     func acknowledge(momentID: String, reply: String?) async throws {}

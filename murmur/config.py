@@ -81,6 +81,10 @@ class Config:
     # 要么把 token 全烧进思考。关掉后靠 SYSTEM 里的「只返回 JSON」+
     # _extract_json 兜底，实测 glm-5.3 输出完全合规。
     json_schema: bool
+    # 关掉 json_schema 之后模型还是不肯吐 JSON（deepseek-v4 直连实测
+    # 十次有九次直接回聊天正文）时打开：用 DeepSeek beta 端点的
+    # assistant prefix 把回复的第一个字符钉死成 "{"，模型只能续写 JSON。
+    json_prefix: bool
     telegram_token: str | None
     allowed_chat_ids: set[int]
     dingtalk_client_id: str | None
@@ -180,6 +184,7 @@ class Config:
             ),
             image_model=os.getenv("MURMUR_IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
             json_schema=_parse_bool("MURMUR_JSON_SCHEMA", default=True),
+            json_prefix=_parse_bool("MURMUR_JSON_PREFIX", default=False),
             telegram_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             allowed_chat_ids=allowed,
             dingtalk_client_id=os.getenv("DINGTALK_CLIENT_ID") or None,

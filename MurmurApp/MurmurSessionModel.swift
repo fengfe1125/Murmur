@@ -255,12 +255,34 @@ final class MurmurSessionModel: ObservableObject {
     }
 
     func prepareCapturedPhoto(_ image: UIImage) {
+        prepareImage(image) { try await $0.load(capturedImage: image) }
+    }
+
+    /// A room for one photo swiped up out of 当年今日.  Built here rather than
+    /// in the view so it borrows the app's own authenticated client, photo
+    /// loader and timeouts: the room's upload goes out the same door as every
+    /// other, and its temporary original lands under the same swept prefix.
+    func makePhotoRoom(image: UIImage) -> PhotoRoomModel {
+        PhotoRoomModel(
+            image: image,
+            api: api,
+            photoLoader: photoLoader,
+            uploadTimeoutSeconds: uploadTimeoutSeconds,
+            requestTimeoutSeconds: requestTimeoutSeconds,
+            bubblePacing: bubblePacing
+        )
+    }
+
+    private func prepareImage(
+        _ image: UIImage,
+        using load: @escaping @Sendable (PhotoLoader) async throws -> PhotoAttachment
+    ) {
         let generation = beginPreparing()
         photoTask = Task { [weak self] in
             guard let self else { return }
             let loaded: PhotoAttachment
             do {
-                loaded = try await self.photoLoader.load(capturedImage: image)
+                loaded = try await load(self.photoLoader)
             } catch is CancellationError {
                 self.finishPreparing(generation)
                 return
@@ -651,7 +673,8 @@ final class MurmurSessionModel: ObservableObject {
                 try await api.createMoment(
                     note: submission.note,
                     photo: submission.photo,
-                    idempotencyKey: submission.idempotencyKey
+                    idempotencyKey: submission.idempotencyKey,
+                    intent: nil
                 )
             }
             try Task.checkCancellation()
@@ -702,6 +725,13 @@ final class MurmurSessionModel: ObservableObject {
                                 ))
                                 lastBubbleAt = Date()
                             }
+                        case .angles:
+                            // The three openers belong to 当年今日's room,
+                            // which streams its own moments.  A chat moment
+                            // never asks for them; if one ever arrives here it
+                            // is somebody else's answer, and the conversation
+                            // is not the place to show it.
+                            break
                         case .quiet:
                             wasQuiet = true
                             phase = .quiet
@@ -871,12 +901,15 @@ private struct Submission: Sendable {
 private extension MurmurStreamEvent {
     var eventID: String? {
         switch self {
-        case let .accepted(id), let .bubble(id, _), let .quiet(id), let .done(id, _, _), let .failure(id, _): id
+        case let .accepted(id), let .bubble(id, _), let .angles(id, _), let .quiet(id),
+             let .done(id, _, _), let .failure(id, _): id
         }
     }
 }
 
-private func withTimeout<T: Sendable>(
+/// Shared with 当年今日's photo room, which runs its own turns against the same
+/// API client and needs the same ceiling on a request that never answers.
+func withTimeout<T: Sendable>(
     seconds: TimeInterval,
     operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {

@@ -16,7 +16,7 @@ from openai import OpenAI, OpenAIError
 from .config import Config
 from .memory import Entry, Memory
 from .moment import Moment
-from .persona import OUTPUT_SCHEMA, SYSTEM
+from .persona import OUTPUT_SCHEMA, READING_SYSTEM, SYSTEM
 from .photo import Photo
 
 log = logging.getLogger("murmur.engine")
@@ -188,10 +188,7 @@ def _as_bubbles(value) -> list[str]:
     return out[:3]
 
 
-def _extract_json(text: str) -> dict:
-    """有些模型会包代码块、或把 <think> 写进正文。都剥掉再解析。"""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.M).strip()
+def _parse_json_obj(text: str) -> dict | None:
     try:
         if (obj := _as_obj(json.loads(text))) is not None:
             return obj
@@ -205,12 +202,178 @@ def _extract_json(text: str) -> dict:
             depth += (ch == "{") - (ch == "}")
             if depth == 0:
                 try:
-                    if (obj := _as_obj(json.loads(text[start : i + 1]))) is not None:
-                        return obj
+                    return _as_obj(json.loads(text[start : i + 1]))
                 except json.JSONDecodeError:
                     pass
                 break
+    return None
+
+
+def _extract_json(text: str) -> dict:
+    """有些模型会包代码块、或把 <think> 写进正文。都剥掉再解析。"""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.M).strip()
+    if (obj := _parse_json_obj(text)) is not None:
+        return obj
+    # deepseek 系偶尔用全角引号当 JSON 定界符。只在正常解析失败后才
+    # 试这一招：替换完还是非法就照旧抛，不会把能解析的文本弄坏。
+    if "“" in text or "”" in text:
+        if (obj := _parse_json_obj(text.replace("“", '"').replace("”", '"'))) is not None:
+            return obj
     raise ValueError(f"模型没有返回可解析的 JSON：{text[:200]}")
+
+
+# ---- 当年今日的读图（reading） -----------------------------------------------
+
+READING_TIMEOUT = 90.0  # mimo 读一张图要想 20-30 秒，他盯着屏幕等，但等得来
+READING_MAX_TOKENS = 2500  # mimo-v2.5 的思考先烧掉约 1100，500/900 档实测全部截断
+ANGLES_MAX_CHARS = 14  # 硬约束是 ≤12 个汉字，字符数留两格兜底
+GUESS_MAX_CHARS = 40  # 硬约束是 ≤30 个汉字，同上
+
+# emoji 与其包装字符（含 ⏎ 所在的 Misc Technical 段——那是历史拼接符，
+# 绝不能出现在他看到的文字里）。
+_EMOJI = re.compile(
+    "[\U0001F000-\U0001FAFF\u2600-\u27BF\u2300-\u23FF\uFE0F\u20E3]"
+)
+
+
+@dataclass
+class PhotoReading:
+    """服务端看完一张照片之后交出来的那一屏。
+
+    guess 是猜他想说什么（他看得到，是这间房里的第一句话），
+    angles 是三个递到他手边的话头，scene 是存档用的客观画面描述。
+    """
+
+    guess: str
+    angles: list[str]
+    scene: str
+
+
+def _clean_angles(value) -> list[str]:
+    """逐条硬校验入口角度，不合格的丢掉——剩 1 条也照发，剩 0 条就不发。"""
+    if isinstance(value, dict):  # 模型偶尔多包一层 {"angles": [...]}
+        value = value.get("angles")
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        angle = item.strip()
+        if (
+            not angle
+            or len(angle) > ANGLES_MAX_CHARS
+            or "\n" in angle
+            or "\r" in angle
+            or _EMOJI.search(angle)
+            or angle in out
+        ):
+            continue
+        out.append(angle)
+    return out[:3]
+
+
+def _clean_guess(value) -> str:
+    """一句话，一行，不带 emoji。太长就当模型没答上来。"""
+    if not isinstance(value, str):
+        return ""
+    guess = " ".join(value.split())
+    if not guess or len(guess) > GUESS_MAX_CHARS or _EMOJI.search(guess):
+        return ""
+    return guess
+
+
+def _salvage_reading(text: str) -> PhotoReading | None:
+    """JSON 被 max_tokens 截断时的抢救。
+
+    prompt 要求按 guess → angles → scene 的顺序写，截断点几乎总在后面两截，
+    而 guess 已经完整落地——把它（和写全了的话头）捞出来交付，比整屏退回
+    普通回复强。只有带收尾引号的完整串才算数：写到一半的不要。
+    """
+
+    def unescape(raw: str) -> str:
+        try:
+            return json.loads(f'"{raw}"')
+        except json.JSONDecodeError:
+            return ""
+
+    m = re.search(r'"guess"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    guess = _clean_guess(unescape(m.group(1))) if m else ""
+    if not guess:
+        return None
+    angles: list[str] = []
+    # [^\]]* 截在数组收尾或文本末尾：后面的 scene 不许混进话头里
+    if am := re.search(r'"angles"\s*:\s*\[([^\]]*)', text):
+        angles = _clean_angles(
+            [unescape(s) for s in re.findall(r'"((?:[^"\\]|\\.)*)"', am.group(1))]
+        )
+    log.warning("读图 JSON 被截断，抢救出 guess 和 %d 条话头", len(angles))
+    return PhotoReading(guess=guess, angles=angles, scene="")
+
+
+def _parse_reading(text: str) -> PhotoReading:
+    """把模型输出解析成一屏读图。
+
+    guess 是这一屏的主语——它空了就没有可交付的东西，抛 ValueError 让
+    调用方降级；angles 和 scene 缺了都还能发。JSON 被 max_tokens 截断时
+    先抢救已经写全的部分，抢不出来才抛。
+    """
+    try:
+        obj = _extract_json(text)
+    except ValueError:
+        if (salvaged := _salvage_reading(text)) is not None:
+            return salvaged
+        raise
+    guess = _clean_guess(obj.get("guess"))
+    if not guess:
+        raise ValueError(f"读图：没有可用的 guess：{text[:200]}")
+    scene = obj.get("scene")
+    return PhotoReading(
+        guess=guess,
+        angles=_clean_angles(obj.get("angles")),
+        scene=" ".join(scene.split()) if isinstance(scene, str) else "",
+    )
+
+
+def read_photo(
+    moment: Moment, photo: Photo, cfg: Config, *, dossier: str | None = None
+) -> PhotoReading:
+    """当年今日推过来一张旧照片，他还没说话：先看图，猜他想说什么。
+
+    必须真的看得见图——这一屏的全部价值就是「上游读懂了这张照片」，
+    所以只走 cfg.image_model，没有纯文字的降级档可言。任何失败都抛出去，
+    由调用方退回普通回复（respond 有自己的降级链）。
+    """
+    model = (cfg.image_model or "").strip()
+    if not model:
+        raise ValueError("读图：没有配置 MURMUR_IMAGE_MODEL")
+    content = [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{photo.media_type};base64,{photo.image_b64}"
+            },
+        },
+        {"type": "text", "text": f"此刻：{moment.describe()}"},
+    ]
+    raw = (
+        _client(cfg)
+        .chat.completions.create(
+            model=model,
+            max_tokens=READING_MAX_TOKENS,
+            timeout=READING_TIMEOUT,
+            messages=[
+                {"role": "system", "content": READING_SYSTEM},
+                # 长期记忆是背景知识，不是这一轮的输入。同 _respond_once。
+                *([{"role": "system", "content": dossier}] if dossier else []),
+                {"role": "user", "content": content},
+            ],
+        )
+        .choices[0].message.content
+        or ""
+    )
+    return _parse_reading(raw)
 
 
 def _too_similar(text: str, previous: list[str]) -> bool:
@@ -465,6 +628,7 @@ def respond(
                 client=client,
                 on_bubble=on_bubble,
                 photo=photo,
+                json_prefix=cfg.json_prefix,
             )
             if last_error is not None:
                 log.info("降级模型 %s 接住了回复", model)
@@ -487,18 +651,25 @@ def _respond_once(
     client: OpenAI,
     on_bubble,
     photo: Photo | None,
+    json_prefix: bool = False,
 ) -> Reply:
+    messages = [
+        {"role": "system", "content": SYSTEM},
+        # 长期记忆放在 system 之后、对话之前：它是背景知识，
+        # 不是这一轮的输入，混进 user turn 会被当成他刚说的话。
+        *([{"role": "system", "content": dossier}] if dossier else []),
+        *history,
+        {"role": "user", "content": content},
+    ]
+    if json_prefix and not use_schema:
+        # deepseek 直连实测不吃 SYSTEM 里的「只返回 JSON」（十次有九次
+        # 直接回聊天正文），但吃 beta 端点的 assistant prefix：把回复的
+        # 第一个字符钉死成 "{"，它只能接着把 JSON 写完。
+        messages.append({"role": "assistant", "content": "{", "prefix": True})
     kwargs = dict(
         model=model,
         max_tokens=MAX_TOKENS,
-        messages=[
-            {"role": "system", "content": SYSTEM},
-            # 长期记忆放在 system 之后、对话之前：它是背景知识，
-            # 不是这一轮的输入，混进 user turn 会被当成他刚说的话。
-            *([{"role": "system", "content": dossier}] if dossier else []),
-            *history,
-            {"role": "user", "content": content},
-        ],
+        messages=messages,
     )
     if use_schema:
         kwargs["response_format"] = _response_format()
@@ -515,6 +686,8 @@ def _respond_once(
             raw += piece
             for bubble in streamer.feed(piece):
                 on_bubble(bubble)
+    if json_prefix and not use_schema:
+        raw = "{" + raw
     try:
         data = _extract_json(raw)
     except ValueError:

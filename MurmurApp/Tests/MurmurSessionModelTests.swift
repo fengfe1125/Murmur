@@ -759,7 +759,7 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
         .init(userID: "test-user", deviceID: "test-device", keyID: "test-key")
     }
 
-    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String) async throws -> MomentReceipt {
+    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?) async throws -> MomentReceipt {
         idempotencyKeys.append(idempotencyKey)
         createCount += 1
         if mode == .idempotencyConflict {

@@ -179,6 +179,28 @@ _REWRITE = """\
 """
 
 
+def _loads_tolerant(raw: str) -> dict | None:
+    """逐层放宽地解析模型返回的 JSON 对象。
+
+    deepseek 直连在全中文 prompt 下会把引号、冒号、逗号也写成全角。
+    只在窄的一档失败后才换更宽的：能直接解析就不动正文；最后一档
+    会把正文里的全角标点也换成半角——保真让位给「这轮整理别整个丢掉」。
+    """
+    for candidate in (
+        raw,
+        raw.replace("“", '"').replace("”", '"'),
+        raw.replace("“", '"').replace("”", '"')
+           .replace("：", ":").replace("，", ","),
+    ):
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
 def _fmt_entries(entries: list[Entry]) -> str:
     out = []
     for e in entries:
@@ -231,25 +253,41 @@ def refresh(
     client = _client(cfg)
     # 整理记忆是"重写三块摘要"，不需要主模型的对话能力。
     # 默认跟随主模型，.env 里配 MURMUR_MEMORY_MODEL 可以换成更便宜的。
-    resp = client.chat.completions.create(
-        model=cfg.memory_model or cfg.model,
-        max_tokens=1800,
-        messages=[
-            {"role": "system", "content": _REWRITE},
-            {"role": "user", "content": (
-                f"分区说明：\n{spec}\n\n"
-                f"现有记忆：\n{current}\n\n"
-                f"新的对话记录（{len(entries)} 条）：\n{_fmt_entries(entries)}"
-            )},
-        ],
-        response_format={"type": "json_object"},
-    )
-    raw = resp.choices[0].message.content or "{}"
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.M)
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        log.error("整理记忆失败，模型没返回 JSON（响应长度=%d）", len(raw))
+    messages: list[dict] = [
+        {"role": "system", "content": _REWRITE},
+        {"role": "user", "content": (
+            f"分区说明：\n{spec}\n\n"
+            f"现有记忆：\n{current}\n\n"
+            f"新的对话记录（{len(entries)} 条）：\n{_fmt_entries(entries)}"
+        )},
+    ]
+    kwargs: dict = {}
+    if cfg.json_prefix:
+        # deepseek 直连：json_object 挡不住它长时间思考（实测 1800 token
+        # 被烧光、正文为空），assistant prefix 才能把首字符钉成 "{"。
+        messages.append({"role": "assistant", "content": "{", "prefix": True})
+    else:
+        kwargs["response_format"] = {"type": "json_object"}
+    # deepseek 的输出风格有随机性：全角标点、或偶尔思考烧光 token。
+    # json_prefix 模式下给两次机会；都不成就放弃这轮，下一批 12 条再来。
+    data = None
+    for _ in range(2 if cfg.json_prefix else 1):
+        resp = client.chat.completions.create(
+            model=cfg.memory_model or cfg.model,
+            max_tokens=1800,
+            messages=messages,
+            **kwargs,
+        )
+        raw = resp.choices[0].message.content or ""
+        if cfg.json_prefix:
+            raw = "{" + raw
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.M)
+        data = _loads_tolerant(raw)
+        if data is not None:
+            break
+        log.warning("整理记忆：这一轮没拿到可解析的 JSON（响应长度=%d）", len(raw))
+    if data is None:
+        log.error("整理记忆失败，模型没返回 JSON")
         return None
 
     for name, (_, limit) in BLOCKS.items():

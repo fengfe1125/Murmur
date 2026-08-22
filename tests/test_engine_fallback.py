@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import openai  # noqa: E402
 from _helpers import make_config  # noqa: E402
 
-from murmur.engine import Reply, respond  # noqa: E402
+from murmur.engine import Reply, _extract_json, respond  # noqa: E402
 from murmur.memory import Memory  # noqa: E402
 from murmur.moment import Moment  # noqa: E402
 from murmur.photo import Photo  # noqa: E402
@@ -237,6 +237,43 @@ class EngineFallbackTests(unittest.TestCase):
             with self.assertRaises(openai.InternalServerError):
                 respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
         self.assertEqual(len(client.calls), 1)
+
+    def test_json_prefix_pins_the_first_char(self):
+        # MURMUR_JSON_PREFIX=1（deepseek 直连）：回复的第一个字符被
+        # assistant prefix 钉成 "{"，模型只续写，引擎把 "{" 补回去。
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "m4.db"),
+            model="deepseek-v4-flash",
+            fallback_model="",
+            image_model="",
+            json_schema=False,
+            json_prefix=True,
+        )
+        client = FakeClient(
+            {"deepseek-v4-flash":
+             '"move":"speak","say":["续写出来的"],"scene":"测试"}'}
+        )
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        self.assertEqual(reply.say, ["续写出来的"])
+        self.assertEqual(
+            client.calls[0]["messages"][-1],
+            {"role": "assistant", "content": "{", "prefix": True},
+        )
+        self.assertNotIn("response_format", client.calls[0])
+
+
+class ExtractJsonTests(unittest.TestCase):
+    def test_fullwidth_quotes_are_normalized_after_plain_parse_fails(self):
+        # deepseek 偶尔拿全角引号当 JSON 定界符，正常解析失败后兜底一把
+        obj = _extract_json(
+            '{"move": “speak”, “say”: [“哪句呀”], “scene”: “测试”}'
+        )
+        self.assertEqual(obj["say"], ["哪句呀"])
+
+    def test_fullwidth_quotes_without_object_still_raise(self):
+        with self.assertRaises(ValueError):
+            _extract_json("“这里没有花括号”")
 
 
 if __name__ == "__main__":

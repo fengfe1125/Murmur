@@ -109,6 +109,92 @@ class AppAPITests(unittest.TestCase):
         no_history = self.client.get("/v1/history")
         self.assertEqual(no_history.status_code, 404)
 
+    def test_photo_reading_intent_rides_the_upload(self):
+        """当年今日 开门的那一张：一张图，不带字，intent 落在 moment 上。"""
+        response = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={"idempotency_key": "api-reading-0001", "intent": "photo_reading"},
+            files={"image": ("photo.jpg", b"\xff\xd8\xfffake-jpeg", "image/jpeg")},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        row = self.store.moment_for_user(
+            response.json()["moment_id"], self.identity["user_id"]
+        )
+        self.assertEqual(row["intent"], "photo_reading")
+
+    def test_ordinary_moment_carries_no_intent(self):
+        response = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={"note": "看看这个", "idempotency_key": "api-plain-0001"},
+            files={"_multipart": (None, "1")},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        row = self.store.moment_for_user(
+            response.json()["moment_id"], self.identity["user_id"]
+        )
+        self.assertIsNone(row["intent"])
+
+    def test_unknown_intent_is_refused(self):
+        response = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={"idempotency_key": "api-reading-0002", "intent": "read_my_mind"},
+            files={"image": ("photo.jpg", b"\xff\xd8\xfffake-jpeg", "image/jpeg")},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+
+    def test_photo_reading_without_a_photo_is_refused(self):
+        response = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={"note": "没有图", "idempotency_key": "api-reading-0003",
+                  "intent": "photo_reading"},
+            files={"_multipart": (None, "1")},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+
+    def test_photo_reading_refuses_a_note_it_would_ignore(self):
+        """这一屏的全部输入就是那张照片。带着字来只会让人以为字被读了。"""
+        response = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={"note": "我想说的是", "idempotency_key": "api-reading-0004",
+                  "intent": "photo_reading"},
+            files={"image": ("photo.jpg", b"\xff\xd8\xfffake-jpeg", "image/jpeg")},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+
+    def test_a_reading_reaches_the_client_as_a_bubble_then_angles(self):
+        """当年今日 的房间，从上传到事件流走一遍。
+
+        App 端把这三件事当契约：guess 是一条普通 bubble、三个话头是紧跟着的
+        一个 angles 事件、然后才是 done。中间任何一环换了形状，房间开门就是
+        一片空白，而单元测试各自都还是绿的。
+        """
+        response = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={"idempotency_key": "api-reading-wire", "intent": "photo_reading"},
+            files={"image": ("photo.jpg", b"\xff\xd8\xfffake-jpeg", "image/jpeg")},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        moment_id = response.json()["moment_id"]
+
+        self.store.append_event(moment_id, "bubble", {"text": "这是……刚下过雨？"})
+        self.store.append_event(
+            moment_id, "angles", {"angles": ["那天的天气", "右边那个人是谁"]}
+        )
+        self.store.append_event(moment_id, "done", {"move": "speak", "scene": "湿的路面"})
+
+        events = self.client.get(
+            f"/v1/moments/{moment_id}/events",
+            headers={**self.authenticated_headers(), "Last-Event-ID": "1"},
+        )
+        self.assertEqual(events.status_code, 200, events.text)
+        names = [
+            line.removeprefix("event: ")
+            for line in events.text.splitlines()
+            if line.startswith("event: ")
+        ]
+        self.assertEqual(names, ["bubble", "angles", "done"])
+        self.assertIn('"那天的天气"', events.text)
+
     def test_stop_command_disables_push_before_job_runs(self):
         response = self.client.post(
             "/v1/moments", headers=self.authenticated_headers(),

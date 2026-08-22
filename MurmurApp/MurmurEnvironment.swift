@@ -1,4 +1,29 @@
 import Foundation
+import Metal
+
+/// The dissolve shader's availability, proven before any gesture can reach it.
+///
+/// `ShaderLibrary.default` resolves functions by name at draw time, so a
+/// .metal file that never made Compile Sources — or a misspelled function
+/// name — compiles clean and crashes mid-swipe.  Reading the default Metal
+/// library's symbol table up front demotes a missing shader to a plain fade
+/// instead of a crash.
+enum MurmurShaderSupport {
+    static let particleDissolve: Bool = {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let library = try? device.makeDefaultLibrary(bundle: .main)
+        else { return false }
+        let found = library.functionNames.contains("onThisDayDissolve")
+#if DEBUG
+        if !found {
+            Task { @MainActor in
+                MurmurDiagnostics.record("onThisDayDissolve shader missing; send falls back to fade")
+            }
+        }
+#endif
+        return found
+    }()
+}
 
 enum MurmurEnvironment {
     @MainActor
@@ -86,7 +111,7 @@ private actor UnavailableMurmurAPIClient: MurmurAPIClient {
 
     func storedIdentity() async throws -> MurmurIdentity? { nil }
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity { throw unavailable }
-    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String) async throws -> MomentReceipt { throw unavailable }
+    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?) async throws -> MomentReceipt { throw unavailable }
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> {
         AsyncThrowingStream { $0.finish(throwing: unavailable) }
     }
@@ -118,21 +143,44 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
     /// press it and the same row goes through.
     private let failsFirstSend = ProcessInfo.processInfo.arguments.contains("--murmur-fail-first-send")
     private var sends = 0
+    /// Which moments came in as 当年今日 readings, so their event stream can
+    /// answer with a guess and three openers instead of an ordinary reply.
+    private var readings: Set<String> = []
+    /// Under `--murmur-stub-reading-fails` the room's opening upload never
+    /// lands.  That is what makes the room's own failure state reachable.
+    private let failsReading = ProcessInfo.processInfo.arguments.contains("--murmur-stub-reading-fails")
 
     func storedIdentity() async throws -> MurmurIdentity? { identity }
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity { identity }
-    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String) async throws -> MomentReceipt {
+    func createMoment(
+        note: String?, photo: PhotoAttachment?, idempotencyKey: String,
+        intent: MurmurMomentIntent?
+    ) async throws -> MomentReceipt {
         sends += 1
         if failsFirstSend, sends == 1 {
             throw MurmurFailure(code: "network_error", message: "暂时没有连上 Murmur。", retryable: true)
         }
+        if intent == .photoReading, failsReading {
+            throw MurmurFailure(code: "network_error", message: "暂时没有连上 Murmur。", retryable: true)
+        }
         moments += 1
-        return .init(momentID: "ui-moment-\(moments)", status: "queued")
+        let momentID = "ui-moment-\(moments)"
+        if intent == .photoReading { readings.insert(momentID) }
+        return .init(momentID: momentID, status: "queued")
     }
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> {
-        AsyncThrowingStream { continuation in
+        let isReading = readings.contains(momentID)
+        return AsyncThrowingStream { continuation in
             continuation.yield(.accepted(id: "\(momentID)-1"))
-            continuation.yield(.bubble(id: "\(momentID)-2", text: "这一刻，我收到了。"))
+            if isReading {
+                continuation.yield(.bubble(id: "\(momentID)-2", text: "这是……刚下过雨？"))
+                continuation.yield(.angles(
+                    id: "\(momentID)-angles",
+                    texts: ["那天的天气", "右边那个人", "上次说要再来"]
+                ))
+            } else {
+                continuation.yield(.bubble(id: "\(momentID)-2", text: "这一刻，我收到了。"))
+            }
             continuation.yield(.done(id: "\(momentID)-3", move: nil, scene: nil))
             continuation.finish()
         }
