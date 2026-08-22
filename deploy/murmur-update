@@ -129,10 +129,16 @@ fi
 echo "Updating Murmur ${current:0:12} → ${target:0:12}"
 git_murmur merge --ff-only "$target"
 
+# The loop used to run bare, so only the last file's exit code survived and a
+# failure in the middle still counted as a pass.  The tests are this host's only
+# release gate; name the file that failed and stop there.
 if ! as_murmur bash -c "
+  set -e
   cd '$APP_DIR'
   .venv/bin/pip install -e .
-  for test in tests/test_*.py; do .venv/bin/python \"\$test\"; done
+  for test in tests/test_*.py; do
+    .venv/bin/python \"\$test\" || { echo \"FAILED: \$test\" >&2; exit 1; }
+  done
 "; then
   echo "Checks failed; restoring $current and leaving running services untouched." >&2
   git_murmur reset --hard "$current"

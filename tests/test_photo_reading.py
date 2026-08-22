@@ -26,7 +26,12 @@ from PIL import Image  # noqa: E402
 from murmur.app_settings import AppSettings  # noqa: E402
 from murmur.app_store import AppStore  # noqa: E402
 from murmur.app_worker import AppWorker, EngineMomentProcessor, ProcessedMoment  # noqa: E402
-from murmur.engine import Reply, _parse_reading, read_photo  # noqa: E402
+from murmur.engine import (  # noqa: E402
+    READING_ATTEMPTS,
+    Reply,
+    _parse_reading,
+    read_photo,
+)
 from murmur.moment import Moment  # noqa: E402
 from murmur.photo import Photo  # noqa: E402
 
@@ -65,12 +70,28 @@ def gateway_error() -> openai.InternalServerError:
     return openai.InternalServerError("boom", response=_HttpResponse(), body=None)
 
 
-class FakeClient:
-    """返回固定内容 / 抛错，并记录每次 create 的 kwargs。"""
+def bad_request_error() -> openai.BadRequestError:
+    resp = _HttpResponse()
+    resp.status_code = 400
+    return openai.BadRequestError("unsupported image", response=resp, body=None)
 
-    def __init__(self, content: str = "", error: Exception | None = None):
+
+class FakeClient:
+    """返回固定内容 / 抛错，并记录每次 create 的 kwargs。
+
+    replies 给一串就按顺序吐，元素可以是字符串也可以是异常；用完之后一直
+    重复最后一个。读图会重试，「第一次交白卷、第二次正常」这种剧本要靠它。
+    """
+
+    def __init__(
+        self,
+        content: str = "",
+        error: Exception | None = None,
+        replies: list | None = None,
+    ):
         self.content = content
         self.error = error
+        self.replies = list(replies) if replies is not None else None
         self.calls: list[dict] = []
         self.chat = self._Chat(self)
 
@@ -80,6 +101,11 @@ class FakeClient:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
+        if self.replies is not None:
+            item = self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
+            if isinstance(item, Exception):
+                raise item
+            return _Resp(item)
         if self.error is not None:
             raise self.error
         return _Resp(self.content)
@@ -205,13 +231,45 @@ class ReadPhotoTests(unittest.TestCase):
         client = FakeClient(error=gateway_error())
         with self.assertRaises(openai.OpenAIError):
             self._call(client)
-        # 一次就是一次：降级档看不见图，这一屏没有它的位置。
+        # 重试是「同一个模型再来一次」，不是「换一个模型」：降级档看不见图，
+        # 这一屏没有它的位置。
+        self.assertEqual(len(client.calls), READING_ATTEMPTS)
+        self.assertEqual({c["model"] for c in client.calls}, {"mimo-v2.5"})
+
+    def test_a_transient_blank_is_rescued_by_the_retry(self):
+        # 实测最常见的死法：finish_reason=stop，正文长度 0，重试几乎必中。
+        client = FakeClient(replies=["", '{"guess": "第二次才写出来的"}'])
+        reading = self._call(client)
+        self.assertEqual(reading.guess, "第二次才写出来的")
+        self.assertEqual(len(client.calls), 2)
+
+    def test_a_bad_request_is_not_retried(self):
+        # 400 是这次请求本身不合法，再发一遍还是同一份请求。
+        client = FakeClient(error=bad_request_error())
+        with self.assertRaises(openai.BadRequestError):
+            self._call(client)
         self.assertEqual(len(client.calls), 1)
+
+    def test_json_prefix_pins_the_first_character(self):
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "m3.db"),
+            image_model="deepseek-v4-flash-vision-exp",
+            json_prefix=True,
+        )
+        # prefix 模式下模型只写「续写部分」，开头那个 { 由我们补回去。
+        client = FakeClient('"guess": "钉住首字符之后写的"}')
+        reading = self._call(client, cfg=cfg)
+        self.assertEqual(reading.guess, "钉住首字符之后写的")
+        tail = client.calls[0]["messages"][-1]
+        self.assertEqual(tail["role"], "assistant")
+        self.assertEqual(tail["content"], "{")
+        self.assertTrue(tail["prefix"])
 
     def test_unparseable_output_raises(self):
         client = FakeClient("他拍了一张照片，看起来心情不错")
         with self.assertRaises(ValueError):
             self._call(client)
+        self.assertEqual(len(client.calls), READING_ATTEMPTS)
 
     def test_no_image_model_configured_raises_without_calling(self):
         cfg = make_config(db_path=str(Path(self.tmp.name) / "m2.db"), image_model="")
