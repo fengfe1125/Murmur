@@ -46,6 +46,24 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+/// Somewhere to write a row into the conversation's scrollback from outside it.
+///
+/// 当年今日's room holds its own screen and its own turn, but what is said in
+/// there is still said to Murmur — so it belongs in the same history as
+/// everything else rather than disappearing when the room closes.  The room
+/// writes through this and never touches the store, which stays the session's
+/// to own: two writers on one JSON file would each overwrite the other's turn.
+@MainActor
+protocol MurmurTranscriptRecorder: AnyObject {
+    /// Appends one row.  `photoURL` is copied into transcript storage before
+    /// the row lands, so a row never names a file that is about to be deleted.
+    func record(_ message: MurmurMessage, photoURL: URL?) async
+    func setDelivery(_ delivery: MurmurDeliveryState, for messageID: String)
+    /// Takes a row back out.  For a line that never left: the room puts those
+    /// words back in the field, and the history must not claim they were sent.
+    func withdraw(_ messageID: String)
+}
+
 /// The on-device chat history.
 ///
 /// Murmur's server keeps private memory, never a transcript, so the history a
