@@ -269,7 +269,10 @@ final class MurmurSessionModel: ObservableObject {
             photoLoader: photoLoader,
             uploadTimeoutSeconds: uploadTimeoutSeconds,
             requestTimeoutSeconds: requestTimeoutSeconds,
-            bubblePacing: bubblePacing
+            bubblePacing: bubblePacing,
+            // The room's exchange is part of the same conversation and joins
+            // the same scrollback; the room screen is just where it happened.
+            transcript: self
         )
     }
 
@@ -904,6 +907,41 @@ private extension MurmurStreamEvent {
         case let .accepted(id), let .bubble(id, _), let .angles(id, _), let .quiet(id),
              let .done(id, _, _), let .failure(id, _): id
         }
+    }
+}
+
+// MARK: - Writing 当年今日's room into the same history
+
+/// The conversation owns the scrollback, so the room hands its rows here rather
+/// than writing the file itself.  Everything below goes through the same
+/// `messages` array and the same save the composer uses; nothing about a row is
+/// different for having been said in the room.
+extension MurmurSessionModel: MurmurTranscriptRecorder {
+    func record(_ message: MurmurMessage, photoURL: URL?) async {
+        var row = message
+        // The copy finishes before the row lands.  The room deletes its
+        // original the moment the reading is over, and a row that named a file
+        // deleted a turn later would show an empty frame forever after.
+        if let photoURL {
+            row.imageFile = await transcriptStore.adoptImage(at: photoURL, id: row.id)
+        }
+        // A row with neither words nor a picture is an empty bubble; the copy
+        // failing is not a reason to put one in the scrollback.
+        guard !row.text.isEmpty || row.imageFile != nil else { return }
+        append(row)
+    }
+
+    func setDelivery(_ delivery: MurmurDeliveryState, for messageID: String) {
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        guard messages[index].delivery != delivery else { return }
+        messages[index].delivery = delivery
+        persistTranscript()
+    }
+
+    func withdraw(_ messageID: String) {
+        guard messages.contains(where: { $0.id == messageID }) else { return }
+        messages.removeAll { $0.id == messageID }
+        persistTranscript()
     }
 }
 

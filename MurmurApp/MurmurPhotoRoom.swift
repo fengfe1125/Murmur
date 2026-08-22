@@ -29,12 +29,12 @@ private struct RoomBubbleShape: Shape {
 
 /// One photo, and the exchange about it.
 ///
-/// The room is not the conversation and does not share its model.  It holds no
-/// queue, no resend offers, no persisted scrollback: what is said here about
-/// this photo is written into Murmur's own memory on the server — which is what
-/// makes it worth saying — while the screen itself is a working surface that
-/// ends when the person leaves it.  Persisting a second history on the device
-/// is a product decision, not an implementation detail; see MurmurApp/README.
+/// The room is not the conversation and does not share its model: no queue, no
+/// resend offers, and `lines` ends with the screen.  What it does share is the
+/// history — the photo and everything said about it are written into the
+/// conversation's scrollback through `MurmurTranscriptRecorder` as they happen,
+/// so leaving the room does not lose the exchange.  The room is where it was
+/// said, not a separate place it lives.
 @MainActor
 final class PhotoRoomModel: ObservableObject {
     enum Phase: Equatable {
@@ -89,6 +89,19 @@ final class PhotoRoomModel: ObservableObject {
     private let uploadTimeoutSeconds: TimeInterval
     private let requestTimeoutSeconds: TimeInterval
     private let bubblePacing: MurmurBubblePacing
+    /// Where the room's rows go.  Weak because the conversation owns the room,
+    /// not the other way round.
+    private weak var transcript: (any MurmurTranscriptRecorder)?
+    /// The scrollback row the photo went into, written once however many times
+    /// 再试一次 is pressed — the retry re-sends the same moment, not a second one.
+    private var photoRowID: String?
+    /// Rows the room is holding open, keyed by the line on screen, so a line
+    /// pulled back out of the room comes back out of the history with it.
+    private var rowForLine: [String: String] = [:]
+    /// Rows whose receipt has not landed yet — as far as this device knows,
+    /// those words never left.  A row leaves this the moment the server takes
+    /// it, which is what keeps `close()` from calling a sent line failed.
+    private var unsentRows: Set<String> = []
     /// The upload's temporary original.  It exists from the moment the photo is
     /// encoded until the reading is over or the room closes, and every one of
     /// those paths deletes it — see `finishOpening` and `close`.
@@ -105,7 +118,8 @@ final class PhotoRoomModel: ObservableObject {
         photoLoader: PhotoLoader = PhotoLoader(),
         uploadTimeoutSeconds: TimeInterval = 300,
         requestTimeoutSeconds: TimeInterval = 45,
-        bubblePacing: MurmurBubblePacing = .human
+        bubblePacing: MurmurBubblePacing = .human,
+        transcript: (any MurmurTranscriptRecorder)? = nil
     ) {
         self.image = image
         self.api = api
@@ -113,6 +127,7 @@ final class PhotoRoomModel: ObservableObject {
         self.uploadTimeoutSeconds = uploadTimeoutSeconds
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.bubblePacing = bubblePacing
+        self.transcript = transcript
     }
 
     // ---- Opening ------------------------------------------------------------
@@ -137,6 +152,10 @@ final class PhotoRoomModel: ObservableObject {
                         intent: .photoReading
                     )
                 }
+                // The photo goes into the history here, while its original is
+                // still on disk to be copied from and before the first bubble
+                // can land — the picture has to sit above the reading of it.
+                await self.recordPhoto(momentID: receipt.momentID, from: photo)
                 try await self.consume(momentID: receipt.momentID)
                 self.finishOpening()
             } catch is CancellationError {
@@ -164,6 +183,7 @@ final class PhotoRoomModel: ObservableObject {
     /// has nothing left to do and goes now, not when the screen closes.
     private func finishOpening() {
         phase = .listening
+        if let photoRowID { transcript?.setDelivery(.answered, for: photoRowID) }
         discardAttachment()
     }
 
@@ -183,6 +203,12 @@ final class PhotoRoomModel: ObservableObject {
         let key = UUID().uuidString
         turn = Task { [weak self] in
             guard let self else { return }
+            // On screen the instant it is said, in the history the same way the
+            // composer does it — one tick when the server takes it.
+            let row = MurmurMessage(author: .you, text: text, delivery: .sending)
+            self.rowForLine[line.id] = row.id
+            self.unsentRows.insert(row.id)
+            await self.transcript?.record(row, photoURL: nil)
             do {
                 let receipt = try await withTimeout(seconds: self.requestTimeoutSeconds) { [api = self.api] in
                     // No photo: the room's photo is already in Murmur's memory
@@ -192,7 +218,11 @@ final class PhotoRoomModel: ObservableObject {
                         note: text, photo: nil, idempotencyKey: key, intent: nil
                     )
                 }
+                self.unsentRows.remove(row.id)
+                self.transcript?.setDelivery(.sent, for: row.id)
                 try await self.consume(momentID: receipt.momentID)
+                self.transcript?.setDelivery(.answered, for: row.id)
+                self.rowForLine.removeValue(forKey: line.id)
                 self.phase = .listening
             } catch is CancellationError {
                 return
@@ -206,6 +236,34 @@ final class PhotoRoomModel: ObservableObject {
         draft = opener
     }
 
+    // ---- The history --------------------------------------------------------
+
+    /// Puts the room's photo into the conversation's scrollback.  Called once
+    /// the server has the moment and while the original is still on disk;
+    /// 再试一次 lands here again and must not write a second copy of the picture.
+    private func recordPhoto(momentID: String, from photo: PhotoAttachment) async {
+        guard !closed, photoRowID == nil, let transcript else { return }
+        // One tick now — the server has the photo.  The second one waits for
+        // the reading, the same as any other turn in the conversation.
+        let row = MurmurMessage(
+            author: .you, text: "", delivery: .sent, momentID: momentID
+        )
+        photoRowID = row.id
+        await transcript.record(row, photoURL: photo.originalURL)
+    }
+
+    private func recordBubble(_ line: Line, momentID: String) async {
+        await transcript?.record(
+            MurmurMessage(
+                id: "\(momentID)-\(line.id)",
+                author: .murmur,
+                text: line.text,
+                momentID: momentID
+            ),
+            photoURL: nil
+        )
+    }
+
     // ---- Leaving ------------------------------------------------------------
 
     /// Closing the room is a terminal path like any other, and it owns the same
@@ -214,6 +272,12 @@ final class PhotoRoomModel: ObservableObject {
         closed = true
         turn?.cancel()
         turn = nil
+        // Leaving mid-send: the receipt never landed, so as far as this device
+        // knows the line never left.  Same call the conversation makes when it
+        // cancels its queue — a row stuck on a spinner forever is the worse lie.
+        for rowID in unsentRows { transcript?.setDelivery(.failed, for: rowID) }
+        unsentRows = []
+        rowForLine = [:]
         discardAttachment()
     }
 
@@ -237,9 +301,11 @@ final class PhotoRoomModel: ObservableObject {
             case let .bubble(id, text):
                 guard !text.isEmpty else { continue }
                 try await pace(for: text, since: lastBubbleAt)
-                lines.append(.init(
+                let line = Line(
                     id: id ?? UUID().uuidString, author: .murmur, text: text
-                ))
+                )
+                lines.append(line)
+                await recordBubble(line, momentID: momentID)
                 lastBubbleAt = Date()
             case let .angles(_, texts):
                 openers = Array(texts.prefix(3))
@@ -289,6 +355,12 @@ final class PhotoRoomModel: ObservableObject {
     private func failLine(_ line: Line, with error: Error) {
         guard !closed else { return }
         lines.removeAll { $0.id == line.id }
+        // The words are going back into the field, so the history must stop
+        // saying they were sent — the send button is the only retry there is.
+        if let rowID = rowForLine.removeValue(forKey: line.id) {
+            unsentRows.remove(rowID)
+            transcript?.withdraw(rowID)
+        }
         if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             draft = line.text
         }

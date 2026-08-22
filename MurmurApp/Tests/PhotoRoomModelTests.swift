@@ -176,6 +176,124 @@ final class PhotoRoomModelTests: XCTestCase {
         model.close()
     }
 
+    // MARK: - The room writes into the conversation's history
+
+    private func makeSession(api: RoomAPI, directory: URL) -> MurmurSessionModel {
+        MurmurSessionModel(
+            api: api,
+            transcriptStore: MurmurTranscriptStore(directory: directory),
+            bubblePacing: .instant
+        )
+    }
+
+    private func scratchDirectory() -> URL {
+        URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    }
+
+    /// The room is where it was said, not a separate place it lives: the photo,
+    /// the reading of it and every line after go into the same scrollback as
+    /// the rest of the conversation, and survive the room closing.
+    func testTheRoomsExchangeJoinsTheConversationsHistory() async throws {
+        let directory = scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let api = RoomAPI()
+        let session = makeSession(api: api, directory: directory)
+        let model = session.makePhotoRoom(image: makeImage())
+
+        model.open()
+        await settle { model.phase == .listening }
+        await settle { session.messages.count == 2 }
+
+        XCTAssertEqual(session.messages.map(\.author), [.you, .murmur])
+        XCTAssertEqual(session.messages[1].text, "这是……刚下过雨？")
+        // The picture itself, not just the words about it.
+        XCTAssertEqual(session.messages[0].text, "")
+        XCTAssertNotNil(session.messages[0].imageFile)
+
+        model.draft = "那天是我搬走前最后一次去"
+        model.send()
+        await settle { session.messages.count == 4 }
+        model.close()
+
+        XCTAssertEqual(
+            session.messages.map(\.text),
+            ["", "这是……刚下过雨？", "那天是我搬走前最后一次去", "那后来呢"]
+        )
+        XCTAssertEqual(session.messages[2].delivery, .answered)
+        // The picture got its second tick when the reading landed.
+        XCTAssertEqual(session.messages[0].delivery, .answered)
+
+        let reloaded = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertEqual(reloaded.map(\.text), session.messages.map(\.text))
+        let name = try XCTUnwrap(reloaded[0].imageFile)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: MurmurTranscriptStore(directory: directory).imageURL(for: name).path
+        ))
+    }
+
+    /// Nothing was said, so the history must not claim it was.  The room puts
+    /// the words back in the field; the scrollback puts the row back too.
+    func testALineThatDidNotLandLeavesNoTraceInTheHistory() async {
+        let directory = scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let api = RoomAPI(mode: .failsSecondSend)
+        let session = makeSession(api: api, directory: directory)
+        let model = session.makePhotoRoom(image: makeImage())
+
+        model.open()
+        await settle { model.phase == .listening }
+        model.draft = "那天是我搬走前最后一次去"
+        model.send()
+        await settle { model.failure != nil }
+        await settle { session.messages.count == 2 }
+
+        XCTAssertEqual(session.messages.map(\.author), [.you, .murmur])
+        XCTAssertFalse(session.messages.contains { $0.text.contains("搬走前") })
+        model.close()
+    }
+
+    /// 再试一次 re-sends the same moment under the same key.  One photo was
+    /// sent, so the history shows one photo.
+    func testRetryingTheOpeningDoesNotWriteThePhotoTwice() async {
+        let directory = scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let api = RoomAPI(mode: .failsFirstUpload)
+        let session = makeSession(api: api, directory: directory)
+        let model = session.makePhotoRoom(image: makeImage())
+
+        model.open()
+        await settle { model.phase == .unopened }
+        // The server never saw it, so there is nothing to write down yet.
+        XCTAssertTrue(session.messages.isEmpty)
+
+        model.open()
+        await settle { model.phase == .listening }
+        await settle { session.messages.count == 2 }
+        XCTAssertEqual(session.messages.filter { $0.author == .you }.count, 1)
+        model.close()
+    }
+
+    /// Leaving while a line is still on the wire: this device never saw a
+    /// receipt, so the row says failed rather than spinning for ever.
+    func testLeavingMidSendDoesNotLeaveTheHistorySpinning() async {
+        let directory = scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let api = RoomAPI(mode: .hangsOnSecondSend)
+        let session = makeSession(api: api, directory: directory)
+        let model = session.makePhotoRoom(image: makeImage())
+
+        model.open()
+        await settle { model.phase == .listening }
+        model.draft = "那天是我搬走前最后一次去"
+        model.send()
+        await settle { session.messages.count == 3 }
+        XCTAssertEqual(session.messages[2].delivery, .sending)
+
+        model.close()
+        XCTAssertEqual(session.messages[2].delivery, .failed)
+    }
+
     private func temporaryUploads() -> [String] {
         let directory = FileManager.default.temporaryDirectory
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
@@ -184,7 +302,9 @@ final class PhotoRoomModelTests: XCTestCase {
 }
 
 private actor RoomAPI: MurmurAPIClient {
-    enum Mode { case normal, failsFirstUpload, failsSecondSend, neverAnswers }
+    enum Mode {
+        case normal, failsFirstUpload, failsSecondSend, neverAnswers, hangsOnSecondSend
+    }
 
     struct Call {
         let note: String?
@@ -221,6 +341,9 @@ private actor RoomAPI: MurmurAPIClient {
             throw MurmurFailure(code: "network_error", message: "没连上。", retryable: true)
         }
         if mode == .neverAnswers { try await Task.sleep(for: .seconds(30)) }
+        if mode == .hangsOnSecondSend, calls.count == 2 {
+            try await Task.sleep(for: .seconds(30))
+        }
         moments += 1
         return .init(momentID: "moment-\(moments)", status: "queued")
     }

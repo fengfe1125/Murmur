@@ -596,9 +596,9 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(app.buttons["opener-0"].exists)
     }
 
-    /// Saying something closes the doors and gets an answer back — and it
-    /// stays in the room: the conversation behind it never sees a word of it.
-    func testSayingSomethingInTheRoomAnswersAndClosesTheOpeners() throws {
+    /// Saying something closes the doors and gets an answer back — and the
+    /// exchange is still there in the conversation after the room is gone.
+    func testSayingSomethingInTheRoomAnswersAndJoinsTheConversation() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday"])
         app.buttons["onthisday-button"].tap()
         openPhotoRoom(in: app)
@@ -621,10 +621,12 @@ final class MurmurUITests: XCTestCase {
             evaluatedWith: app.buttons["close-photo-room"]
         )
         wait(for: [roomGone], timeout: 5)
-        // The conversation is still on its empty state, which is the claim:
-        // a room that had leaked into the transcript would have put a row
-        // there and taken this line off the screen.
-        XCTAssertTrue(app.staticTexts["发来眼前的一刻。"].waitForExistence(timeout: 5))
+        // The room was where it was said, not a separate place it lives: the
+        // line and the answer to it are in the conversation now, and the empty
+        // state is gone with them.
+        XCTAssertTrue(line("那天的天气", in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(line("这一刻，我收到了。", in: app).exists)
+        XCTAssertFalse(app.staticTexts["发来眼前的一刻。"].exists)
     }
 
     /// A reading that never lands says why and offers the same upload again,
