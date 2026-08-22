@@ -7,7 +7,9 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-15
+    # macos-15 still selects an Xcode without -downloadComponent, and ships no
+    # iOS 26 simulators.  当年今日 needs both, so the job runs on macos-26.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       # 当年今日 introduced the first Metal shader and the first PhotoKit
@@ -15,7 +17,9 @@ jobs:
       # which is why this workflow exists.  The Metal toolchain is a separate
       # component on Xcode 26 and must be fetched explicitly.
       - name: Download Metal toolchain
-        run: xcodebuild -downloadComponent MetalToolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain
       - name: Build
         run: >-
           xcodebuild -project MurmurApp.xcodeproj -scheme Murmur
