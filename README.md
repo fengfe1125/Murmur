@@ -386,12 +386,20 @@ sparse 规则，旧全量检出的 VPS 在下次更新时会自动把 App 目录
 
 ```bash
 .venv/bin/python tests/test_web.py     # 单个：看板逻辑（脱敏/去重/窗口合并）
-for f in tests/test_*.py; do .venv/bin/python "$f"; done   # 全部
+# 全部。别写成裸循环——那样只有最后一个文件的退出码算数，中间挂了看不出来
+for f in tests/test_*.py; do .venv/bin/python "$f" || { echo "FAILED: $f"; break; }; done
 ```
 
 每个脚本结尾打一行 `通过 N，失败 M`，退出码非零就是有失败。
+注意 `python -m unittest discover tests` **跑不了**：一半测试是脚本式的，
+import 的那一刻就把自己跑完再 `sys.exit()`，discover 会把它们整批报成
+import error。逐个当脚本跑是唯一对两种风格都成立的方式。
 改 `Config` 加字段时，`tests/_helpers.py` 会提醒补测试默认值，不用手查。
-lint 用 ruff（`uv pip install -e '.[dev]'` 后 `ruff check murmur tests`）。
+lint 用 ruff（`uv pip install -e '.[dev]'` 后 `ruff check murmur tests scripts`）。
+
+CI 按三摊代码分开：`.github/workflows/server.yml` 在 Python 3.11（pyproject
+声明的下限）和 3.14（VPS 实际在跑的）上跑 lint + 全量测试，外加一道
+`bash -n`；`ios.yml` 只在 iOS 目录变了才起 Xcode。安卓还没有工作流。
 
 ## 隐私
 
