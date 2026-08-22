@@ -78,6 +78,11 @@ struct MurmurShell: View {
         content()
             .opacity(isOn ? 1 : 0)
             .allowsHitTesting(isOn)
+            // Both, and in this order.  `accessibilityHidden` alone left every
+            // control of every off-screen tab in the tree — a VoiceOver reader
+            // on 聊天 could swipe straight into 设置's switches, and XCUITest
+            // could see them too.
+            .accessibilityElement(children: isOn ? .contain : .ignore)
             .accessibilityHidden(!isOn)
             .zIndex(isOn ? 1 : 0)
     }
@@ -141,7 +146,8 @@ struct MurmurTabBar: View {
         .murmurGlass(radius: MurmurTheme.tabBarCorner)
         .padding(.horizontal, 16)
         .padding(.bottom, 6)
-        .accessibilityIdentifier("murmur-tab-bar")
+        // Deliberately no identifier on the bar itself: one here overrides
+        // every child's, and all three stops came back as "murmur-tab-bar".
     }
 }
 
