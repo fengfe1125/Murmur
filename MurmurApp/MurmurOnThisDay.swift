@@ -301,8 +301,6 @@ final class OnThisDayModel: ObservableObject {
 
     /// The entry disc hides itself under .limited: with a hand-picked slice
     /// of the library the feature cannot tell the truth, so it does not knock.
-    var entryVisible: Bool { authorization != .limited }
-
     /// How many photos stay queued behind the one on screen.  The shelf tops
     /// itself up from that far out so that 下滑 never waits on a fetch.
     private static let reserve = 3
@@ -507,6 +505,9 @@ enum OnThisDayLibraryResolver {
 /// motion, so the two live in one cover and cross-fade under the photo.
 struct OnThisDayFlowView: View {
     @ObservedObject var model: OnThisDayModel
+    /// False when the browser is a tab rather than something presented over
+    /// the conversation.  The room inside it keeps its own way back either way.
+    var showsClose = true
     let makeRoom: (UIImage) -> PhotoRoomModel
     @Environment(\.dismiss) private var dismiss
     @State private var room: PhotoRoomModel?
@@ -517,7 +518,7 @@ struct OnThisDayFlowView: View {
                 PhotoRoomView(model: room) { dismiss() }
                     .transition(.opacity)
             } else {
-                OnThisDayView(model: model) { image in
+                OnThisDayView(showsClose: showsClose, model: model) { image in
                     withAnimation(.easeInOut(duration: 0.25)) {
                         room = makeRoom(image)
                     }
@@ -537,6 +538,9 @@ struct OnThisDayFlowView: View {
 /// gesture with an explicit direction-and-distance gate, attached as a
 /// high-priority gesture so nothing else in the tree can outbid it.
 struct OnThisDayView: View {
+    /// A cover has somewhere to go when the cross is pressed; a tab does not.
+    var showsClose = true
+
     @ObservedObject var model: OnThisDayModel
     let onSend: (UIImage) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -603,8 +607,9 @@ struct OnThisDayView: View {
                     UIApplication.shared.open(url)
                 }
             case .limited:
-                // Reached only if access was reduced while the sheet was open
-                // — the entry disc hides itself instead of arriving here.
+                // The ordinary path now.  当年今日 is a tab, and a tab cannot
+                // quietly absent itself the way the old disc did — so limited
+                // access says what it is instead of the day looking empty.
                 gate(
                     title: "只能看到你选的那几张",
                     message: "当年今日需要翻整个相册才找得到那一天。在系统设置里把权限改成「所有照片」后再来。",
@@ -619,6 +624,7 @@ struct OnThisDayView: View {
             }
         }
         .overlay(alignment: .topLeading) {
+            if showsClose {
             Button {
                 // The cancel happens here, in the same event as the tap.
                 // Not in .onDisappear: measured on a Simulator, that arrives
@@ -641,6 +647,7 @@ struct OnThisDayView: View {
             .padding(.top, 10)
             .accessibilityLabel("关闭当年今日")
             .accessibilityIdentifier("close-onthisday")
+            }
         }
         .task {
             await model.refreshAuthorization()
@@ -658,7 +665,7 @@ struct OnThisDayView: View {
     @ViewBuilder
     private var content: some View {
         if model.isLoading {
-            ProgressView().tint(MurmurTheme.olive)
+            ProgressView().tint(MurmurTheme.accentInk)
                 .accessibilityIdentifier("onthisday-loading")
         } else if model.candidates.isEmpty {
             // Full access, and the library itself is empty — the one honest
@@ -728,7 +735,7 @@ struct OnThisDayView: View {
                     .resizable()
                     .scaledToFit()
             } else {
-                ProgressView().tint(MurmurTheme.olive)
+                ProgressView().tint(MurmurTheme.accentInk)
             }
         }
         .aspectRatio(3 / 4, contentMode: .fit)

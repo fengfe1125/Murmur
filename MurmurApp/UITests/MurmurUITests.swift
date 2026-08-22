@@ -241,11 +241,10 @@ final class MurmurUITests: XCTestCase {
     func testSettingsExposesNotificationToggleAndFrequency() throws {
         continueAfterFailure = false
         let app = launchApp()
-        let settings = app.descendants(matching: .any)["settings-button"].firstMatch
+        let settings = app.buttons["tab-me"]
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
         guard UIDevice.current.userInterfaceIdiom == .phone else { return }
         settings.tap()
-        XCTAssertTrue(app.buttons["完成"].waitForExistence(timeout: 5))
         XCTAssertTrue(
             app.staticTexts["允许通知"].waitForExistence(timeout: 3)
                 || app.switches["允许通知"].waitForExistence(timeout: 2)
@@ -501,7 +500,7 @@ final class MurmurUITests: XCTestCase {
     /// these are the only honest checks.
     func testOnThisDayAsksInContextBeforeReadingTheLibrary() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday-ask"])
-        let entry = app.buttons["onthisday-button"]
+        let entry = app.buttons["tab-onThisDay"]
         XCTAssertTrue(entry.waitForExistence(timeout: 5))
         entry.tap()
         XCTAssertTrue(app.buttons["onthisday-allow"].waitForExistence(timeout: 5))
@@ -511,18 +510,20 @@ final class MurmurUITests: XCTestCase {
 
     func testOnThisDayDeniedStateOffersSystemSettings() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday-denied"])
-        let entry = app.buttons["onthisday-button"]
+        let entry = app.buttons["tab-onThisDay"]
         XCTAssertTrue(entry.waitForExistence(timeout: 5))
         entry.tap()
         XCTAssertTrue(app.buttons["onthisday-open-settings"].waitForExistence(timeout: 5))
     }
 
-    /// Limited access is a designed absence, not an error screen: the entry
-    /// hides rather than implying the day was empty.
-    func testOnThisDayHidesItsEntryUnderLimitedAccess() throws {
+    /// A tab cannot absent itself the way the old disc did, so limited access
+    /// says what it is rather than letting the day look empty.
+    func testLimitedAccessSaysSoInsteadOfLookingEmpty() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday-limited"])
-        XCTAssertTrue(app.buttons["settings-button"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["onthisday-button"].exists)
+        XCTAssertTrue(app.buttons["tab-onThisDay"].waitForExistence(timeout: 5))
+        app.buttons["tab-onThisDay"].tap()
+        XCTAssertTrue(app.buttons["onthisday-open-settings"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["只能看到你选的那几张"].exists)
     }
 
     /// A blank day is not a dead end any more: with nothing from this day in
@@ -530,7 +531,7 @@ final class MurmurUITests: XCTestCase {
     /// rather than dressing an ordinary Tuesday up as an anniversary.
     func testBlankDayFallsBackToTheAlbum() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday-empty"])
-        app.buttons["onthisday-button"].tap()
+        app.buttons["tab-onThisDay"].tap()
         XCTAssertTrue(onThisDayPhoto(in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["相册里翻到的"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["相册里还没有照片。"].exists)
@@ -539,7 +540,7 @@ final class MurmurUITests: XCTestCase {
     /// The one honest dead end left: full access, and nothing anywhere.
     func testAnEmptyLibrarySaysSo() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday-barren"])
-        app.buttons["onthisday-button"].tap()
+        app.buttons["tab-onThisDay"].tap()
         XCTAssertTrue(app.staticTexts["相册里还没有照片。"].waitForExistence(timeout: 5))
     }
 
@@ -547,7 +548,7 @@ final class MurmurUITests: XCTestCase {
     /// instead of looping back to the first card.
     func testTheShelfCarriesOnPastTheDaysOwnPhotos() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday"])
-        app.buttons["onthisday-button"].tap()
+        app.buttons["tab-onThisDay"].tap()
         let photo = readyOnThisDayPhoto(in: app)
         XCTAssertTrue(app.staticTexts["去年的今天"].waitForExistence(timeout: 5))
 
@@ -562,7 +563,7 @@ final class MurmurUITests: XCTestCase {
     /// vertical — which the stubbed shelf makes repeatable.
     func testOnThisDaySwipesBetweenYearsAndOpensTheRoom() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday"])
-        app.buttons["onthisday-button"].tap()
+        app.buttons["tab-onThisDay"].tap()
         let photo = readyOnThisDayPhoto(in: app)
         XCTAssertTrue(app.staticTexts["去年的今天"].waitForExistence(timeout: 5))
 
@@ -581,7 +582,7 @@ final class MurmurUITests: XCTestCase {
     /// in the field rather than sending it — the person still decides.
     func testThePhotoRoomShowsTheReadingAndItsThreeOpeners() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday"])
-        app.buttons["onthisday-button"].tap()
+        app.buttons["tab-onThisDay"].tap()
         openPhotoRoom(in: app)
 
         XCTAssertTrue(line("这是……刚下过雨？", in: app).waitForExistence(timeout: 10))
@@ -600,7 +601,7 @@ final class MurmurUITests: XCTestCase {
     /// exchange is still there in the conversation after the room is gone.
     func testSayingSomethingInTheRoomAnswersAndJoinsTheConversation() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday"])
-        app.buttons["onthisday-button"].tap()
+        app.buttons["tab-onThisDay"].tap()
         openPhotoRoom(in: app)
 
         // Through an opener rather than the keyboard: it is the way in the
@@ -635,7 +636,7 @@ final class MurmurUITests: XCTestCase {
         let app = launchApp(arguments: [
             "--murmur-stub-onthisday", "--murmur-stub-reading-fails"
         ])
-        app.buttons["onthisday-button"].tap()
+        app.buttons["tab-onThisDay"].tap()
         openPhotoRoom(in: app)
 
         XCTAssertTrue(app.buttons["retry-photo-room"].waitForExistence(timeout: 10))
@@ -646,16 +647,16 @@ final class MurmurUITests: XCTestCase {
     /// Closing the sheet while the photo is dissolving calls the send off.
     /// The dissolve runs for most of a second and the close button stays live
     /// for all of it, so the wait has to be cancellable: a moment created
-    /// behind someone who just tapped 关闭 is the one failure this feature
+    /// behind someone who just left the tab is the one failure this feature
     /// cannot have.  `--murmur-slow-dissolve` widens the window so the tap is
-    /// not racing the animation.
-    func testClosingDuringTheDissolveCallsTheSendOff() throws {
+    /// not racing the animation.  Leaving is a tab switch now, not a cross.
+    func testLeavingDuringTheDissolveCallsTheSendOff() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday", "--murmur-slow-dissolve"])
-        app.buttons["onthisday-button"].tap()
+        app.buttons["tab-onThisDay"].tap()
         let photo = readyOnThisDayPhoto(in: app)
 
         photo.swipeUp()
-        app.buttons["close-onthisday"].tap()
+        app.buttons["tab-chat"].tap()
 
         // Long enough to outlast the widened dissolve: if the wait still fired
         // its send, the room would have opened inside this window.

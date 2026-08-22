@@ -32,7 +32,7 @@ private struct MurmurRootView: View {
     @State private var showNotificationEducation = false
 
     var body: some View {
-        MurmurChatView(model: session)
+        MurmurShell(model: session)
             .task {
                 await session.bootstrap()
                 await notifications.refreshAuthorizationStatus()

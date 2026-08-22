@@ -255,7 +255,7 @@ private struct MessageRow: View {
                         if !message.text.isEmpty {
                             Text(message.text)
                                 .font(MurmurTheme.body(.body))
-                                .foregroundStyle(isOutgoing ? Color.white : MurmurTheme.ink)
+                                .foregroundStyle(isOutgoing ? MurmurTheme.onAccent : MurmurTheme.ink)
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(.horizontal, 14)

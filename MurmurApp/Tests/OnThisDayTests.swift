@@ -30,22 +30,6 @@ final class OnThisDayAuthorizationTests: XCTestCase {
         XCTAssertEqual(OnThisDayAuthorization(.denied), .denied)
         XCTAssertEqual(OnThisDayAuthorization(.restricted), .denied)
     }
-
-    /// Limited access is the one status that hides the entry rather than
-    /// explaining itself from behind it: with a hand-picked slice of the
-    /// library the feature cannot tell the truth about the day.
-    func testOnlyLimitedAccessHidesTheEntry() async {
-        for status in [OnThisDayAuthorization.notDetermined, .denied, .authorized] {
-            let model = await OnThisDayModel(library: FixedAuthorizationLibrary(status))
-            await model.refreshAuthorization()
-            let visible = await model.entryVisible
-            XCTAssertTrue(visible, "\(status) should keep the disc in the chrome")
-        }
-        let limited = await OnThisDayModel(library: FixedAuthorizationLibrary(.limited))
-        await limited.refreshAuthorization()
-        let visible = await limited.entryVisible
-        XCTAssertFalse(visible)
-    }
 }
 
 private struct FixedAuthorizationLibrary: OnThisDayLibrary {
