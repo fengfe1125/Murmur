@@ -11,7 +11,8 @@ struct MurmurApp: App {
     init() {
         _session = StateObject(wrappedValue: MurmurSessionModel(
             api: MurmurEnvironment.makeAPIClient(),
-            transcriptStore: MurmurEnvironment.makeTranscriptStore()
+            transcriptStore: MurmurEnvironment.makeTranscriptStore(),
+            archive: MurmurEnvironment.makeArchive()
         ))
         _notifications = StateObject(wrappedValue: .shared)
     }

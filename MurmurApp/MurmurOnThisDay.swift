@@ -505,9 +505,6 @@ enum OnThisDayLibraryResolver {
 /// motion, so the two live in one cover and cross-fade under the photo.
 struct OnThisDayFlowView: View {
     @ObservedObject var model: OnThisDayModel
-    /// False when the browser is a tab rather than something presented over
-    /// the conversation.  The room inside it keeps its own way back either way.
-    var showsClose = true
     let makeRoom: (UIImage) -> PhotoRoomModel
     @Environment(\.dismiss) private var dismiss
     @State private var room: PhotoRoomModel?
@@ -518,7 +515,7 @@ struct OnThisDayFlowView: View {
                 PhotoRoomView(model: room) { dismiss() }
                     .transition(.opacity)
             } else {
-                OnThisDayView(showsClose: showsClose, model: model) { image in
+                OnThisDayView(model: model) { image in
                     withAnimation(.easeInOut(duration: 0.25)) {
                         room = makeRoom(image)
                     }
@@ -538,8 +535,6 @@ struct OnThisDayFlowView: View {
 /// gesture with an explicit direction-and-distance gate, attached as a
 /// high-priority gesture so nothing else in the tree can outbid it.
 struct OnThisDayView: View {
-    /// A cover has somewhere to go when the cross is pressed; a tab does not.
-    var showsClose = true
 
     @ObservedObject var model: OnThisDayModel
     let onSend: (UIImage) -> Void
@@ -624,7 +619,6 @@ struct OnThisDayView: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            if showsClose {
             Button {
                 // The cancel happens here, in the same event as the tap.
                 // Not in .onDisappear: measured on a Simulator, that arrives
@@ -647,7 +641,6 @@ struct OnThisDayView: View {
             .padding(.top, 10)
             .accessibilityLabel("关闭当年今日")
             .accessibilityIdentifier("close-onthisday")
-            }
         }
         .task {
             await model.refreshAuthorization()

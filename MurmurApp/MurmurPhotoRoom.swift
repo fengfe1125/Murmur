@@ -30,11 +30,11 @@ private struct RoomBubbleShape: Shape {
 /// One photo, and the exchange about it.
 ///
 /// The room is not the conversation and does not share its model: no queue, no
-/// resend offers, and `lines` ends with the screen.  What it does share is the
-/// history — the photo and everything said about it are written into the
-/// conversation's scrollback through `MurmurTranscriptRecorder` as they happen,
-/// so leaving the room does not lose the exchange.  The room is where it was
-/// said, not a separate place it lives.
+/// resend offers, and `lines` ends with the screen.  What it does keep is the
+/// exchange — the photo and everything said about it are written into 当年今日's
+/// own archive through `MurmurRoomRecorder` as they happen, filed under the day
+/// they happened on.  The conversation never sees any of it; the calendar is
+/// where you find it again.
 @MainActor
 final class PhotoRoomModel: ObservableObject {
     enum Phase: Equatable {
@@ -89,9 +89,9 @@ final class PhotoRoomModel: ObservableObject {
     private let uploadTimeoutSeconds: TimeInterval
     private let requestTimeoutSeconds: TimeInterval
     private let bubblePacing: MurmurBubblePacing
-    /// Where the room's rows go.  Weak because the conversation owns the room,
-    /// not the other way round.
-    private weak var transcript: (any MurmurTranscriptRecorder)?
+    /// Where the room's rows go.  Weak because the session owns both the room
+    /// and the archive, not the other way round.
+    private weak var transcript: (any MurmurRoomRecorder)?
     /// The scrollback row the photo went into, written once however many times
     /// 再试一次 is pressed — the retry re-sends the same moment, not a second one.
     private var photoRowID: String?
@@ -119,7 +119,7 @@ final class PhotoRoomModel: ObservableObject {
         uploadTimeoutSeconds: TimeInterval = 300,
         requestTimeoutSeconds: TimeInterval = 45,
         bubblePacing: MurmurBubblePacing = .human,
-        transcript: (any MurmurTranscriptRecorder)? = nil
+        transcript: (any MurmurRoomRecorder)? = nil
     ) {
         self.image = image
         self.api = api
@@ -238,7 +238,7 @@ final class PhotoRoomModel: ObservableObject {
 
     // ---- The history --------------------------------------------------------
 
-    /// Puts the room's photo into the conversation's scrollback.  Called once
+    /// Puts the room's photo into 当年今日's archive.  Called once
     /// the server has the moment and while the original is still on disk;
     /// 再试一次 lands here again and must not write a second copy of the picture.
     private func recordPhoto(momentID: String, from photo: PhotoAttachment) async {
@@ -355,7 +355,7 @@ final class PhotoRoomModel: ObservableObject {
     private func failLine(_ line: Line, with error: Error) {
         guard !closed else { return }
         lines.removeAll { $0.id == line.id }
-        // The words are going back into the field, so the history must stop
+        // The words are going back into the field, so the archive must stop
         // saying they were sent — the send button is the only retry there is.
         if let rowID = rowForLine.removeValue(forKey: line.id) {
             unsentRows.remove(rowID)

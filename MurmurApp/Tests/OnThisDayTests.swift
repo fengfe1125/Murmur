@@ -152,3 +152,92 @@ private extension OnThisDayModel {
         for _ in 0..<40 { await Task.yield() }
     }
 }
+
+/// 当年今日's archive, away from the screen: the day a room happened on is
+/// what the calendar is built from, so the grouping has to be right in the
+/// user's own calendar rather than UTC.
+@MainActor
+final class MurmurArchiveTests: XCTestCase {
+    private func makeArchive() -> (MurmurArchive, URL) {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        return (MurmurArchive(store: MurmurTranscriptStore(directory: directory)), directory)
+    }
+
+    private func writeTestJPEG(size: CGSize, name: String) throws -> URL {
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let image = renderer.image { context in
+            UIColor.systemTeal.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("murmur-archive-\(name)-\(UUID().uuidString).jpg")
+        try XCTUnwrap(image.jpegData(compressionQuality: 0.8)).write(to: url)
+        return url
+    }
+
+    private func day(_ text: String) -> Date {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = .murmur
+        formatter.timeZone = Calendar.murmur.timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter.date(from: text)!
+    }
+
+    func testRowsAreFiledUnderTheDayTheyHappenedOn() async throws {
+        let (archive, directory) = makeArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // Two rooms on one day and one late the next, including a row at a
+        // minute either side of midnight — the case a UTC-based grouping puts
+        // on the wrong square.
+        for (text, when) in [
+            ("第一张", "2026-08-20 09:15"),
+            ("说了一句", "2026-08-20 09:16"),
+            ("第二张", "2026-08-20 23:59"),
+            ("隔天那张", "2026-08-21 00:01"),
+        ] {
+            await archive.record(
+                .init(author: .you, text: text, sentAt: day(when)), photoURL: nil
+            )
+        }
+
+        XCTAssertEqual(archive.daysWithRooms.count, 2)
+        XCTAssertEqual(archive.rows(on: day("2026-08-20 12:00")).map(\.text),
+                       ["第一张", "说了一句", "第二张"])
+        XCTAssertEqual(archive.rows(on: day("2026-08-21 12:00")).map(\.text), ["隔天那张"])
+        XCTAssertEqual(archive.recentDays().first, Calendar.murmur.startOfDay(for: day("2026-08-21 00:01")))
+    }
+
+    /// The count under a day is photos, not rows: the talk about a picture is
+    /// not another picture.
+    func testTheDayCountIsPhotosRatherThanRows() async throws {
+        let (archive, directory) = makeArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try writeTestJPEG(size: CGSize(width: 40, height: 40), name: "archive")
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        await archive.record(.init(author: .you, text: "", sentAt: day("2026-08-20 09:00")), photoURL: source)
+        await archive.record(.init(author: .murmur, text: "这是哪儿", sentAt: day("2026-08-20 09:01")), photoURL: nil)
+        await archive.record(.init(author: .you, text: "老地方", sentAt: day("2026-08-20 09:02")), photoURL: nil)
+
+        XCTAssertEqual(archive.rows(on: day("2026-08-20 12:00")).count, 3)
+        XCTAssertEqual(archive.photoCount(on: day("2026-08-20 12:00")), 1)
+    }
+
+    /// A row with neither words nor a picture would be an empty bubble on the
+    /// day screen; the copy failing is not a reason to put one there.
+    func testAnEmptyRowIsNotFiled() async {
+        let (archive, directory) = makeArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await archive.record(.init(author: .you, text: ""), photoURL: nil)
+        XCTAssertTrue(archive.rows.isEmpty)
+    }
+
+    /// Murmur is not localised, so the grid is pinned rather than following the
+    /// device: Monday first, whatever phone this is.
+    func testTheCalendarStartsOnMonday() {
+        XCTAssertEqual(Calendar.murmur.firstWeekday, 2)
+    }
+}

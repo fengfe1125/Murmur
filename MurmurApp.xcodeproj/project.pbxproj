@@ -30,6 +30,8 @@
 		A100000000000000000000E1 /* MurmurKeyboardInset.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000E2 /* MurmurKeyboardInset.swift */; };
 		A100000000000000000000F1 /* MurmurOnThisDay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F2 /* MurmurOnThisDay.swift */; };
 		A10000000000000000000201 /* MurmurShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000202 /* MurmurShell.swift */; };
+		A10000000000000000000205 /* MurmurArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000206 /* MurmurArchive.swift */; };
+		A10000000000000000000207 /* MurmurArchiveViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000208 /* MurmurArchiveViews.swift */; };
 		A10000000000000000000203 /* OnThisDayTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000204 /* OnThisDayTabView.swift */; };
 		A100000000000000000000F3 /* OnThisDay.metal in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F4 /* OnThisDay.metal */; };
 		A100000000000000000000F5 /* MurmurPhotoRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* MurmurPhotoRoom.swift */; };
@@ -85,6 +87,8 @@
 		A100000000000000000000E2 /* MurmurKeyboardInset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurKeyboardInset.swift; sourceTree = "<group>"; };
 		A100000000000000000000F2 /* MurmurOnThisDay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurOnThisDay.swift; sourceTree = "<group>"; };
 		A10000000000000000000202 /* MurmurShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurShell.swift; sourceTree = "<group>"; };
+		A10000000000000000000206 /* MurmurArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurArchive.swift; sourceTree = "<group>"; };
+		A10000000000000000000208 /* MurmurArchiveViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurArchiveViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000204 /* OnThisDayTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnThisDayTabView.swift; sourceTree = "<group>"; };
 		A100000000000000000000F4 /* OnThisDay.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = OnThisDay.metal; sourceTree = "<group>"; };
 		A100000000000000000000F6 /* MurmurPhotoRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurPhotoRoom.swift; sourceTree = "<group>"; };
@@ -139,6 +143,8 @@
 				A100000000000000000000B2 /* MurmurPhotoView.swift */,
 				A100000000000000000000F2 /* MurmurOnThisDay.swift */,
 				A10000000000000000000202 /* MurmurShell.swift */,
+				A10000000000000000000206 /* MurmurArchive.swift */,
+				A10000000000000000000208 /* MurmurArchiveViews.swift */,
 				A10000000000000000000204 /* OnThisDayTabView.swift */,
 				A100000000000000000000F6 /* MurmurPhotoRoom.swift */,
 				A100000000000000000000F4 /* OnThisDay.metal */,
@@ -340,6 +346,8 @@
 				A100000000000000000000B1 /* MurmurPhotoView.swift in Sources */,
 				A100000000000000000000F1 /* MurmurOnThisDay.swift in Sources */,
 				A10000000000000000000201 /* MurmurShell.swift in Sources */,
+				A10000000000000000000205 /* MurmurArchive.swift in Sources */,
+				A10000000000000000000207 /* MurmurArchiveViews.swift in Sources */,
 				A10000000000000000000203 /* OnThisDayTabView.swift in Sources */,
 				A100000000000000000000F5 /* MurmurPhotoRoom.swift in Sources */,
 				A100000000000000000000F3 /* OnThisDay.metal in Sources */,

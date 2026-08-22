@@ -838,6 +838,7 @@ struct MurmurSettingsView: View {
     @State private var deviceToRemove: MurmurDevice?
     @State private var connectingPush = false
     @State private var confirmClearTranscript = false
+    @State private var confirmClearArchive = false
 
     var body: some View {
         NavigationStack {
@@ -956,6 +957,18 @@ struct MurmurSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                // Two histories, two switches.  当年今日's archive is not part
+                // of the conversation and must not be swept away with it.
+                Section("当年今日") {
+                    LabeledContent("留下的日子", value: "\(model.archive.daysWithRooms.count) 天")
+                    Button("清空当年今日的记录", role: .destructive) { confirmClearArchive = true }
+                        .disabled(model.archive.rows.isEmpty)
+                        .accessibilityIdentifier("clear-archive")
+                    Text("日历上的每一天，连同那天聊过的照片，都只存在这台设备上。清空之后日历会空掉，服务端的记忆不受影响。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section {
                     Button("删除账号与全部记忆", role: .destructive) { confirmDelete = true }
                 } footer: {
@@ -994,6 +1007,14 @@ struct MurmurSettingsView: View {
                 }
             } message: {
                 Text("这台设备上的对话和其中的照片会被删除，服务端的记忆不受影响。")
+            }
+            .alert("清空当年今日的记录？", isPresented: $confirmClearArchive) {
+                Button("取消", role: .cancel) {}
+                Button("确认清空", role: .destructive) {
+                    Task { await model.archive.clear() }
+                }
+            } message: {
+                Text("日历会空掉，那些天聊过的照片也会从这台设备上删除。服务端的记忆不受影响。")
             }
             .alert("重置本机安全身份？", isPresented: $confirmReconnect) {
                 Button("取消", role: .cancel) {}
