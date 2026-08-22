@@ -320,15 +320,24 @@ murmur/
   cli.py       app-api / app-worker / 本地诊断 / 测试 Bot / web
 ```
 
-**GitHub 仓库同时装着两摊代码，靠 git sparse-checkout 隔离：**
+**一条主干 `main`，三摊代码靠目录分家，sparse-checkout 保证服务器只拿到自己那份：**
 
-- **服务端（会推到 VPS）**：`murmur/`、`deploy/`、`tests/` 和根目录文件
-  （`pyproject.toml` 等）。VPS 用 cone 模式 sparse-checkout 只拉这些。
-- **App（不进 VPS）**：`MurmurApp/`、`MurmurApp.xcodeproj/`、`android/`，
-  只在开发机上构建。`brand/`、`docs/`、`scripts/` 同样留在开发机。
+- **服务端（会推到 VPS）**：`murmur/`、`deploy/`、`tests/`、`scripts/` 和根目录
+  文件（`pyproject.toml` 等）。VPS 用 cone 模式 sparse-checkout 只拉这四个目录。
+  `scripts/` 在列不是顺手带的：`tests/test_channel_gate.py` 和环境清洗测试要读
+  它里面的脚本，不给就跑不完更新自带的测试步骤，更新会回滚。
+- **iOS（不进 VPS）**：`MurmurApp/`、`MurmurApp.xcodeproj/`。
+- **安卓（不进 VPS）**：`android/`。
+- `brand/`、`docs/` 同样只留在开发机。
 
 `deploy/murmur-update` 和 `scripts/link-vps-to-github.sh` 都会强制应用这套
 sparse 规则，旧全量检出的 VPS 在下次更新时会自动把 App 目录从磁盘清掉。
+
+**分支只有 `main` 一条。** 平台之间靠上面的目录边界区分，不靠分支——服务端契约
+是三端共用的，拆成三条长期分支只会让同一个 API 改动要合三次。`murmur-update`
+默认就拉 `main`（`MURMUR_GIT_BRANCH` 可以覆盖，但正常情况下不该设）。曾经有过
+一条和 `main` 逐字相同的 `vps` 分支，它唯一的作用是让「线上到底跑的哪条」变含糊，
+已经删掉。
 
 参考的开源项目见 [CREDITS.md](CREDITS.md)。
 

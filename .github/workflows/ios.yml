@@ -3,7 +3,13 @@ name: iOS
 on:
   push:
     branches: [main]
+  # iOS 的活只在 iOS 目录变了才跑。服务端和安卓改动走各自的边界，
+  # 不该在这里排队等一个 5 分钟的 Xcode 构建。
   pull_request:
+    paths:
+      - 'MurmurApp/**'
+      - 'MurmurApp.xcodeproj/**'
+      - '.github/workflows/ios.yml'
 
 jobs:
   build-and-test:
