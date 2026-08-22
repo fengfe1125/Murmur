@@ -99,9 +99,17 @@ struct MurmurSendFailure: Equatable, Sendable {
     let message: String
     let canResend: Bool
 
-    /// A row that was still sending when the app was last killed.  The verdict
-    /// survived in the transcript; the reason and the submission did not.
-    static let interrupted = MurmurSendFailure(message: "这条没有发出去。", canResend: false)
+    /// A row the app has no live reason for: still sending when the process was
+    /// last killed, or failed in a session that has since ended.  The verdict
+    /// survived in the transcript; the wording did not.
+    ///
+    /// The offer stands as long as the row still has something to send.  The
+    /// transcript keeps the words and its own copy of the photo, so "the app
+    /// was restarted" is no longer a reason to refuse — a screen of failed
+    /// messages with no way to send any of them was the worst of the paths.
+    static func interrupted(canResend: Bool) -> MurmurSendFailure {
+        MurmurSendFailure(message: "这条没有发出去。", canResend: canResend)
+    }
 }
 
 /// How fast Murmur's bubbles are allowed to land.

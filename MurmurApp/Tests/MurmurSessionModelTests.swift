@@ -30,6 +30,41 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertTrue(cleared.isEmpty)
     }
 
+    /// After a relaunch the app has forgotten why a row failed, but the row
+    /// itself still holds everything a send needs.  Before this, a restart
+    /// turned every failed message into a mark that could not be pressed.
+    func testAFailedRowCanStillBeSentAfterARelaunch() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        await store.save([
+            .init(author: .you, text: "这条没发出去", delivery: .failed,
+                  idempotencyKey: "key-from-last-launch"),
+        ])
+
+        let api = FakeMurmurAPIClient()
+        let model = MurmurSessionModel(
+            api: api,
+            transcriptStore: MurmurTranscriptStore(directory: directory),
+            bubblePacing: .instant
+        )
+        await model.bootstrap()
+        await model.loadTranscript()
+        let row = try XCTUnwrap(model.messages.first)
+        // Nothing in memory explains the failure — this is the state a relaunch
+        // leaves behind, and the one that used to be a dead end.
+        XCTAssertNil(model.sendFailures[row.id])
+
+        model.resend(row.id)
+        try await waitUntil { model.messages.contains { $0.author == .murmur } }
+
+        XCTAssertEqual(model.messages[0].delivery, .answered)
+        // The same moment, not a second one: the key came off the row.
+        let keys = await api.idempotencyKeys
+        XCTAssertEqual(keys, ["key-from-last-launch"])
+    }
+
     func testAdoptedPhotoSurvivesASaveThatDoesNotNameItYet() async throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

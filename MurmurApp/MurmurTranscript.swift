@@ -26,6 +26,13 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
     let sentAt: Date
     var delivery: MurmurDeliveryState
     var momentID: String?
+    /// The key this row's send went up under.  Kept so that a row still marked
+    /// failed after a relaunch can be sent again as the *same* moment rather
+    /// than a second one — without it a resend across a restart risks saying
+    /// the same thing twice to a server that did quietly accept the first go.
+    /// Optional because transcripts written before this existed decode without
+    /// it; those rows fall back to a fresh key.
+    var idempotencyKey: String?
 
     init(
         id: String = UUID().uuidString,
@@ -34,7 +41,8 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
         imageFile: String? = nil,
         sentAt: Date = Date(),
         delivery: MurmurDeliveryState = .sent,
-        momentID: String? = nil
+        momentID: String? = nil,
+        idempotencyKey: String? = nil
     ) {
         self.id = id
         self.author = author
@@ -43,6 +51,7 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
         self.sentAt = sentAt
         self.delivery = delivery
         self.momentID = momentID
+        self.idempotencyKey = idempotencyKey
     }
 }
 
