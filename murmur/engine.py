@@ -11,7 +11,7 @@ import re
 import threading
 from dataclasses import dataclass
 
-from openai import OpenAI, OpenAIError
+from openai import BadRequestError, OpenAI, OpenAIError
 
 from .config import Config
 from .memory import Entry, Memory
@@ -225,7 +225,10 @@ def _extract_json(text: str) -> dict:
 
 # ---- 当年今日的读图（reading） -----------------------------------------------
 
-READING_TIMEOUT = 90.0  # mimo 读一张图要想 20-30 秒，他盯着屏幕等，但等得来
+READING_TIMEOUT = 45.0  # 一次尝试的上限。mimo 想 20-30 秒还接得住，
+# 而成功的读图 2 秒就回来了：45 秒还在跑的那次，几乎一定是在烧隐藏思考、
+# 最后交白卷。早点认输去重试，比干等第二个 45 秒划算。
+READING_ATTEMPTS = 2  # 两次的最坏总时长仍是原来单次的 90 秒
 READING_MAX_TOKENS = 2500  # mimo-v2.5 的思考先烧掉约 1100，500/900 档实测全部截断
 ANGLES_MAX_CHARS = 14  # 硬约束是 ≤12 个汉字，字符数留两格兜底
 GUESS_MAX_CHARS = 40  # 硬约束是 ≤30 个汉字，同上
@@ -336,14 +339,48 @@ def _parse_reading(text: str) -> PhotoReading:
     )
 
 
+def _read_once(model: str, content: list[dict], cfg: Config, dossier: str | None) -> str:
+    """读一次图，把模型正文原样交回去。解析和重试都在调用方。"""
+    messages: list[dict] = [
+        {"role": "system", "content": READING_SYSTEM},
+        # 长期记忆是背景知识，不是这一轮的输入。同 _respond_once。
+        *([{"role": "system", "content": dossier}] if dossier else []),
+        {"role": "user", "content": content},
+    ]
+    if cfg.json_prefix:
+        # 和 _respond_once、dossier 同一招：deepseek 直连不吃提示词里的
+        # 「只返回 JSON」，只吃 beta 端点的 assistant prefix。首字符钉成
+        # "{"，它就只能接着把 JSON 写完。之前这里漏了，读图是全仓最需要它
+        # 的一屏——它一次调用一次交付，没有第二条气泡可以补救。
+        messages.append({"role": "assistant", "content": "{", "prefix": True})
+    raw = (
+        _client(cfg)
+        .chat.completions.create(
+            model=model,
+            max_tokens=READING_MAX_TOKENS,
+            timeout=READING_TIMEOUT,
+            messages=messages,
+        )
+        .choices[0].message.content
+        or ""
+    )
+    return ("{" + raw) if cfg.json_prefix else raw
+
+
 def read_photo(
     moment: Moment, photo: Photo, cfg: Config, *, dossier: str | None = None
 ) -> PhotoReading:
     """当年今日推过来一张旧照片，他还没说话：先看图，猜他想说什么。
 
     必须真的看得见图——这一屏的全部价值就是「上游读懂了这张照片」，
-    所以只走 cfg.image_model，没有纯文字的降级档可言。任何失败都抛出去，
+    所以只走 cfg.image_model，没有纯文字的降级档可言。两次都不成才抛出去，
     由调用方退回普通回复（respond 有自己的降级链）。
+
+    为什么要重试：deepseek-v4-flash-vision-exp 实测约三次有一次交白卷，
+    两种死法都只表现为「正文长度 0」——一种是隐藏思考烧光 max_tokens
+    （finish_reason=length），一种是只想了几十个 token 就 stop、什么都没写。
+    后者重试几乎必中，前者也还有一半机会。同一个模型再来一次，成本是一次
+    调用，收益是这一屏不至于退化成一句没看过照片的普通回复。
     """
     model = (cfg.image_model or "").strip()
     if not model:
@@ -357,23 +394,22 @@ def read_photo(
         },
         {"type": "text", "text": f"此刻：{moment.describe()}"},
     ]
-    raw = (
-        _client(cfg)
-        .chat.completions.create(
-            model=model,
-            max_tokens=READING_MAX_TOKENS,
-            timeout=READING_TIMEOUT,
-            messages=[
-                {"role": "system", "content": READING_SYSTEM},
-                # 长期记忆是背景知识，不是这一轮的输入。同 _respond_once。
-                *([{"role": "system", "content": dossier}] if dossier else []),
-                {"role": "user", "content": content},
-            ],
-        )
-        .choices[0].message.content
-        or ""
-    )
-    return _parse_reading(raw)
+    last_error: Exception | None = None
+    for attempt in range(1, READING_ATTEMPTS + 1):
+        try:
+            return _parse_reading(_read_once(model, content, cfg, dossier))
+        except BadRequestError:
+            # 400 是这次请求本身不合法（图片格式、模型不收图）。再发一次
+            # 还是同一份请求，只会再等一个超时。直接抛。
+            raise
+        except (OpenAIError, ValueError) as error:
+            last_error = error
+            if attempt < READING_ATTEMPTS:
+                log.warning(
+                    "读图第 %d 次没拿到可用结果（%s），同一个模型再试一次",
+                    attempt, type(error).__name__,
+                )
+    raise last_error  # 循环至少跑一轮，走到这里 last_error 一定有值
 
 
 def _too_similar(text: str, previous: list[str]) -> bool:
