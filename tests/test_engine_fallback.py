@@ -15,7 +15,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import openai  # noqa: E402
 from _helpers import make_config  # noqa: E402
 
-from murmur.engine import Reply, _extract_json, respond  # noqa: E402
+from murmur.engine import (  # noqa: E402
+    Reply,
+    _extract_json,
+    _salvage_bubbles,
+    initiate,
+    respond,
+)
+from murmur.initiative import INTENTS  # noqa: E402
 from murmur.memory import Memory  # noqa: E402
 from murmur.moment import Moment  # noqa: E402
 from murmur.photo import Photo  # noqa: E402
@@ -75,7 +82,13 @@ class FakeClient:
         self.calls.append(kwargs)
         model = kwargs["model"]
         if model in self.errors:
-            raise self.errors[model]
+            error = self.errors[model]
+            # 队列形式：按调用次序逐个消费，None 表示这一次不抛。
+            if isinstance(error, list):
+                error = error.pop(0) if error else None
+                if error is None:
+                    return _Resp(self.content_by_model.get(model, GOOD_JSON))
+            raise error
         content = self.content_by_model.get(
             model, '{"move":"brief","say":["默认回复"],"scene":"测试"}'
         )
@@ -225,17 +238,48 @@ class EngineFallbackTests(unittest.TestCase):
         self.assertEqual(client.calls[0]["model"], "glm-5.3")
         self.assertNotIn("response_format", client.calls[0])
 
-    def test_no_fallback_configured_raises(self):
-        cfg = make_config(
-            db_path=str(Path(self.tmp.name) / "m2.db"),
+    def _no_fallback_config(self, name: str = "m2.db"):
+        return make_config(
+            db_path=str(Path(self.tmp.name) / name),
             model="kimi-k2.6",
             fallback_model="",
             image_model="",
         )
+
+    def test_no_fallback_configured_still_tries_twice_then_raises(self):
+        # 没有第二家可换的时候（直连 deepseek 就一家）也要再试一次，
+        # 两次都挂才把错误抛给 worker——只有那时他才该看到发送失败。
+        cfg = self._no_fallback_config()
         client = FakeClient({}, errors={"kimi-k2.6": gateway_error()})
         with patch("murmur.engine._client", return_value=client):
             with self.assertRaises(openai.InternalServerError):
                 respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        self.assertEqual([c["model"] for c in client.calls],
+                         ["kimi-k2.6", "kimi-k2.6"])
+
+    def test_one_off_gateway_error_no_longer_costs_him_the_message(self):
+        # 线上真实故障：网关偶发 5xx，没配降级模型，一条消息就此变成
+        # 红色感叹号。同一个模型再来一次就接住了。
+        cfg = self._no_fallback_config("m2b.db")
+        client = FakeClient(
+            {"kimi-k2.6": PRIMARY_JSON},
+            errors={"kimi-k2.6": [gateway_error(), None]},
+        )
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        self.assertEqual(reply.say, ["主模型说的"])
+        self.assertEqual(len(client.calls), 2)
+
+    def test_bare_bubble_array_is_read_as_bubbles(self):
+        # 线上真实故障：模型把信封丢了，只吐 say 的那个数组，抢救逻辑
+        # 把 '["七点多啦","…"]' 整个当成一句话发了出去。
+        cfg = self._no_fallback_config("m2c.db")
+        client = FakeClient(
+            {"kimi-k2.6": '["七点多啦","这会儿是到家了还是在路上？"]'}
+        )
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        self.assertEqual(reply.say, ["七点多啦", "这会儿是到家了还是在路上？"])
         self.assertEqual(len(client.calls), 1)
 
     def test_json_prefix_pins_the_first_char(self):
@@ -274,6 +318,88 @@ class ExtractJsonTests(unittest.TestCase):
     def test_fullwidth_quotes_without_object_still_raise(self):
         with self.assertRaises(ValueError):
             _extract_json("“这里没有花括号”")
+
+    def test_bare_array_of_strings_is_wrapped_as_a_reply(self):
+        obj = _extract_json('["七点多啦","这会儿是到家了还是在路上？"]')
+        self.assertEqual(obj["say"], ["七点多啦", "这会儿是到家了还是在路上？"])
+        self.assertEqual(obj["move"], "speak")
+
+    def test_bare_array_of_non_strings_is_not_a_reply(self):
+        with self.assertRaises(ValueError):
+            _extract_json("[1, 2, 3]")
+
+
+class SalvageTests(unittest.TestCase):
+    """抢救的边界：捞得回气泡就捞，捞不回来宁可交给下一次尝试。"""
+
+    def test_truncated_json_yields_the_finished_bubbles(self):
+        self.assertEqual(
+            _salvage_bubbles('{"move":"speak","say":["写完了","写到一半', 3),
+            ["写完了"],
+        )
+
+    def test_plain_spoken_lines_are_kept(self):
+        self.assertEqual(_salvage_bubbles("怎么又这么晚\n早点睡", 3),
+                         ["怎么又这么晚", "早点睡"])
+
+    def test_half_written_array_is_not_read_out_loud(self):
+        # 抢救的目的是把气泡捞回来，不是把 JSON 残骸念给他听。
+        self.assertEqual(_salvage_bubbles('["七点多啦",', 3), [])
+
+    def test_a_stray_key_value_line_is_not_a_bubble(self):
+        self.assertEqual(_salvage_bubbles('"scene": 周四傍晚', 3), [])
+
+
+class InitiateTests(unittest.TestCase):
+    """主动开口：和普通回复走同一套 JSON 纪律，之前只有这里漏了 prefix。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.mem = Memory(str(Path(self.tmp.name) / "memory.db"))
+        self.cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "m.db"),
+            model="deepseek-v4-flash",
+            fallback_model="",
+            image_model="",
+            json_schema=False,
+            json_prefix=True,
+        )
+        self.moment = Moment.text_only(self.cfg.tz)
+
+    def tearDown(self):
+        self.mem.conn.close()
+        self.tmp.cleanup()
+
+    def _call(self, client):
+        with patch("murmur.engine._client", return_value=client):
+            return initiate(self.moment, self.mem, self.cfg, INTENTS[0], chat_id=0)
+
+    def test_json_prefix_pins_the_first_char(self):
+        client = FakeClient(
+            {"deepseek-v4-flash":
+             '"move":"speak","say":["七点多啦","到家了吗"],"scene":"测试"}'}
+        )
+        reply = self._call(client)
+        self.assertEqual(reply.say, ["七点多啦", "到家了吗"])
+        self.assertEqual(
+            client.calls[0]["messages"][-1],
+            {"role": "assistant", "content": "{", "prefix": True},
+        )
+
+    def test_prefix_is_not_added_when_the_schema_is_doing_the_work(self):
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "m2.db"),
+            model="kimi-k2.6",
+            fallback_model="",
+            image_model="",
+            json_schema=True,
+            json_prefix=True,
+        )
+        client = FakeClient({"kimi-k2.6": PRIMARY_JSON})
+        with patch("murmur.engine._client", return_value=client):
+            initiate(self.moment, self.mem, cfg, INTENTS[0], chat_id=0)
+        self.assertEqual(client.calls[0]["messages"][-1]["role"], "user")
+        self.assertIn("response_format", client.calls[0])
 
 
 if __name__ == "__main__":

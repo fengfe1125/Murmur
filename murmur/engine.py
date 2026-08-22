@@ -188,12 +188,29 @@ def _as_bubbles(value) -> list[str]:
     return out[:3]
 
 
+def _as_bubble_list(value) -> list[str] | None:
+    """模型偶尔只吐 say 的那个数组，把外面那层信封丢了。
+
+    内容是对的——把它当气泡收下，而不是把 '["…","…"]' 原样发给他看。
+    线上真出现过：主动消息那条整个数组当成一句话发了出去。
+    """
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(isinstance(x, str) and x.strip() for x in value):
+        return None
+    return [x.strip() for x in value]
+
+
 def _parse_json_obj(text: str) -> dict | None:
     try:
-        if (obj := _as_obj(json.loads(text))) is not None:
-            return obj
+        value = json.loads(text)
     except json.JSONDecodeError:
         pass
+    else:
+        if (obj := _as_obj(value)) is not None:
+            return obj
+        if (bubbles := _as_bubble_list(value)) is not None:
+            return {"move": "speak", "say": bubbles, "scene": ""}
     # 兜底：抓第一个花括号平衡的片段
     start = text.find("{")
     if start >= 0:
@@ -221,6 +238,34 @@ def _extract_json(text: str) -> dict:
         if (obj := _parse_json_obj(text.replace("“", '"').replace("”", '"'))) is not None:
             return obj
     raise ValueError(f"模型没有返回可解析的 JSON：{text[:200]}")
+
+
+# JSON 碎片长得不像人说的话：半个数组、一行键值对、光秃秃一个括号。
+# 抢救的目的是把已经写好的气泡捞回来，不是把残骸念给他听。
+_JSON_DEBRIS = re.compile(r'^[\[\]{}"]|":')
+
+
+def _looks_spoken(line: str) -> bool:
+    return not _JSON_DEBRIS.search(line)
+
+
+def _salvage_bubbles(raw: str, limit: int) -> list[str]:
+    """JSON 解析失败之后，尽量把模型已经写出来的那几条气泡捞回来。
+
+    先按流式那套从 say[] 里抠（JSON 截断了，前面几条通常是完整的）。
+    抠不出来、而且正文里连花括号都没有，才考虑「模型无视格式直接说了人话」
+    这种情况——只收真的像话的短句，带 JSON 痕迹的一律不要。
+    """
+    if salvaged := BubbleStreamer().feed(raw)[:limit]:
+        return salvaged
+    if "{" in raw:
+        return []
+    lines = [x.strip() for x in raw.splitlines() if x.strip()]
+    if not 1 <= len(lines) <= 3 or len(raw) > 150:
+        return []
+    if not all(len(x) <= 60 and _looks_spoken(x) for x in lines):
+        return []
+    return lines[:limit]
 
 
 # ---- 当年今日的读图（reading） -----------------------------------------------
@@ -457,6 +502,12 @@ def _fallback_attempts(
     fallback = (cfg.fallback_model or "").strip()
     if fallback and fallback != primary:
         attempts.append((fallback, False))
+    else:
+        # 没有第二家可换的时候（直连 deepseek 就一家），同一个模型再来一次。
+        # 线上失败几乎全是一次性的：网关 5xx，或者这一次没按 JSON 写。
+        # 代价是一次调用，换的是他那条消息不会直接变成红色感叹号。
+        # 读图那边（read_photo）早就是两次，这里补齐。
+        attempts.append((primary, use_schema))
     return attempts
 
 
@@ -513,7 +564,7 @@ def initiate(
             return reply
         except (OpenAIError, ValueError) as error:
             log.warning(
-                "主动消息：模型 %s 失败（%s），尝试降级",
+                "主动消息：模型 %s 失败（%s），再试一次",
                 model, type(error).__name__,
             )
             last_error = error
@@ -534,23 +585,23 @@ def _initiate_once(
     dossier: str | None,
     _retry: bool,
 ) -> Reply:
+    if cfg.json_prefix and not use_schema:
+        # 和 _respond_once、_read_once、dossier 同一招，之前只有这里漏了：
+        # deepseek 直连不吃提示词里的「只返回 JSON」，吃 beta 端点的
+        # assistant prefix。漏掉的代价是主动消息十次有九次不是 JSON，
+        # 抢救出来的那一条又整个数组当成一句话发了出去。
+        messages = [*messages, {"role": "assistant", "content": "{", "prefix": True}]
     kwargs = dict(model=model, max_tokens=MAX_TOKENS, messages=messages)
     if use_schema:
         kwargs["response_format"] = _response_format()
     resp = _client(cfg).chat.completions.create(**kwargs)
     raw = resp.choices[0].message.content or ""
+    if cfg.json_prefix and not use_schema:
+        raw = "{" + raw
     try:
         data = _extract_json(raw)
     except ValueError:
-        salvaged = BubbleStreamer().feed(raw)[:2]
-        if not salvaged and "{" not in raw:
-            lines = [x.strip() for x in raw.splitlines() if x.strip()]
-            if (
-                1 <= len(lines) <= 3
-                and len(raw) <= 150
-                and all(len(x) <= 60 for x in lines)
-            ):
-                salvaged = lines[:2]
+        salvaged = _salvage_bubbles(raw, 2)
         if not salvaged:
             raise
         return Reply(scene="（主动·输出被截断）", move="speak", say=salvaged)
@@ -640,12 +691,11 @@ def respond(
     client = _client(cfg)
     if image_block is not None and (cfg.image_model or "").strip():
         # 带图消息：mimo 系多模态模型（不支持 json_schema，靠提示词约束）
-        attempts = [(cfg.image_model, False)]
+        attempts = _fallback_attempts(cfg, primary=cfg.image_model, use_schema=False)
     else:
-        attempts = [(cfg.model, cfg.json_schema)]
-    fallback = (cfg.fallback_model or "").strip()
-    if fallback and fallback != attempts[0][0]:
-        attempts.append((fallback, False))
+        attempts = _fallback_attempts(
+            cfg, primary=cfg.model, use_schema=cfg.json_schema
+        )
 
     last_error: Exception | None = None
     for model, use_schema in attempts:
@@ -671,7 +721,7 @@ def respond(
             return reply
         except (OpenAIError, ValueError) as error:
             log.warning(
-                "模型 %s 失败（%s），尝试降级", model, type(error).__name__,
+                "模型 %s 失败（%s），再试一次", model, type(error).__name__,
             )
             last_error = error
     raise last_error  # attempts 至少有一个，跑不到这里才怪
@@ -729,19 +779,7 @@ def _respond_once(
     except ValueError:
         # JSON 截断了（模型话太多撑爆 max_tokens）。别整个崩掉——
         # 把已经写完整的那几条气泡捞出来照样能用。
-        salvaged = BubbleStreamer().feed(raw)[:3]
-        if not salvaged and "{" not in raw:
-            # 有些模型（kimi-k2.6 在 OpenCode 网关上有过）会无视
-            # json_schema，直接吐纯文本气泡——内容是对的，别丢掉。
-            # 只收"像回复"的短文本：气泡每条 ≤60 字、至多 3 条，
-            # 太长或带思考痕迹的（超过 150 字）仍交给降级模型。
-            lines = [x.strip() for x in raw.splitlines() if x.strip()]
-            if (
-                1 <= len(lines) <= 3
-                and len(raw) <= 150
-                and all(len(x) <= 60 for x in lines)
-            ):
-                salvaged = lines[:3]
+        salvaged = _salvage_bubbles(raw, 3)
         if not salvaged:
             raise
         log.warning("模型没按 JSON 返回，抢救出 %d 条气泡", len(salvaged))

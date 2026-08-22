@@ -73,7 +73,11 @@ class AppSettings:
     body_gate_timeout_seconds: float = 1.0
     max_image_pixels: int = 80_000_000
     max_note_chars: int = 2_000
-    requests_per_minute: int = 30
+    # 一次 App Attest 调用是两个请求（先取挑战，再发正文），一条消息是
+    # 创建 moment + 订阅事件流，事件流断了还会带挑战重连——所以他随手聊
+    # 几句就是几十个请求。30 太低，实测正常对话就会被自己的限流打回，
+    # 界面上是一排「请求太频繁」的发送失败。
+    requests_per_minute: int = 120
     rate_limit_max_keys: int = 4096
     event_ttl_hours: int = 24
     push_delivery_budget_seconds: float = 30.0
@@ -166,7 +170,9 @@ class AppSettings:
                 "MURMUR_APP_MAX_IMAGE_PIXELS", "80000000"
             )),
             max_note_chars=int(os.getenv("MURMUR_APP_MAX_NOTE_CHARS", "2000")),
-            requests_per_minute=int(os.getenv("MURMUR_APP_RATE_LIMIT_PER_MINUTE", "30")),
+            requests_per_minute=int(
+                os.getenv("MURMUR_APP_RATE_LIMIT_PER_MINUTE", "120")
+            ),
             rate_limit_max_keys=int(os.getenv(
                 "MURMUR_APP_RATE_LIMIT_MAX_KEYS", "4096"
             )),
