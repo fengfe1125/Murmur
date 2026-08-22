@@ -1,0 +1,53 @@
+name: Server
+
+# 服务端是三摊代码里唯一会上 VPS 的那份（murmur/、deploy/、tests/、
+# scripts/ 加根目录文件，见 README「结构」）。这道闸门守的就是部署面，
+# iOS 和安卓各走各的边界，不在这里排队。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'murmur/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'deploy/**'
+      - 'pyproject.toml'
+      - '.github/workflows/server.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # 一个版本红了也要看另一个：这两条腿问的是不同的问题。
+      fail-fast: false
+      matrix:
+        # 3.11 是 pyproject 里声明的下限，3.14 是 VPS 上实际在跑的。
+        python: ['3.11', '3.14']
+    name: py${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[dev]'
+      - run: ruff check murmur/ tests/ scripts/
+      - name: Tests
+        # tests/ 里一半是普通 unittest 模块，另一半是脚本式的——import 的
+        # 那一刻就把自己跑完再 sys.exit()，所以 unittest discover 会把它们
+        # 整批报成 import error。逐个当脚本跑是唯一对两种都成立的方式，也
+        # 正是 deploy/murmur-update 在 VPS 上的跑法：CI 和发布闸门问同一
+        # 个问题，答案才有意义。
+        run: |
+          for t in tests/test_*.py; do
+            python "$t" || { echo "::error file=$t::$t 挂了"; exit 1; }
+          done
+
+  scripts:
+    # murmur-update 是发布闸门本身：它有语法错误，VPS 就更不动了，而这种
+    # 错误在合并之前没有任何东西会发现。
+    runs-on: ubuntu-latest
+    name: shell
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n deploy/murmur-update run.sh scripts/*.sh
