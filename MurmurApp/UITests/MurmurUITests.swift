@@ -47,7 +47,7 @@ final class MurmurUITests: XCTestCase {
 
         let composer = app.textFields["moment-composer"]
         let addPhoto = app.buttons["添加照片"]
-        let settings = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "设置")).firstMatch
+        let settings = app.buttons["tab-me"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertTrue(addPhoto.waitForExistence(timeout: 3))
         XCTAssertTrue(settings.waitForExistence(timeout: 3))
@@ -79,7 +79,11 @@ final class MurmurUITests: XCTestCase {
         XCTAssertEqual(composer.label, "这一刻的文字")
         XCTAssertEqual(app.buttons["send-moment"].label, "发送这一刻")
         XCTAssertTrue(app.buttons["添加照片"].exists)
-        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "设置")).firstMatch.exists)
+        // The three stops are named, and the one you are on says so.
+        XCTAssertEqual(app.buttons["tab-chat"].label, "聊天")
+        XCTAssertEqual(app.buttons["tab-onThisDay"].label, "当年今日")
+        XCTAssertEqual(app.buttons["tab-me"].label, "我的")
+        XCTAssertTrue(app.buttons["tab-chat"].isSelected)
         XCTAssertTrue(
             app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "发来眼前的一刻")).firstMatch.exists
         )
@@ -660,6 +664,26 @@ final class MurmurUITests: XCTestCase {
         XCTAssertFalse(
             app.descendants(matching: .any)["photo-room-photo"].waitForExistence(timeout: 6)
         )
+    }
+
+    /// Three screens are alive at once so each keeps its place, which makes
+    /// "off screen" a claim that has to be checked rather than assumed: a
+    /// VoiceOver reader on 聊天 must not be able to swipe into 设置's switches.
+    func testTheTabsNotOnScreenAreOutOfReach() throws {
+        let app = launchApp()
+        XCTAssertTrue(app.buttons["tab-chat"].waitForExistence(timeout: 5))
+        // Two things that exist only in 我的 and only in 当年今日.  Both are
+        // near the top of their screen, so "not there" is about reachability
+        // rather than about a Form row that has not been scrolled to yet.
+        XCTAssertFalse(app.descendants(matching: .any)["build-stamp"].firstMatch.exists)
+        XCTAssertFalse(app.buttons["onthisday-entry"].exists)
+
+        app.buttons["tab-me"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["build-stamp"].firstMatch.waitForExistence(timeout: 5)
+        )
+        // The composer belongs to 聊天 and is now the one out of reach.
+        XCTAssertFalse(app.textFields["moment-composer"].exists)
     }
 
     /// The photo card surfaces as an image element once its picture is in;

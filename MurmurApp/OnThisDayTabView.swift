@@ -8,7 +8,9 @@ import SwiftUI
 /// itself, which is unchanged: particles, up to send, down for the next one.
 struct OnThisDayTabView: View {
     @ObservedObject var model: MurmurSessionModel
-    @StateObject private var onThisDay = OnThisDayModel()
+    /// Owned by `MurmurShell`, so leaving the tab does not throw away the
+    /// album read that filled it.
+    @ObservedObject var onThisDay: OnThisDayModel
     @State private var month = Date()
     @State private var openDay: Date?
     @State private var showBrowser = false

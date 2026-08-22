@@ -47,6 +47,10 @@ struct MurmurShell: View {
     /// Measured rather than assumed: the bar grows with Dynamic Type, and the
     /// content has to be inset by whatever it actually became.
     @State private var barHeight: CGFloat = 72
+    /// The album shelf, held above the tab that shows it: 当年今日 is torn down
+    /// when you leave it, and rebuilding this would re-read the library every
+    /// time you came back.
+    @StateObject private var onThisDay = OnThisDayModel()
 
     var body: some View {
         Group {
@@ -66,41 +70,27 @@ struct MurmurShell: View {
 
     private var barIsFolded: Bool { keyboard.overlap > 0 }
 
-    /// One tab, kept in the tree whether or not it is the one on screen.
-    /// Hidden tabs are taken out of the accessibility tree as well as off the
-    /// glass: a VoiceOver reader swiping through the chat should never land in
-    /// 设置 because it happens to be stacked behind.
-    @ViewBuilder
-    private func tabContent<Content: View>(
-        _ which: MurmurTab, @ViewBuilder content: () -> Content
-    ) -> some View {
-        let isOn = tab == which
-        content()
-            .opacity(isOn ? 1 : 0)
-            .allowsHitTesting(isOn)
-            // Both, and in this order.  `accessibilityHidden` alone left every
-            // control of every off-screen tab in the tree — a VoiceOver reader
-            // on 聊天 could swipe straight into 设置's switches, and XCUITest
-            // could see them too.
-            .accessibilityElement(children: isOn ? .contain : .ignore)
-            .accessibilityHidden(!isOn)
-            .zIndex(isOn ? 1 : 0)
-    }
-
     private var tabs: some View {
-        // All three stay alive and stacked rather than being swapped in and
-        // out, so each keeps its scroll position and its half-written line.
-        // Deliberately not a `TabView`: its page hosting reframes the child,
-        // and the chat's composer — which lives in a bottom `safeAreaInset` —
-        // simply stopped being laid out inside one.
-        ZStack {
-            tabContent(.chat) {
+        // One tab on screen at a time, and only that one in the tree.
+        //
+        // Stacking all three and hiding two was the first attempt, and it does
+        // not hold: `accessibilityHidden` left every control of every off-screen
+        // tab reachable, so a VoiceOver reader on 聊天 could swipe into 设置's
+        // switches — see `testTheTabsNotOnScreenAreOutOfReach`.  Rendering one
+        // is correct by construction.  What state matters survives elsewhere:
+        // the draft and the scrollback live in the session, and the album shelf
+        // is held here rather than inside the tab so coming back is free.
+        //
+        // Deliberately not a `TabView` either: its page hosting reframes the
+        // child, and the chat's composer — which lives in a bottom
+        // `safeAreaInset` — simply stopped being laid out inside one.
+        Group {
+            switch tab {
+            case .chat:
                 MurmurChatView(model: model).environmentObject(notifications)
-            }
-            tabContent(.onThisDay) {
-                OnThisDayTabView(model: model)
-            }
-            tabContent(.me) {
+            case .onThisDay:
+                OnThisDayTabView(model: model, onThisDay: onThisDay)
+            case .me:
                 MurmurSettingsView(model: model).environmentObject(notifications)
             }
         }
