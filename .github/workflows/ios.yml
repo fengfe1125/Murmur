@@ -1,0 +1,39 @@
+name: iOS
+
+on:
+  push:
+    branches: [main]
+  # iOS 的活只在 iOS 目录变了才跑。服务端和安卓改动走各自的边界，
+  # 不该在这里排队等一个 5 分钟的 Xcode 构建。
+  pull_request:
+    paths:
+      - 'MurmurApp/**'
+      - 'MurmurApp.xcodeproj/**'
+      - '.github/workflows/ios.yml'
+
+jobs:
+  build-and-test:
+    # macos-15 still selects an Xcode without -downloadComponent, and ships no
+    # iOS 26 simulators.  当年今日 needs both, so the job runs on macos-26.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      # 当年今日 introduced the first Metal shader and the first PhotoKit
+      # authorization branches; both fail at runtime, not at compile time,
+      # which is why this workflow exists.  The Metal toolchain is a separate
+      # component on Xcode 26 and must be fetched explicitly.
+      - name: Download Metal toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain
+      - name: Build
+        run: >-
+          xcodebuild -project MurmurApp.xcodeproj -scheme Murmur
+          -configuration Debug
+          -destination 'generic/platform=iOS Simulator'
+          build
+      - name: Unit tests
+        run: >-
+          xcodebuild test -project MurmurApp.xcodeproj -scheme Murmur
+          -destination 'platform=iOS Simulator,name=iPhone 17'
+          -only-testing:MurmurTests

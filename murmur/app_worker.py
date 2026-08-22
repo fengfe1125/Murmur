@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -26,7 +26,7 @@ from .app_settings import AppSettings
 from .app_store import AccountDeleting, AppStore, Job, NotFound
 from .config import Config
 from .dossier import Dossier, refresh
-from .engine import Reply, respond
+from .engine import Reply, read_photo, respond
 from .memory import Memory, thread_key
 from .moment import Moment
 from .photo import Photo, PhotoTooLarge, save_preview
@@ -76,6 +76,9 @@ class ProcessedMoment:
     reply: Reply
     moment: Moment
     photo: Photo | None
+    # 当年今日 的读图才有：三个递到他手边的话头，跟着 guess 一起发。
+    # 普通 moment 永远是空的——聊天窗口里没有这一行。
+    angles: list[str] = field(default_factory=list)
 
 
 class MomentProcessor(Protocol):
@@ -105,12 +108,41 @@ class EngineMomentProcessor:
         )
         chat_id, label = thread_key("app", "direct", job.user_id)
         dossier = Dossier.load(self.data_root / "dossiers", label)
+        prompt_dossier = None if dossier.is_empty else dossier.as_prompt()
+        if job.intent == "photo_reading" and photo is not None:
+            reading = self._read(job, moment, photo, prompt_dossier)
+            if reading is not None:
+                return reading
         reply = respond(
             moment, memory, self.cfg, photo=photo, note=job.note, chat_id=chat_id,
             on_bubble=on_bubble,
-            dossier=None if dossier.is_empty else dossier.as_prompt(),
+            dossier=prompt_dossier,
         )
         return ProcessedMoment(reply, moment, photo)
+
+    def _read(
+        self, job: Job, moment: Moment, photo: Photo, dossier: str | None
+    ) -> ProcessedMoment | None:
+        """当年今日 推过来的那一张：先看图，猜他想说什么，再递三个话头。
+
+        非流式——这一屏是一次调用一次交付，没有可以提前吐的第一条气泡。
+        看图失败（模型挂了、超时、输出不合规）返回 None，由调用方退回普通
+        回复：这间房宁可少三个话头，也不能开门就是一片空白。
+        """
+        try:
+            reading = read_photo(moment, photo, self.cfg, dossier=dossier)
+        except Exception as error:
+            log.warning(
+                "App photo reading fell back moment_id=%s error_type=%s",
+                job.moment_id, type(error).__name__,
+            )
+            return None
+        return ProcessedMoment(
+            Reply(scene=reading.scene, move="speak", say=[reading.guess]),
+            moment,
+            photo,
+            reading.angles,
+        )
 
 
 class AppWorker:
@@ -319,6 +351,34 @@ class AppWorker:
                 self._refresh_dossier(memory, job)
             return completed
 
+    def _append_angles(self, job: Job, result: ProcessedMoment,
+                       lost: threading.Event) -> None:
+        """把读图带回来的三个话头发出去，跟在 guess 后面、done 之前。
+
+        只有 当年今日 的读图会带话头，聊天窗口的普通 moment 永远走空路径。
+        崩溃重试时 job 会重新处理，已发过的话头不能重复发。
+        """
+        if not result.angles or lost.is_set():
+            return
+        try:
+            if any(
+                event["event"] == "angles"
+                for event in self.store.events_after(
+                    job.moment_id, job.user_id, verify=False
+                )
+            ):
+                return
+        except Exception as error:
+            log.warning(
+                "App angles skipped moment_id=%s error_type=%s",
+                job.moment_id, type(error).__name__,
+            )
+            return
+        if not self.store.append_job_event(
+            job, self.worker_id, "angles", {"angles": result.angles}
+        ):
+            lost.set()
+
     def _refresh_dossier(self, memory: Memory, job: Job) -> None:
         """Refresh private long-term memory after SSE is already terminal."""
         chat_id, label = thread_key("app", "direct", job.user_id)
@@ -375,6 +435,9 @@ class AppWorker:
                 # truncated JSON, can return bubbles that were not emitted live.
                 for bubble in result.reply.say:
                     on_bubble(bubble)
+                # 三个话头在 done 之前发：读图已经把它们一起带回来了，
+                # 这里只是把它们放上事件流，普通 moment 到这里什么都不做。
+                self._append_angles(job, result, lost)
                 # Account deletion and final Memory/App writes share this lock.
                 # A delete can cancel slow model work, but it can never return 204
                 # and then have this worker recreate the user's memory afterward.

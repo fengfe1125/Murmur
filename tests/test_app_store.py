@@ -575,5 +575,144 @@ class SchemaMigrationTests(unittest.TestCase):
             self.assertEqual(device["platform"], "android")
 
 
+class MomentIntentMigrationTests(unittest.TestCase):
+    """A database written before 当年今日's photo room must open and gain the
+    column, with every row that predates it reading as an ordinary moment."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "pre-intent.db"
+        AppStore(self.path).close()
+        stamp = "2026-01-01T00:00:00+00:00"
+        conn = sqlite3.connect(self.path)
+        conn.execute("INSERT INTO app_users(id,active,deleting,created_at) VALUES('u1',1,0,?)", (stamp,))
+        conn.execute(
+            "INSERT INTO app_moments"
+            "(id,user_id,source,request_digest,idempotency_key,status,created_at,updated_at)"
+            " VALUES('m1','u1','inbound','d','k','done',?,?)", (stamp, stamp)
+        )
+        conn.commit()
+        conn.close()
+        # Drop the column back out from under the store, the way a database
+        # written by the previous release actually looks.
+        conn = sqlite3.connect(self.path)
+        conn.execute("ALTER TABLE app_moments DROP COLUMN intent")
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_column_is_added_and_old_rows_read_as_ordinary(self):
+        with AppStore(self.path) as store:
+            columns = {
+                row["name"] for row in store.conn.execute("PRAGMA table_info(app_moments)")
+            }
+            self.assertIn("intent", columns)
+            self.assertIsNone(store.moment_for_user("m1", "u1")["intent"])
+
+    def test_a_reading_can_be_queued_against_the_migrated_database(self):
+        with AppStore(self.path) as store:
+            result = store.create_moment(
+                user_id="u1", note=None, image_path="/tmp/upload",
+                idempotency_key="k-reading", request_digest="d-reading",
+                intent="photo_reading",
+            )
+            job = store.claim_job("worker-1")
+            self.assertEqual(job.moment_id, result.moment_id)
+            self.assertEqual(job.intent, "photo_reading")
+
+
+class EventSchemaMigrationTests(unittest.TestCase):
+    """A database written before 三个方向 must open, angles and all.
+
+    The CHECK list on app_events cannot be ALTERed, so opening an older
+    database rebuilds the table.  That rebuild is the one migration that runs
+    inside the AppStore constructor and can therefore stop the server from
+    starting at all, which is why both its shapes are pinned here.
+    """
+
+    PRE_ANGLES = """
+    CREATE TABLE app_events (
+        moment_id   TEXT NOT NULL REFERENCES app_moments(id) ON DELETE CASCADE,
+        sequence    INTEGER NOT NULL,
+        event       TEXT NOT NULL CHECK(event IN ('accepted','bubble','quiet','done','error')),
+        data        TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        PRIMARY KEY(moment_id, sequence)
+    );
+    CREATE INDEX idx_app_event_ttl ON app_events(created_at);
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "pre-angles.db"
+        AppStore(self.path).close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _downgrade(self, *, orphan: bool) -> None:
+        """Put the pre-angles CHECK list back, with a real event on a real
+        moment and — when asked — one whose moment is gone."""
+        stamp = "2026-01-01T00:00:00+00:00"
+        conn = sqlite3.connect(self.path)
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("DROP TABLE app_events")
+        conn.executescript(self.PRE_ANGLES)
+        conn.execute("INSERT INTO app_users(id,active,deleting,created_at) VALUES('u1',1,0,?)", (stamp,))
+        conn.execute(
+            "INSERT INTO app_moments"
+            "(id,user_id,source,request_digest,idempotency_key,status,created_at,updated_at)"
+            " VALUES('m1','u1','inbound','d','k','done',?,?)", (stamp, stamp)
+        )
+        conn.execute("INSERT INTO app_events VALUES('m1',1,'bubble','{}',?)", (stamp,))
+        if orphan:
+            # No cascade ever fired for this one: sqlite3's CLI runs with
+            # foreign_keys=OFF, so a hand-deleted moment on the VPS leaves
+            # its events behind.
+            conn.execute("INSERT INTO app_events VALUES('ghost',1,'bubble','{}',?)", (stamp,))
+        conn.commit()
+        conn.close()
+
+    def test_rebuild_accepts_angles_and_keeps_rows_and_index(self):
+        self._downgrade(orphan=False)
+        with AppStore(self.path) as store:
+            schema = store.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name='app_events'"
+            ).fetchone()["sql"]
+            self.assertIn("'angles'", schema)
+            self.assertEqual(
+                store.conn.execute("SELECT count(*) FROM app_events").fetchone()[0], 1
+            )
+            # DROP TABLE takes the table's indexes with it; the TTL sweeper
+            # scans created_at and would go linear without this one.
+            indexes = {
+                row["name"] for row in store.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='app_events'"
+                )
+            }
+            self.assertIn("idx_app_event_ttl", indexes)
+            store.append_event("m1", "angles", {"angles": ["那天的天气"]})
+
+    def test_orphaned_events_do_not_stop_the_store_from_opening(self):
+        """The rebuild copies rows through a foreign key; an orphan left by a
+        non-cascading delete used to raise IntegrityError out of __init__ and
+        take the server down with it."""
+        self._downgrade(orphan=True)
+        with AppStore(self.path) as store:
+            rows = store.conn.execute(
+                "SELECT moment_id FROM app_events ORDER BY moment_id"
+            ).fetchall()
+            self.assertEqual([row["moment_id"] for row in rows], ["m1"])
+            self.assertEqual(
+                store.conn.execute("PRAGMA foreign_key_check(app_events)").fetchall(), []
+            )
+            # The pragma is restored, or every later cascade silently stops.
+            self.assertEqual(
+                store.conn.execute("PRAGMA foreign_keys").fetchone()[0], 1
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

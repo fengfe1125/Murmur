@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import random
 import secrets
 import sqlite3
@@ -19,6 +20,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+
+log = logging.getLogger("murmur.app_store")
 
 
 def _now() -> datetime:
@@ -117,6 +120,15 @@ class Job:
     user_id: str
     note: str | None
     image_path: str | None
+    # None for an ordinary chat moment; 'photo_reading' for the one upload
+    # that opens a 当年今日 photo room, which the worker answers by reading
+    # the image rather than replying to it.
+    intent: str | None = None
+
+
+# The non-ordinary things an inbound moment can be asking for.  NULL is the
+# ordinary chat moment and is not listed here.
+MOMENT_INTENTS = frozenset({"photo_reading"})
 
 
 @dataclass(frozen=True)
@@ -205,6 +217,7 @@ CREATE TABLE IF NOT EXISTS app_moments (
     note             TEXT,
     image_path       TEXT,
     preview_path     TEXT,
+    intent           TEXT CHECK(intent IS NULL OR intent IN ('photo_reading')),
     request_digest   TEXT NOT NULL,
     idempotency_key  TEXT NOT NULL,
     status           TEXT NOT NULL,
@@ -234,7 +247,7 @@ CREATE TABLE IF NOT EXISTS app_jobs (
 CREATE TABLE IF NOT EXISTS app_events (
     moment_id   TEXT NOT NULL REFERENCES app_moments(id) ON DELETE CASCADE,
     sequence    INTEGER NOT NULL,
-    event       TEXT NOT NULL CHECK(event IN ('accepted','bubble','quiet','done','error')),
+    event       TEXT NOT NULL CHECK(event IN ('accepted','bubble','quiet','angles','done','error')),
     data        TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     PRIMARY KEY(moment_id, sequence)
@@ -334,6 +347,12 @@ class AppStore:
             self.conn.execute(
                 "ALTER TABLE app_moments ADD COLUMN failure_retryable INTEGER"
             )
+        if "intent" not in moment_columns:
+            # A plain nullable ADD COLUMN: every row that predates 当年今日's
+            # photo room is an ordinary moment, which is exactly NULL.  The
+            # CHECK in SCHEMA is not reproduced here — SQLite cannot add one
+            # to an existing table, and the write path validates the value.
+            self.conn.execute("ALTER TABLE app_moments ADD COLUMN intent TEXT")
         # Every row that predates a second client platform is an iOS row, so the
         # column default backfills them correctly and no data migration is due.
         key_columns = {
@@ -354,6 +373,68 @@ class AppStore:
             self.conn.execute(
                 "ALTER TABLE app_devices RENAME COLUMN apns_token TO push_token"
             )
+        # CHECK 约束不能 ALTER，只能整表重建：旧库的事件清单里没有 angles。
+        event_sql = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='app_events'"
+        ).fetchone()
+        if event_sql and "'angles'" not in (event_sql["sql"] or ""):
+            self._rebuild_app_events()
+
+    def _rebuild_app_events(self) -> None:
+        """把 app_events 的 CHECK 清单换成含 angles 的那份。
+
+        按 SQLite 官方"改 CHECK 只能重建表"的步骤做：整个重建期间关掉外键，
+        结束后用 foreign_key_check 验一遍。不关的话 INSERT ... SELECT 会逐行
+        校验外键，旧库里任何一行孤儿事件都会抛 IntegrityError——而这是在
+        AppStore 构造函数里，等于服务直接起不来，且只在部署当天出现一次。
+        孤儿从哪来：sqlite3 CLI 默认 foreign_keys=OFF，谁在 VPS 上手工删过
+        app_moments，级联就没发生。
+
+        PRAGMA foreign_keys 在事务里是空操作，所以它必须写在 _tx() 外面。
+        """
+        # 孤儿行没有任何读路径（events_after 要先验 moment 归属），
+        # 留着只会让 foreign_key_check 永远红。丢掉，但要说出来丢了多少。
+        orphans = self.conn.execute(
+            "SELECT count(*) AS n FROM app_events e WHERE NOT EXISTS"
+            " (SELECT 1 FROM app_moments m WHERE m.id = e.moment_id)"
+        ).fetchone()["n"]
+        if orphans:
+            log.warning(
+                "app_events rebuild dropping %d orphaned row(s): their moment is gone",
+                orphans,
+            )
+        self.conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            with self._tx() as db:
+                db.execute(
+                    """CREATE TABLE app_events_new (
+                        moment_id   TEXT NOT NULL REFERENCES app_moments(id) ON DELETE CASCADE,
+                        sequence    INTEGER NOT NULL,
+                        event       TEXT NOT NULL CHECK(event IN ('accepted','bubble','quiet','angles','done','error')),
+                        data        TEXT NOT NULL,
+                        created_at  TEXT NOT NULL,
+                        PRIMARY KEY(moment_id, sequence)
+                    )"""
+                )
+                db.execute(
+                    "INSERT INTO app_events_new SELECT e.* FROM app_events e"
+                    " WHERE EXISTS (SELECT 1 FROM app_moments m WHERE m.id = e.moment_id)"
+                )
+                db.execute("DROP TABLE app_events")
+                db.execute("ALTER TABLE app_events_new RENAME TO app_events")
+                db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_app_event_ttl "
+                    "ON app_events(created_at)"
+                )
+            violations = self.conn.execute(
+                "PRAGMA foreign_key_check(app_events)"
+            ).fetchall()
+            if violations:
+                raise sqlite3.IntegrityError(
+                    f"app_events rebuild left {len(violations)} foreign key violation(s)"
+                )
+        finally:
+            self.conn.execute("PRAGMA foreign_keys=ON")
 
     def close(self) -> None:
         self.conn.close()
@@ -632,7 +713,10 @@ class AppStore:
         image_path: str | None,
         idempotency_key: str,
         request_digest: str,
+        intent: str | None = None,
     ) -> MomentResult:
+        if intent is not None and intent not in MOMENT_INTENTS:
+            raise ValueError("unknown moment intent")
         now = _iso()
         with self._tx() as db:
             user = db.execute(
@@ -671,10 +755,10 @@ class AppStore:
                     if inflight:
                         raise MomentInFlight("another moment is still being processed")
                     db.execute(
-                        "UPDATE app_moments SET note=?,image_path=?,status='queued',"
+                        "UPDATE app_moments SET note=?,image_path=?,intent=?,status='queued',"
                         "scene=NULL,move=NULL,memory_entry_id=NULL,preview_path=NULL,"
                         "push_preview=NULL,failure_retryable=NULL,updated_at=? WHERE id=?",
-                        (note, image_path, now, existing["id"]),
+                        (note, image_path, intent, now, existing["id"]),
                     )
                     db.execute("DELETE FROM app_events WHERE moment_id=?", (existing["id"],))
                     db.execute(
@@ -714,9 +798,9 @@ class AppStore:
             moment_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
             db.execute(
                 "INSERT INTO app_moments"
-                "(id,user_id,source,note,image_path,request_digest,idempotency_key,status,"
-                "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (moment_id, user_id, "inbound", note, image_path, request_digest,
+                "(id,user_id,source,note,image_path,intent,request_digest,idempotency_key,"
+                "status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (moment_id, user_id, "inbound", note, image_path, intent, request_digest,
                  idempotency_key, "queued", now, now),
             )
             db.execute(
@@ -765,7 +849,7 @@ class AppStore:
         ]
 
     def append_event(self, moment_id: str, event: str, data: dict | None = None) -> int:
-        if event not in {"accepted", "bubble", "quiet", "done", "error"}:
+        if event not in {"accepted", "bubble", "quiet", "angles", "done", "error"}:
             raise ValueError("invalid SSE event")
         with self._tx() as db:
             if not db.execute("SELECT 1 FROM app_moments WHERE id=?", (moment_id,)).fetchone():
@@ -849,7 +933,7 @@ class AppStore:
         with self._tx() as db:
             while True:
                 row = db.execute(
-                    "SELECT j.id,j.moment_id,j.attempts,m.user_id,m.note,m.image_path "
+                    "SELECT j.id,j.moment_id,j.attempts,m.user_id,m.note,m.image_path,m.intent "
                     "FROM app_jobs j JOIN app_moments m ON m.id=j.moment_id "
                     "JOIN app_users u ON u.id=m.user_id "
                     "WHERE (j.status='queued' OR (j.status='processing' AND j.lease_until<?)) "
@@ -890,7 +974,7 @@ class AppStore:
                     (now, row["moment_id"]),
                 )
                 return Job(row["id"], row["moment_id"], row["user_id"], row["note"],
-                           row["image_path"])
+                           row["image_path"], row["intent"])
 
     def renew_job(
         self, job: Job, worker_id: str, lease: timedelta = timedelta(minutes=3)

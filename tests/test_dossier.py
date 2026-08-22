@@ -6,10 +6,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _helpers import make_config  # noqa: E402
+
+from murmur import dossier  # noqa: E402
 from murmur.dossier import Dossier  # noqa: E402
+from murmur.memory import Memory  # noqa: E402
 
 
 class DossierSaveTests(unittest.TestCase):
@@ -35,6 +41,58 @@ class DossierSaveTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("旧内容", text)
             self.assertIn("在找工作", text)
+
+
+class _Resp:
+    def __init__(self, content: str):
+        self.choices = [
+            type("C", (), {"message": type("M", (), {"content": content})()})()
+        ]
+
+
+class _FakeClient:
+    def __init__(self, content: str):
+        self.content = content
+        self.calls: list[dict] = []
+        self.chat = type("X", (), {"completions": self})()
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return _Resp(self.content)
+
+
+class DossierRefreshPrefixTests(unittest.TestCase):
+    def test_json_prefix_replaces_response_format(self):
+        # cfg.json_prefix=True（deepseek 直连）：整理调用改走 assistant
+        # prefix，引擎补回 "{"；json_object 挡不住它的长思考，不能再用。
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                db_path=str(Path(tmp) / "m.db"),
+                model="deepseek-v4-flash",
+                json_prefix=True,
+            )
+            mem = Memory(str(Path(tmp) / "memory.db"))
+            mem.record(
+                chat_id=7, thread="t", shot_at=None, bucket="午间",
+                weekday="周六", spot=None, scene="测试", move="speak",
+                said="出门了", note=None,
+            )
+            client = _FakeClient(
+                '"他是谁": "- 他周末会出门", "正在发生": "- 在散步", '
+                '"怎么跟他说话": "- 随意点"}'
+            )
+            with patch.object(dossier, "_client", return_value=client):
+                d = dossier.refresh(cfg, mem, 7, "t",
+                                    root=Path(tmp), force=True)
+            self.assertIsNotNone(d)
+            self.assertEqual(d.blocks["他是谁"], "- 他周末会出门")
+            messages = client.calls[0]["messages"]
+            self.assertEqual(
+                messages[-1],
+                {"role": "assistant", "content": "{", "prefix": True},
+            )
+            self.assertNotIn("response_format", client.calls[0])
+            mem.conn.close()
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ from .app_auth import (
 from .app_lock import UserOperationLock
 from .app_settings import AppSettings
 from .app_store import (
+    MOMENT_INTENTS,
     AccountDeleting,
     AppStore,
     AppStoreError,
@@ -612,7 +613,7 @@ def create_app(
             auth = await authenticate(request, None, body_digest=wire_digest)
             try:
                 form = await request.form(
-                    max_files=1, max_fields=4, max_part_size=64 * 1024
+                    max_files=1, max_fields=5, max_part_size=64 * 1024
                 )
             except Exception as exc:
                 raise APIError(400, "validation_error", "multipart 内容无效。") from exc
@@ -625,6 +626,12 @@ def create_app(
                 idempotency_key = str(form.get("idempotency_key") or "").strip()
                 if not 8 <= len(idempotency_key) <= 200:
                     raise APIError(400, "validation_error", "idempotency_key 无效。")
+                # 当年今日 opens its room by uploading one photo and nothing
+                # else; the reply to it is a reading of the image rather than
+                # an ordinary line, so the intent travels with the upload.
+                intent = str(form.get("intent") or "").strip() or None
+                if intent is not None and intent not in MOMENT_INTENTS:
+                    raise APIError(400, "validation_error", "intent 无效。")
                 upload = form.get("image")
                 image_hash = hashlib.sha256()
                 image_size = 0
@@ -665,12 +672,17 @@ def create_app(
                     raise APIError(
                         400, "validation_error", "文字和图片至少要有一个。"
                     )
+                if intent == "photo_reading" and (not temp_path or note):
+                    raise APIError(
+                        400, "validation_error", "读图只接受一张不带文字的照片。"
+                    )
 
                 await asyncio.to_thread(
                     apply_stop_preference, store, auth.user_id, note
                 )
                 digest = hashlib.sha256(
                     note.encode("utf-8") + b"\x00" + image_hash.digest()
+                    + b"\x00" + (intent or "").encode("utf-8")
                 ).hexdigest()
                 result = await asyncio.to_thread(
                     store.create_moment,
@@ -679,6 +691,7 @@ def create_app(
                     image_path=str(temp_path) if temp_path else None,
                     idempotency_key=idempotency_key,
                     request_digest=digest,
+                    intent=intent,
                 )
                 if not result.created and temp_path:
                     temp_path.unlink(missing_ok=True)

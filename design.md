@@ -64,6 +64,11 @@ gradients, glass panels, coloured glows, or pure black/white surfaces.
 
 - Motion communicates only phase changes: a short opacity crossfade and a
   tactile press response. No scrolling choreography or decorative loops.
+- Bounded animation only. A gesture-triggered animation with a known end (a
+  KeyframeAnimator track, a spring) may redraw every frame while it runs; a
+  resident per-frame redraw (TimelineView(.animation), always-on shader
+  timelines) may not exist at all. The send-off dissolve in 当年今日 is the
+  reference case: it runs once, on the photo card alone, and ends.
 - Reduce Motion collapses spatial movement to an opacity change of at most
   150 ms.
 - Focus, error, disabled, loading, success, cancellation, retry, and pressed
@@ -84,4 +89,58 @@ gradients, glass panels, coloured glows, or pure black/white surfaces.
 - The same display/body pairing and four-point space scale.
 - The same edge-aligned top chrome and quiet status treatment.
 - No locally persisted user photo, note, or response content.
+
+## 当年今日 (On This Day)
+
+A history-reading feature, acknowledged here as a product decision rather than
+slipped in as an implementation detail.
+
+- The third floating disc in the top chrome opens it: one photo from this day
+  in an earlier year, full screen. Down-swipe shows the next candidate;
+  up-swipe carries the photo into a room of its own. One card at a time — a
+  grid would make it a photo app.
+- The shelf runs forward and never wraps. Past the last photo from this day it
+  carries on with photos drawn at random from the album, and so does a day that
+  is blank in every earlier year. Each card says which it is — 「去年的今天」 or
+  「相册里翻到的」 — because dressing an ordinary Tuesday up as an anniversary is
+  a lie told about someone's own memory. The one honest dead end left is a
+  library with no photos in it at all.
+- The library is read on-device, at browse time, through PhotoKit. Browsing
+  pixels live in a memory-only NSCache and die with the view. No thumbnail,
+  index, or "last viewed" marker is written anywhere.
+- A file appears only when the person swipes a photo up: it enters the same
+  temporary-upload lifecycle as any photo they picked themselves, under a
+  prefix the cold-start sweeper knows, and is deleted on every terminal path.
+- Photo permission is requested in context, with copy that says the truth:
+  "Murmur 想在本机翻找你相册里同一天的旧照片；发送哪一张，由你决定。"
+- Limited library access is treated as "the feature does not exist": the entry
+  disc hides itself. Showing an empty shelf there would be a lie about what
+  the person photographed that day.
+
+## 照片房间 (the photo room)
+
+Where a photo swiped up out of 当年今日 goes. It does not go into the
+conversation: the conversation is for whatever is in front of you now, and an
+old photo is a different kind of thing to bring up.
+
+- The card comes apart into particles in the browser and the same particles
+  come back together at the top of the room, so the two halves read as one
+  motion rather than two screens. Both live inside one presentation; under
+  Reduce Motion, or without the shader, the photo simply appears.
+- The photo stays pinned at the top for the life of the screen. Everything
+  below it is about that one picture.
+- The server reads the image and opens with a guess at what the person came to
+  say — 「这是……刚下过雨？」 — with three short openers under it. An opener is a
+  door, not a message: one tap lifts it into the field, where the person decides
+  whether it leaves. They close behind the first line.
+- After that it is an ordinary exchange: Murmur catches what is said and asks
+  back, drawing out what the photo means rather than describing it. Those turns
+  carry no photo — the picture is already in Murmur's memory from the opening
+  upload.
+- The room's own scrollback is a working surface and ends with the screen. What
+  survives is on the server, in Murmur's memory, which is the point of saying
+  it. A second persisted history on the device is a product decision and has
+  not been taken.
+- The three openers appear here and nowhere else. The conversation used to
+  carry them under a photo reply; it no longer does.
 

@@ -217,9 +217,23 @@ struct ProactiveMoment: Decodable, Sendable {
     }
 }
 
+/// What a moment is asking the server for, when it is asking for something
+/// other than an ordinary reply.  `nil` — the chat's own case — is not a
+/// member here: an ordinary moment carries no intent at all.
+enum MurmurMomentIntent: String, Sendable {
+    /// 当年今日's opening upload: one photo, no words.  The server reads the
+    /// image and answers with a guess at what the person came to say, plus
+    /// the three openers under it.
+    case photoReading = "photo_reading"
+}
+
 enum MurmurStreamEvent: Equatable, Sendable {
     case accepted(id: String?)
     case bubble(id: String?, text: String)
+    /// The three openers under a photo reading: another output of the same
+    /// moment, not a new endpoint.  Short entry angles the person can pick up
+    /// with one tap, and only 当年今日's room ever asks for them.
+    case angles(id: String?, texts: [String])
     case quiet(id: String?)
     case done(id: String?, move: String?, scene: String?)
     case failure(id: String?, MurmurFailure)
@@ -231,7 +245,8 @@ protocol MurmurAPIClient: Sendable {
     func createMoment(
         note: String?,
         photo: PhotoAttachment?,
-        idempotencyKey: String
+        idempotencyKey: String,
+        intent: MurmurMomentIntent?
     ) async throws -> MomentReceipt
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error>
     func currentProactive() async throws -> ProactiveMoment?

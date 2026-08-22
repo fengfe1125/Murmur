@@ -58,22 +58,37 @@ actor PhotoLoader {
     }
 
     func load(capturedImage: UIImage, maximumPreviewPixels: CGFloat = 1_800) async throws -> PhotoAttachment {
+        try await loadJPEG(of: capturedImage, urlPrefix: "murmur-camera-", filenameStem: "camera",
+                           maximumPreviewPixels: maximumPreviewPixels)
+    }
+
+    /// A photo sent from 当年今日.  Browsing the library never touches disk;
+    /// the file appears only at the moment the person swipes a photo up into
+    /// the conversation, under a prefix the cold-start sweeper knows about.
+    func load(libraryImage: UIImage, maximumPreviewPixels: CGFloat = 1_800) async throws -> PhotoAttachment {
+        try await loadJPEG(of: libraryImage, urlPrefix: "murmur-onthisday-", filenameStem: "onthisday",
+                           maximumPreviewPixels: maximumPreviewPixels)
+    }
+
+    private func loadJPEG(
+        of image: UIImage, urlPrefix: String, filenameStem: String, maximumPreviewPixels: CGFloat
+    ) async throws -> PhotoAttachment {
         try await Task.detached(priority: .userInitiated) {
-            guard let data = capturedImage.jpegData(compressionQuality: 0.94) else {
+            guard let data = image.jpegData(compressionQuality: 0.94) else {
                 throw MurmurFailure(code: "camera_encoding_failed", message: "没有保存好这张照片。", retryable: true)
             }
             guard Int64(data.count) <= Self.maximumUploadBytes else {
                 throw MurmurFailure(code: "image_too_large", message: "图片不能超过 25 MB。", retryable: false)
             }
             let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("murmur-camera-\(UUID().uuidString).jpg")
+                .appendingPathComponent("\(urlPrefix)\(UUID().uuidString).jpg")
             try data.write(to: url, options: [.atomic, .completeFileProtection])
             let preview = try Self.downsample(url: url, maximumPixels: maximumPreviewPixels)
             return PhotoAttachment(
                 id: UUID(),
                 originalURL: url,
                 preview: preview,
-                filename: "camera-\(UUID().uuidString).jpg",
+                filename: "\(filenameStem)-\(UUID().uuidString).jpg",
                 mimeType: "image/jpeg",
                 byteCount: Int64(data.count)
             )
@@ -90,7 +105,7 @@ actor PhotoLoader {
     }
 
     func cleanupStaleTemporaryFiles() {
-        let prefixes = ["murmur-picker-", "murmur-upload-", "murmur-camera-", "murmur-multipart-"]
+        let prefixes = ["murmur-picker-", "murmur-upload-", "murmur-camera-", "murmur-onthisday-", "murmur-multipart-"]
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: FileManager.default.temporaryDirectory,
             includingPropertiesForKeys: nil,

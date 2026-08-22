@@ -20,12 +20,17 @@
 		A1000000000000000000000B /* MurmurSessionModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001C /* MurmurSessionModelTests.swift */; };
 		A1000000000000000000000C /* PhotoLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001D /* PhotoLoaderTests.swift */; };
 		A1000000000000000000000D /* MurmurSecurityContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001E /* MurmurSecurityContractTests.swift */; };
+		A100000000000000000000G1 /* OnThisDayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000G2 /* OnThisDayTests.swift */; };
+		A100000000000000000000G3 /* PhotoRoomModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000G4 /* PhotoRoomModelTests.swift */; };
 		A1000000000000000000000E /* MurmurUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F /* MurmurUITests.swift */; };
 		A1000000000000000000000F /* MurmurTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000029 /* MurmurTranscript.swift */; };
 		A10000000000000000000010 /* MurmurTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002A /* MurmurTranscriptView.swift */; };
 		A100000000000000000000B1 /* MurmurPhotoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B2 /* MurmurPhotoView.swift */; };
 		A100000000000000000000D1 /* MurmurDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000D2 /* MurmurDiagnostics.swift */; };
 		A100000000000000000000E1 /* MurmurKeyboardInset.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000E2 /* MurmurKeyboardInset.swift */; };
+		A100000000000000000000F1 /* MurmurOnThisDay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F2 /* MurmurOnThisDay.swift */; };
+		A100000000000000000000F3 /* OnThisDay.metal in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F4 /* OnThisDay.metal */; };
+		A100000000000000000000F5 /* MurmurPhotoRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* MurmurPhotoRoom.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -60,6 +65,8 @@
 		A1000000000000000000001C /* MurmurSessionModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurSessionModelTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000001D /* PhotoLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLoaderTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000001E /* MurmurSecurityContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurSecurityContractTests.swift; sourceTree = "<group>"; };
+		A100000000000000000000G2 /* OnThisDayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnThisDayTests.swift; sourceTree = "<group>"; };
+		A100000000000000000000G4 /* PhotoRoomModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoRoomModelTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000001F /* MurmurUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurUITests.swift; sourceTree = "<group>"; };
 		A10000000000000000000020 /* MurmurTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MurmurTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000022 /* MurmurUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MurmurUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -74,6 +81,9 @@
 		A100000000000000000000B2 /* MurmurPhotoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurPhotoView.swift; sourceTree = "<group>"; };
 		A100000000000000000000D2 /* MurmurDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurDiagnostics.swift; sourceTree = "<group>"; };
 		A100000000000000000000E2 /* MurmurKeyboardInset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurKeyboardInset.swift; sourceTree = "<group>"; };
+		A100000000000000000000F2 /* MurmurOnThisDay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurOnThisDay.swift; sourceTree = "<group>"; };
+		A100000000000000000000F4 /* OnThisDay.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = OnThisDay.metal; sourceTree = "<group>"; };
+		A100000000000000000000F6 /* MurmurPhotoRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurPhotoRoom.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -123,6 +133,9 @@
 				A10000000000000000000029 /* MurmurTranscript.swift */,
 				A1000000000000000000002A /* MurmurTranscriptView.swift */,
 				A100000000000000000000B2 /* MurmurPhotoView.swift */,
+				A100000000000000000000F2 /* MurmurOnThisDay.swift */,
+				A100000000000000000000F6 /* MurmurPhotoRoom.swift */,
+				A100000000000000000000F4 /* OnThisDay.metal */,
 				A100000000000000000000D2 /* MurmurDiagnostics.swift */,
 				A100000000000000000000E2 /* MurmurKeyboardInset.swift */,
 				A1000000000000000000001A /* Assets.xcassets */,
@@ -163,6 +176,8 @@
 				A1000000000000000000001C /* MurmurSessionModelTests.swift */,
 				A1000000000000000000001D /* PhotoLoaderTests.swift */,
 				A1000000000000000000001E /* MurmurSecurityContractTests.swift */,
+				A100000000000000000000G2 /* OnThisDayTests.swift */,
+				A100000000000000000000G4 /* PhotoRoomModelTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -317,6 +332,9 @@
 				A1000000000000000000000F /* MurmurTranscript.swift in Sources */,
 				A10000000000000000000010 /* MurmurTranscriptView.swift in Sources */,
 				A100000000000000000000B1 /* MurmurPhotoView.swift in Sources */,
+				A100000000000000000000F1 /* MurmurOnThisDay.swift in Sources */,
+				A100000000000000000000F5 /* MurmurPhotoRoom.swift in Sources */,
+				A100000000000000000000F3 /* OnThisDay.metal in Sources */,
 				A100000000000000000000D1 /* MurmurDiagnostics.swift in Sources */,
 				A100000000000000000000E1 /* MurmurKeyboardInset.swift in Sources */,
 			);
@@ -329,6 +347,8 @@
 				A1000000000000000000000B /* MurmurSessionModelTests.swift in Sources */,
 				A1000000000000000000000C /* PhotoLoaderTests.swift in Sources */,
 				A1000000000000000000000D /* MurmurSecurityContractTests.swift in Sources */,
+				A100000000000000000000G1 /* OnThisDayTests.swift in Sources */,
+				A100000000000000000000G3 /* PhotoRoomModelTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -402,7 +422,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Murmur;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Murmur 需要相机权限，让你拍下并发送眼前的一刻。";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Murmur 需要读取你选择的照片，用来回应这一刻。";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Murmur 想在本机翻找你相册里同一天的旧照片；发送哪一张，由你决定。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
@@ -436,7 +456,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Murmur;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Murmur 需要相机权限，让你拍下并发送眼前的一刻。";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Murmur 需要读取你选择的照片，用来回应这一刻。";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Murmur 想在本机翻找你相册里同一天的旧照片；发送哪一张，由你决定。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";

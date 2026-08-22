@@ -79,14 +79,16 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
     func createMoment(
         note: String?,
         photo: PhotoAttachment?,
-        idempotencyKey: String
+        idempotencyKey: String,
+        intent: MurmurMomentIntent?
     ) async throws -> MomentReceipt {
         let boundary = "Murmur-\(UUID().uuidString)"
         let bodyURL = try makeMultipartBody(
             boundary: boundary,
             note: note,
             photo: photo,
-            idempotencyKey: idempotencyKey
+            idempotencyKey: idempotencyKey,
+            intent: intent
         )
         defer { try? FileManager.default.removeItem(at: bodyURL) }
         let digest = try sha256(fileURL: bodyURL)
@@ -317,6 +319,9 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         case "done":
             let done = (try? decoder.decode(DonePayload.self, from: payload)) ?? DonePayload(move: nil, scene: nil)
             return .done(id: id, move: done.move, scene: done.scene)
+        case "angles":
+            let angles = try decoder.decode(AnglesPayload.self, from: payload)
+            return .angles(id: id, texts: angles.angles)
         case "error":
             let failure = try decoder.decode(StreamFailurePayload.self, from: payload)
             return .failure(id: id, .init(code: failure.code, message: failure.message, retryable: failure.retryable))
@@ -483,7 +488,8 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         boundary: String,
         note: String?,
         photo: PhotoAttachment?,
-        idempotencyKey: String
+        idempotencyKey: String,
+        intent: MurmurMomentIntent?
     ) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("murmur-multipart-\(UUID().uuidString)")
@@ -504,6 +510,7 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             try write("\(value)\r\n")
         }
         try field("idempotency_key", idempotencyKey)
+        if let intent { try field("intent", intent.rawValue) }
         if let note, !note.isEmpty { try field("note", note) }
         if let photo {
             try write("--\(boundary)\r\n")
@@ -613,6 +620,7 @@ private struct DevicesResponse: Decodable, Sendable { let devices: [MurmurDevice
 
 private struct BubblePayload: Decodable { let text: String }
 private struct DonePayload: Decodable { let move: String?; let scene: String? }
+private struct AnglesPayload: Decodable { let angles: [String] }
 private struct StreamFailurePayload: Decodable { let code: String; let message: String; let retryable: Bool }
 private struct ErrorEnvelope: Decodable { let error: StreamFailurePayload }
 

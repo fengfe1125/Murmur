@@ -260,6 +260,17 @@ design.md 是锁定的视觉系统。安卓端用 `MurmurTheme.kt` 集中定义�
   无 cookie 持久化；API 地址仅来自 BuildConfig/local.properties，与 iOS 的 xcconfig 同策略。
 - **Data safety 表单**：按 `PrivacyInfo.xcprivacy` 的等价内容填写（照片内容、设备标识
   用于认证、通知 token 等），与 iOS 声明保持一致。
+- **当年今日（与 iOS 同步落地）**：iOS 侧用 PhotoKit 读本机相册找"同一天的旧照片"，
+  浏览像素只进内存 NSCache、不落盘；只有用户上滑选中的那张才走常规上传临时文件
+  生命周期。Android 对应物：`READ_MEDIA_IMAGES` 运行时权限（API 33+）；API 34+ 的
+  partial access（`READ_MEDIA_VISUAL_USER_SELECTED`）等同 iOS 的 `.limited`——入口整个
+  隐藏，不降级成"今天没有旧照片"。MediaStore 查询按 `DATE_TAKEN` 的 N 段谓词（每年
+  今天 ±1 天），排除截图目录与连拍非代表帧，浏览位图只进内存 LruCache。当天没有旧照片、
+  或旧照片翻完之后，两边都回落到"相册里随机一张"（Android 用同一套谓词去掉日期段，
+  按随机 offset 取，不做全表遍历），卡片文案必须区分「去年的今天」与「相册里翻到的」。
+  上滑选中的那张进入「照片房间」：`POST /v1/moments` 带 `intent=photo_reading`，服务端
+  读图后回一条 guess 气泡 + 一个 `angles` 事件；房间之后的每一轮都是不带图的普通
+  moment。Play Console 的 Data safety 与权限声明（含照片用途说明视频）随该功能同步更新。
 
 ## 8. 服务端改造清单汇总 —— 全部已落地（2026-08）
 
