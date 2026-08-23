@@ -255,7 +255,7 @@ private struct MessageRow: View {
                         if !message.text.isEmpty {
                             Text(message.text)
                                 .font(MurmurTheme.body(.body))
-                                .foregroundStyle(isOutgoing ? Color.white : MurmurTheme.ink)
+                                .foregroundStyle(isOutgoing ? MurmurTheme.onAccent : MurmurTheme.ink)
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .padding(.horizontal, 14)
@@ -635,12 +635,14 @@ struct MurmurTranscriptView: View {
 
     /// One rule for the mark: a row of the person's own that ended in `.failed`
     /// always carries one, and never carries ticks.  The model's reason is used
-    /// when it has one; a row read back from disk kept the verdict but not the
-    /// reason — the app was restarted since — and there is nothing left to send
-    /// again, so it says only that much.
+    /// when it has one.  A row read back from disk kept the verdict but not the
+    /// reason, and says only that much — but it is still pressable, because the
+    /// transcript holds everything the send needs: the words, its own copy of
+    /// the photo, and the key it went up under.
     private func sendFailure(for message: MurmurMessage) -> MurmurSendFailure? {
         guard message.author == .you, message.delivery == .failed else { return nil }
-        return model.sendFailures[message.id] ?? .interrupted
+        if let standing = model.sendFailures[message.id] { return standing }
+        return .interrupted(canResend: !message.text.isEmpty || message.imageFile != nil)
     }
 
     /// One display pass back to the newest line, taken only when the window

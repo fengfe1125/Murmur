@@ -11,7 +11,8 @@ struct MurmurApp: App {
     init() {
         _session = StateObject(wrappedValue: MurmurSessionModel(
             api: MurmurEnvironment.makeAPIClient(),
-            transcriptStore: MurmurEnvironment.makeTranscriptStore()
+            transcriptStore: MurmurEnvironment.makeTranscriptStore(),
+            archive: MurmurEnvironment.makeArchive()
         ))
         _notifications = StateObject(wrappedValue: .shared)
     }
@@ -32,7 +33,7 @@ private struct MurmurRootView: View {
     @State private var showNotificationEducation = false
 
     var body: some View {
-        MurmurChatView(model: session)
+        MurmurShell(model: session)
             .task {
                 await session.bootstrap()
                 await notifications.refreshAuthorizationStatus()

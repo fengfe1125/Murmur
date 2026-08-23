@@ -93,6 +93,25 @@ enum MurmurEnvironment {
         return MurmurTranscriptStore()
     }
 
+    /// 当年今日's archive, redirected the same way and under the same flags —
+    /// a UI test that opened a room yesterday must not leave a mark on today's
+    /// calendar for the next one to trip over.
+    @MainActor
+    static func makeArchive() -> MurmurArchive {
+#if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--murmur-ui-testing") {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("murmur-ui-archive", isDirectory: true)
+            if arguments.contains("--murmur-reset-transcript") {
+                try? FileManager.default.removeItem(at: directory)
+            }
+            return MurmurArchive(store: MurmurTranscriptStore(directory: directory))
+        }
+#endif
+        return MurmurArchive()
+    }
+
     private static var defaultBaseURL: String {
 #if DEBUG
         "http://127.0.0.1:8766"

@@ -26,6 +26,13 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
     let sentAt: Date
     var delivery: MurmurDeliveryState
     var momentID: String?
+    /// The key this row's send went up under.  Kept so that a row still marked
+    /// failed after a relaunch can be sent again as the *same* moment rather
+    /// than a second one — without it a resend across a restart risks saying
+    /// the same thing twice to a server that did quietly accept the first go.
+    /// Optional because transcripts written before this existed decode without
+    /// it; those rows fall back to a fresh key.
+    var idempotencyKey: String?
 
     init(
         id: String = UUID().uuidString,
@@ -34,7 +41,8 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
         imageFile: String? = nil,
         sentAt: Date = Date(),
         delivery: MurmurDeliveryState = .sent,
-        momentID: String? = nil
+        momentID: String? = nil,
+        idempotencyKey: String? = nil
     ) {
         self.id = id
         self.author = author
@@ -43,18 +51,19 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
         self.sentAt = sentAt
         self.delivery = delivery
         self.momentID = momentID
+        self.idempotencyKey = idempotencyKey
     }
 }
 
-/// Somewhere to write a row into the conversation's scrollback from outside it.
+/// Somewhere for 当年今日's room to write its exchange down.
 ///
-/// 当年今日's room holds its own screen and its own turn, but what is said in
-/// there is still said to Murmur — so it belongs in the same history as
-/// everything else rather than disappearing when the room closes.  The room
-/// writes through this and never touches the store, which stays the session's
-/// to own: two writers on one JSON file would each overwrite the other's turn.
+/// The room holds its own screen and its own turn, and what is said in there is
+/// still said to Murmur — so it is kept, but kept apart: `MurmurArchive` files
+/// it by the day it happened on, and the conversation never sees it.  The room
+/// writes through this and never touches a store directly; two writers on one
+/// JSON file would each overwrite the other's turn.
 @MainActor
-protocol MurmurTranscriptRecorder: AnyObject {
+protocol MurmurRoomRecorder: AnyObject {
     /// Appends one row.  `photoURL` is copied into transcript storage before
     /// the row lands, so a row never names a file that is about to be deleted.
     func record(_ message: MurmurMessage, photoURL: URL?) async
@@ -74,10 +83,16 @@ actor MurmurTranscriptStore {
     /// convenience for the reader, not an archive, and an unbounded JSON file
     /// would eventually cost a visible pause on launch.
     static let historyLimit = 600
+    /// 当年今日's archive is the one place that *is* an archive — a day you
+    /// talked about a photo should still be on the calendar next year — so it
+    /// takes a far higher ceiling.  Still a ceiling: an unbounded file would
+    /// eventually be read on every launch.
+    static let archiveLimit = 6_000
 
     private let directory: URL
     private let fileURL: URL
     private let imageDirectory: URL
+    private let limit: Int
     /// Photos copied in but not yet named by any saved message.  A send saves
     /// the transcript at least twice — once when the line appears, again when
     /// the reply lands — and the copy finishes somewhere in between.  Without
@@ -85,13 +100,25 @@ actor MurmurTranscriptStore {
     /// about, and the message ends up pointing at a file that no longer exists.
     private var pendingAdoptions: Set<String> = []
 
-    init(directory: URL? = nil) {
+    init(directory: URL? = nil, limit: Int = MurmurTranscriptStore.historyLimit) {
         let base = directory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Murmur", isDirectory: true)
         self.directory = base
         self.fileURL = base.appendingPathComponent("transcript.json")
         self.imageDirectory = base.appendingPathComponent("images", isDirectory: true)
+        self.limit = limit
+    }
+
+    /// The store 当年今日's rooms write into.  A directory of its own, beside
+    /// the conversation and never mixed into it: what was said about an old
+    /// photo belongs to the day it was said on, not to the chat.
+    static func archive(directory: URL? = nil) -> MurmurTranscriptStore {
+        let base = directory ?? FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Murmur", isDirectory: true)
+            .appendingPathComponent("archive", isDirectory: true)
+        return MurmurTranscriptStore(directory: base, limit: archiveLimit)
     }
 
     private func ensureDirectories() {
@@ -120,7 +147,7 @@ actor MurmurTranscriptStore {
 
     func save(_ messages: [MurmurMessage]) {
         ensureDirectories()
-        let trimmed = messages.suffix(Self.historyLimit)
+        let trimmed = messages.suffix(limit)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(Array(trimmed)) else { return }

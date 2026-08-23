@@ -301,8 +301,6 @@ final class OnThisDayModel: ObservableObject {
 
     /// The entry disc hides itself under .limited: with a hand-picked slice
     /// of the library the feature cannot tell the truth, so it does not knock.
-    var entryVisible: Bool { authorization != .limited }
-
     /// How many photos stay queued behind the one on screen.  The shelf tops
     /// itself up from that far out so that 下滑 never waits on a fetch.
     private static let reserve = 3
@@ -537,6 +535,7 @@ struct OnThisDayFlowView: View {
 /// gesture with an explicit direction-and-distance gate, attached as a
 /// high-priority gesture so nothing else in the tree can outbid it.
 struct OnThisDayView: View {
+
     @ObservedObject var model: OnThisDayModel
     let onSend: (UIImage) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -603,8 +602,9 @@ struct OnThisDayView: View {
                     UIApplication.shared.open(url)
                 }
             case .limited:
-                // Reached only if access was reduced while the sheet was open
-                // — the entry disc hides itself instead of arriving here.
+                // The ordinary path now.  当年今日 is a tab, and a tab cannot
+                // quietly absent itself the way the old disc did — so limited
+                // access says what it is instead of the day looking empty.
                 gate(
                     title: "只能看到你选的那几张",
                     message: "当年今日需要翻整个相册才找得到那一天。在系统设置里把权限改成「所有照片」后再来。",
@@ -658,7 +658,7 @@ struct OnThisDayView: View {
     @ViewBuilder
     private var content: some View {
         if model.isLoading {
-            ProgressView().tint(MurmurTheme.olive)
+            ProgressView().tint(MurmurTheme.accentInk)
                 .accessibilityIdentifier("onthisday-loading")
         } else if model.candidates.isEmpty {
             // Full access, and the library itself is empty — the one honest
@@ -728,7 +728,7 @@ struct OnThisDayView: View {
                     .resizable()
                     .scaledToFit()
             } else {
-                ProgressView().tint(MurmurTheme.olive)
+                ProgressView().tint(MurmurTheme.accentInk)
             }
         }
         .aspectRatio(3 / 4, contentMode: .fit)

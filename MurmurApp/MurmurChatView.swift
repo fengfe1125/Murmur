@@ -5,51 +5,88 @@ import SwiftUI
 import UIKit
 
 @MainActor
+/// Paper and ink, with one cyan accent.
+///
+/// Every colour is one `UIColor { traits in ... }` so light and dark resolve
+/// from a single declaration.  The names here are the same names the Figma
+/// `Murmur` collection uses — see `.claude/skills/murmur-figma`.
 enum MurmurTheme {
+    // Every colour is one inline `UIColor { traits in ... }`, and stays that
+    // way.  Factored into a helper that takes the two values, the closure
+    // captures them and inherits the enclosing actor isolation — and UIKit
+    // resolves dynamic colours off the main thread, which trapped in
+    // `swift_task_checkIsolated` the moment a colour was first drawn.
+
+    /// #FCF9E8 — the page.
     static let paper = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.08, green: 0.08, blue: 0.07, alpha: 1)
-            : UIColor(red: 0.96, green: 0.95, blue: 0.91, alpha: 1)
+            ? UIColor(red: 0.078, green: 0.078, blue: 0.059, alpha: 1)
+            : UIColor(red: 0.988, green: 0.976, blue: 0.910, alpha: 1)
     })
+    /// #FFFDF3 — anything sitting on the page.
     static let raisedPaper = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.12, green: 0.12, blue: 0.10, alpha: 1)
-            : UIColor(red: 0.99, green: 0.98, blue: 0.95, alpha: 1)
+            ? UIColor(red: 0.118, green: 0.118, blue: 0.090, alpha: 1)
+            : UIColor(red: 1.000, green: 0.992, blue: 0.953, alpha: 1)
     })
     static let ink = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.92, green: 0.91, blue: 0.86, alpha: 1)
-            : UIColor(red: 0.12, green: 0.12, blue: 0.10, alpha: 1)
+            ? UIColor(red: 0.922, green: 0.914, blue: 0.878, alpha: 1)
+            : UIColor(red: 0.118, green: 0.118, blue: 0.098, alpha: 1)
     })
     static let secondaryInk = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.62, green: 0.62, blue: 0.56, alpha: 1)
-            : UIColor(red: 0.38, green: 0.38, blue: 0.33, alpha: 1)
+            ? UIColor(red: 0.620, green: 0.612, blue: 0.573, alpha: 1)
+            : UIColor(red: 0.380, green: 0.376, blue: 0.353, alpha: 1)
     })
     static let rule = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.24, green: 0.24, blue: 0.20, alpha: 1)
-            : UIColor(red: 0.81, green: 0.80, blue: 0.73, alpha: 1)
+            ? UIColor(red: 0.200, green: 0.200, blue: 0.165, alpha: 1)
+            : UIColor(red: 0.886, green: 0.871, blue: 0.784, alpha: 1)
     })
-    static let olive = Color(uiColor: UIColor { traits in
+
+    /// #00B7C7 — fills, bubbles, selected states.  **Not small text on paper:**
+    /// it reaches only 2.2:1 there, which is why `accentInk` exists.
+    static let accent = Color(red: 0.000, green: 0.718, blue: 0.780)
+    /// The accent when it has to be read rather than seen: deepened to #00707A
+    /// in light (5.4:1 on paper) and left at the brand cyan in dark, where the
+    /// page is dark enough for it to clear 7:1 already.
+    static let accentInk = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.66, green: 0.70, blue: 0.47, alpha: 1)
-            : UIColor(red: 0.32, green: 0.37, blue: 0.18, alpha: 1)
+            ? UIColor(red: 0.000, green: 0.718, blue: 0.780, alpha: 1)
+            : UIColor(red: 0.000, green: 0.439, blue: 0.478, alpha: 1)
     })
+    /// #0B2124 — what rides on top of `accent`.  White would be 2.4:1; this is
+    /// 6.9:1, which is the whole reason outgoing bubbles carry dark text.
+    static let onAccent = Color(red: 0.043, green: 0.129, blue: 0.141)
     static let coral = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.93, green: 0.53, blue: 0.43, alpha: 1)
-            : UIColor(red: 0.76, green: 0.27, blue: 0.20, alpha: 1)
+            ? UIColor(red: 0.941, green: 0.541, blue: 0.447, alpha: 1)
+            : UIColor(red: 0.769, green: 0.271, blue: 0.180, alpha: 1)
     })
-    /// Outgoing chat bubbles only.  Kept separate from `olive`, which is the
-    /// app-wide tint, so softening the bubble does not wash out every control.
-    /// Both values stay above 4.5:1 against the white bubble text; the dark
-    /// variant deepens rather than lightens, because the light olive used as a
-    /// tint there only reaches 2.3:1 behind white.
-    static let outgoingBubble = Color(uiColor: UIColor { traits in
+
+    /// Outgoing chat bubbles.  Kept a separate name from `accent` so softening
+    /// the bubble later does not wash out every control with it.
+    static let outgoingBubble = accent
+
+    /// The tint carried on top of the system material.  Low alpha on purpose —
+    /// the blur underneath is doing the work; this only warms it back towards
+    /// paper so glass does not read as grey.
+    static let glassTint = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.26, green: 0.33, blue: 0.18, alpha: 1)
-            : UIColor(red: 0.42, green: 0.48, blue: 0.25, alpha: 1)
+            ? UIColor(red: 0.137, green: 0.137, blue: 0.106, alpha: 0.44)
+            : UIColor(red: 1.000, green: 0.992, blue: 0.953, alpha: 0.44)
+    })
+    /// The hairline of light along a glass edge.
+    static let glassEdge = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(white: 1, alpha: 0.16)
+            : UIColor(white: 1, alpha: 0.55)
+    })
+    static let glassShadow = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(white: 0, alpha: 0.34)
+            : UIColor(red: 0.110, green: 0.110, blue: 0.090, alpha: 0.12)
     })
 
     /// One diameter for every standalone icon control, so the chrome reads
@@ -62,6 +99,10 @@ enum MurmurTheme {
     static let pageInset: CGFloat = 20
     static let contentWidth: CGFloat = 1_080
     static let corner: CGFloat = 18
+    /// Glass panels are rounder than cards: the header, the composer and the
+    /// tab bar all float, and a floating pane with a card's radius reads stuck.
+    static let glassCorner: CGFloat = 26
+    static let tabBarCorner: CGFloat = 28
 
     static func display(_ style: Font.TextStyle) -> Font {
         .system(style, design: .serif, weight: .semibold)
@@ -72,50 +113,75 @@ enum MurmurTheme {
     }
 }
 
+/// The one glass recipe, so the header, the composer and the tab bar cannot
+/// drift apart.
+///
+/// On iOS 26 the system's own glass draws it — the same call the floating discs
+/// make.  That is not only for the look: the tab bar's selected pill morphs
+/// between stops through `glassEffectID`, and a glass shape can only flow into
+/// another glass shape.  Hand-rolled material under a native pill would be two
+/// blurs stacked, and the pane it travels over would not be part of the motion.
+///
+/// Before iOS 26 it is drawn by hand: system material for the blur, a
+/// paper-warm tint on top of it, a hairline edge, and a soft shadow that lifts
+/// the pane off the page.
+struct MurmurGlass: ViewModifier {
+    var radius: CGFloat = MurmurTheme.glassCorner
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: shape)
+        } else {
+            content.background {
+                shape
+                    .fill(.ultraThinMaterial)
+                    .overlay { shape.fill(MurmurTheme.glassTint) }
+                    .overlay { shape.strokeBorder(MurmurTheme.glassEdge, lineWidth: 1) }
+                    .shadow(color: MurmurTheme.glassShadow, radius: 14, y: 6)
+            }
+        }
+    }
+}
+
+extension View {
+    func murmurGlass(radius: CGFloat = MurmurTheme.glassCorner) -> some View {
+        modifier(MurmurGlass(radius: radius))
+    }
+}
+
+/// The 聊天 tab.  The gates around it — checking, enrolment, reconnect — moved
+/// up to `MurmurRootView`, which owns whether this screen is on at all; 当年今日
+/// and 设置 moved out sideways into tabs of their own.  What is left here is the
+/// conversation and the one disc that says whether the wire is good.
 struct MurmurChatView: View {
     @ObservedObject var model: MurmurSessionModel
     @EnvironmentObject private var notifications: MurmurNotificationBridge
-    @State private var showSettings = false
     @State private var showCamera = false
-    @State private var showOnThisDay = false
-    @StateObject private var onThisDay = OnThisDayModel()
-    @Environment(\.scenePhase) private var scenePhase
     @State private var topChromeHeight: CGFloat = 0
     @State private var topFadeHeight: CGFloat = 0
-    /// Ties the settings sheet to the gear it comes from.  See the transition
-    /// on the sheet below.
-    @Namespace private var settingsZoom
 
     var body: some View {
-        // The chrome floats: the conversation owns the whole screen and the two
-        // discs sit on top of it, rather than a band that pushes the chat down.
+        // The chrome floats: the conversation owns the whole screen and the
+        // mark sits on top of it, rather than a band that pushes the chat down.
         // `safeAreaPadding` is what keeps that honest — the content is inset by
-        // exactly the height of the discs, so at rest nothing is behind them,
-        // and scrolling passes the conversation under two small circles instead
-        // of under a full-width slab.
+        // exactly the height of the disc, so at rest nothing is behind it.
         // The VStack is load-bearing: left to itself a ScrollView at the root
         // of the scene draws all the way up behind the status bar, and the
-        // conversation ends up tangled in the clock.  Wrapped, its frame stops
-        // at the safe area, and the discs float inside that frame.
+        // conversation ends up tangled in the clock.
         VStack(spacing: 0) {
-            Group {
-                if model.connection == .checking {
-                    ConnectionLoadingView()
-                } else if model.identity == nil {
-                    EnrollmentView(model: model)
-                } else if model.requiresDeviceReconnect {
-                    DeviceReconnectView(model: model)
-                } else {
-                    MomentWorkbench(model: model, showCamera: $showCamera)
-                }
-            }
-            .safeAreaPadding(.top, topChromeHeight)
+            MomentWorkbench(model: model, showCamera: $showCamera)
+                .safeAreaPadding(.top, topChromeHeight)
         }
         // A scroll view draws all the way up behind the status bar whatever
         // frame it is given, and a bubble tangled in the clock is worse than
         // either problem this is trying to solve.  Fading is the way to keep
-        // the conversation full-height without laying anything over it: the
-        // text dissolves as it passes the discs instead of being cut by a bar.
+        // the conversation full-height without laying anything over it.
+        // A scroll view draws all the way up behind the status bar whatever
+        // frame it is given, and a bubble tangled in the clock is worse than
+        // either problem this is trying to solve.  Fading is the way to keep
+        // the conversation full-height without laying anything over it.
         .mask(alignment: .top) {
             VStack(spacing: 0) {
                 LinearGradient(
@@ -133,33 +199,15 @@ struct MurmurChatView: View {
             .ignoresSafeArea()
         }
         .overlay(alignment: .top) {
-            MurmurTopChrome(
-                connection: model.connection,
-                showsSettings: model.identity != nil,
-                showsOnThisDay: model.identity != nil && onThisDay.entryVisible,
-                settingsZoom: settingsZoom,
-                onSettings: { showSettings = true },
-                onOnThisDay: { showOnThisDay = true }
-            )
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-                topChromeHeight = frame.height
-                // Where the discs end in the window is where the chat becomes
-                // fully legible again.
-                topFadeHeight = frame.maxY
-            }
+            MurmurTopChrome(connection: model.connection)
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                    topChromeHeight = frame.height
+                    // Where the disc ends in the window is where the chat
+                    // becomes fully legible again.
+                    topFadeHeight = frame.maxY
+                }
         }
         .background(MurmurTheme.paper.ignoresSafeArea())
-        // The gear grows under the finger exactly as the mark does — measured
-        // at the same 1.36× — and then nobody sees it, because presenting a
-        // sheet scales the whole screen *down* behind it in the same breath.
-        // The press was not weaker; it was overrun.  Zooming the sheet out of
-        // the gear itself is what lets it finish: the disc keeps growing, into
-        // the sheet, instead of being shrunk away mid-spring.
-        .sheet(isPresented: $showSettings) {
-            MurmurSettingsView(model: model)
-                .environmentObject(notifications)
-                .navigationTransition(.zoom(sourceID: Self.settingsSource, in: settingsZoom))
-        }
         .sheet(isPresented: $showCamera) {
             CameraPicker(
                 onCaptureFile: { model.preparePhoto(at: $0) },
@@ -167,25 +215,7 @@ struct MurmurChatView: View {
             )
             .ignoresSafeArea()
         }
-        .fullScreenCover(isPresented: $showOnThisDay) {
-            // The photo swiped up here does not land in the composer.  It opens
-            // a room of its own, where the server reads it and the exchange is
-            // about that one picture — see `PhotoRoomView`.
-            OnThisDayFlowView(model: onThisDay) { image in
-                model.makePhotoRoom(image: image)
-            }
-        }
-        // The disc hides itself under .limited, so the chrome has to re-ask
-        // whenever the app comes back — that is when a settings change lands.
-        .task { await onThisDay.refreshAuthorization() }
-        .onChange(of: scenePhase, initial: false) { _, phase in
-            guard phase == .active else { return }
-            Task { await onThisDay.refreshAuthorization() }
-        }
-        .tint(MurmurTheme.olive)
     }
-
-    fileprivate static let settingsSource = "murmur-settings-disc"
 }
 
 /// Independent discs floating over the transcript: the mark, 当年今日 and the
@@ -193,11 +223,6 @@ struct MurmurChatView: View {
 /// and the conversation is the 44pt of each disc.
 private struct MurmurTopChrome: View {
     let connection: MurmurConnectionState
-    let showsSettings: Bool
-    let showsOnThisDay: Bool
-    let settingsZoom: Namespace.ID
-    let onSettings: () -> Void
-    let onOnThisDay: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -219,37 +244,6 @@ private struct MurmurTopChrome: View {
                     .frame(height: 28)
                     .background(MurmurTheme.raisedPaper, in: Capsule())
                     .overlay { Capsule().stroke(MurmurTheme.rule, lineWidth: 1) }
-            }
-            if showsOnThisDay {
-                // The third disc belongs to the top chrome, not the composer:
-                // the composer's row is "one action at a time", and browsing
-                // old photos is not an act of composing.
-                Button(action: onOnThisDay) {
-                    MurmurFloatingDisc {
-                        Image(systemName: "memories")
-                            .font(.system(size: 20, weight: .regular))
-                            .foregroundStyle(MurmurTheme.ink)
-                    }
-                }
-                .murmurDiscButtonStyle()
-                .accessibilityLabel("当年今日")
-                .accessibilityIdentifier("onthisday-button")
-            }
-            if showsSettings {
-                Button(action: onSettings) {
-                    MurmurFloatingDisc {
-                        Image(systemName: "gearshape")
-                            .font(.system(size: 23, weight: .regular))
-                            .foregroundStyle(MurmurTheme.ink)
-                    }
-                }
-                .murmurDiscButtonStyle()
-                // The disc the settings sheet grows out of, and shrinks back
-                // into.  On the whole button, so the sheet leaves from the
-                // same 44pt circle the finger pressed.
-                .matchedTransitionSource(id: MurmurChatView.settingsSource, in: settingsZoom)
-                .accessibilityLabel("设置，\(connection.label)")
-                .accessibilityIdentifier("settings-button")
             }
         }
         .frame(maxWidth: MurmurTheme.contentWidth)
@@ -348,7 +342,7 @@ private struct MurmurQuietStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View { configuration.label }
 }
 
-private struct DeviceReconnectView: View {
+struct DeviceReconnectView: View {
     @ObservedObject var model: MurmurSessionModel
     @State private var confirmReset = false
 
@@ -389,12 +383,12 @@ private struct DeviceReconnectView: View {
     }
 }
 
-private struct ConnectionLoadingView: View {
+struct ConnectionLoadingView: View {
     var body: some View {
         VStack(spacing: 18) {
             MurmurMark(size: 58)
             ProgressView()
-                .tint(MurmurTheme.olive)
+                .tint(MurmurTheme.accentInk)
             Text("正在确认这台设备")
                 .font(MurmurTheme.body(.subheadline))
                 .foregroundStyle(MurmurTheme.secondaryInk)
@@ -404,7 +398,7 @@ private struct ConnectionLoadingView: View {
     }
 }
 
-private struct EnrollmentView: View {
+struct EnrollmentView: View {
     @ObservedObject var model: MurmurSessionModel
     @State private var inviteCode = ""
     @FocusState private var focused: Bool
@@ -606,10 +600,6 @@ private struct MomentWorkbench: View {
                     value: model.draftFailure
                 )
             }
-            // SwiftUI's own avoidance would be a second, differently timed
-            // motion on top of the one above; two of them are what left the
-            // band of paper behind.
-            .ignoresSafeArea(.keyboard, edges: .bottom)
         .photosPicker(isPresented: $showLibrary, selection: $selectedItem, matching: .images)
         .fullScreenCover(item: $openPhoto) { photo in
             MurmurPhotoLightbox(url: photo.url)
@@ -853,7 +843,7 @@ private final class FocusClock {
     var last = Date.distantPast
 }
 
-private struct MurmurSettingsView: View {
+struct MurmurSettingsView: View {
     @ObservedObject var model: MurmurSessionModel
     @EnvironmentObject private var notifications: MurmurNotificationBridge
     @Environment(\.dismiss) private var dismiss
@@ -862,6 +852,7 @@ private struct MurmurSettingsView: View {
     @State private var deviceToRemove: MurmurDevice?
     @State private var connectingPush = false
     @State private var confirmClearTranscript = false
+    @State private var confirmClearArchive = false
 
     var body: some View {
         NavigationStack {
@@ -896,14 +887,14 @@ private struct MurmurSettingsView: View {
                             HStack(spacing: 12) {
                                 Image(systemName: device.deviceName?.contains("iPad") == true ? "ipad" : "iphone")
                                     .frame(width: 28)
-                                    .foregroundStyle(MurmurTheme.olive)
+                                    .foregroundStyle(MurmurTheme.accentInk)
                                 VStack(alignment: .leading, spacing: 3) {
                                     HStack(spacing: 6) {
                                         Text(device.deviceName ?? "Apple 设备")
                                         if device.id == model.identity?.deviceID {
                                             Text("当前")
                                                 .font(.caption2.weight(.semibold))
-                                                .foregroundStyle(MurmurTheme.olive)
+                                                .foregroundStyle(MurmurTheme.accentInk)
                                         }
                                     }
                                     Text(device.pushEnabled ? "推送已连接" : "推送未连接")
@@ -980,6 +971,18 @@ private struct MurmurSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                // Two histories, two switches.  当年今日's archive is not part
+                // of the conversation and must not be swept away with it.
+                Section("当年今日") {
+                    LabeledContent("留下的日子", value: "\(model.archive.daysWithRooms.count) 天")
+                    Button("清空当年今日的记录", role: .destructive) { confirmClearArchive = true }
+                        .disabled(model.archive.rows.isEmpty)
+                        .accessibilityIdentifier("clear-archive")
+                    Text("日历上的每一天，连同那天聊过的照片，都只存在这台设备上。清空之后日历会空掉，服务端的记忆不受影响。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section {
                     Button("删除账号与全部记忆", role: .destructive) { confirmDelete = true }
                 } footer: {
@@ -996,10 +999,9 @@ private struct MurmurSettingsView: View {
                 await model.loadPreferences()
                 await model.refreshDevices()
             }
-            .navigationTitle("设置")
+            .navigationTitle("我的")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
             }
             .alert("删除账号与全部记忆？", isPresented: $confirmDelete) {
                 Button("取消", role: .cancel) {}
@@ -1019,6 +1021,14 @@ private struct MurmurSettingsView: View {
                 }
             } message: {
                 Text("这台设备上的对话和其中的照片会被删除，服务端的记忆不受影响。")
+            }
+            .alert("清空当年今日的记录？", isPresented: $confirmClearArchive) {
+                Button("取消", role: .cancel) {}
+                Button("确认清空", role: .destructive) {
+                    Task { await model.archive.clear() }
+                }
+            } message: {
+                Text("日历会空掉，那些天聊过的照片也会从这台设备上删除。服务端的记忆不受影响。")
             }
             .alert("重置本机安全身份？", isPresented: $confirmReconnect) {
                 Button("取消", role: .cancel) {}
@@ -1158,7 +1168,7 @@ private struct DraftPhotoTile: View {
                 } else {
                     ZStack {
                         MurmurTheme.raisedPaper
-                        ProgressView().tint(MurmurTheme.olive)
+                        ProgressView().tint(MurmurTheme.accentInk)
                     }
                     .frame(width: Self.side, height: Self.side)
                     .clipShape(RoundedRectangle(cornerRadius: 14))

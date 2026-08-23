@@ -47,7 +47,7 @@ final class MurmurUITests: XCTestCase {
 
         let composer = app.textFields["moment-composer"]
         let addPhoto = app.buttons["添加照片"]
-        let settings = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "设置")).firstMatch
+        let settings = app.buttons["tab-me"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertTrue(addPhoto.waitForExistence(timeout: 3))
         XCTAssertTrue(settings.waitForExistence(timeout: 3))
@@ -79,7 +79,11 @@ final class MurmurUITests: XCTestCase {
         XCTAssertEqual(composer.label, "这一刻的文字")
         XCTAssertEqual(app.buttons["send-moment"].label, "发送这一刻")
         XCTAssertTrue(app.buttons["添加照片"].exists)
-        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "设置")).firstMatch.exists)
+        // The three stops are named, and the one you are on says so.
+        XCTAssertEqual(app.buttons["tab-chat"].label, "聊天")
+        XCTAssertEqual(app.buttons["tab-onThisDay"].label, "当年今日")
+        XCTAssertEqual(app.buttons["tab-me"].label, "我的")
+        XCTAssertTrue(app.buttons["tab-chat"].isSelected)
         XCTAssertTrue(
             app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "发来眼前的一刻")).firstMatch.exists
         )
@@ -241,11 +245,10 @@ final class MurmurUITests: XCTestCase {
     func testSettingsExposesNotificationToggleAndFrequency() throws {
         continueAfterFailure = false
         let app = launchApp()
-        let settings = app.descendants(matching: .any)["settings-button"].firstMatch
+        let settings = app.buttons["tab-me"]
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
         guard UIDevice.current.userInterfaceIdiom == .phone else { return }
         settings.tap()
-        XCTAssertTrue(app.buttons["完成"].waitForExistence(timeout: 5))
         XCTAssertTrue(
             app.staticTexts["允许通知"].waitForExistence(timeout: 3)
                 || app.switches["允许通知"].waitForExistence(timeout: 2)
@@ -501,9 +504,7 @@ final class MurmurUITests: XCTestCase {
     /// these are the only honest checks.
     func testOnThisDayAsksInContextBeforeReadingTheLibrary() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday-ask"])
-        let entry = app.buttons["onthisday-button"]
-        XCTAssertTrue(entry.waitForExistence(timeout: 5))
-        entry.tap()
+        openOnThisDay(in: app)
         XCTAssertTrue(app.buttons["onthisday-allow"].waitForExistence(timeout: 5))
         app.buttons["onthisday-allow"].tap()
         XCTAssertTrue(onThisDayPhoto(in: app).waitForExistence(timeout: 5))
@@ -511,18 +512,18 @@ final class MurmurUITests: XCTestCase {
 
     func testOnThisDayDeniedStateOffersSystemSettings() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday-denied"])
-        let entry = app.buttons["onthisday-button"]
-        XCTAssertTrue(entry.waitForExistence(timeout: 5))
-        entry.tap()
+        openOnThisDay(in: app)
         XCTAssertTrue(app.buttons["onthisday-open-settings"].waitForExistence(timeout: 5))
     }
 
-    /// Limited access is a designed absence, not an error screen: the entry
-    /// hides rather than implying the day was empty.
-    func testOnThisDayHidesItsEntryUnderLimitedAccess() throws {
+    /// The browser can no longer absent itself the way the old disc did — the
+    /// calendar tab is always there — so limited access says what it is rather
+    /// than letting the day look empty.
+    func testLimitedAccessSaysSoInsteadOfLookingEmpty() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday-limited"])
-        XCTAssertTrue(app.buttons["settings-button"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["onthisday-button"].exists)
+        openOnThisDay(in: app)
+        XCTAssertTrue(app.buttons["onthisday-open-settings"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["只能看到你选的那几张"].exists)
     }
 
     /// A blank day is not a dead end any more: with nothing from this day in
@@ -530,7 +531,7 @@ final class MurmurUITests: XCTestCase {
     /// rather than dressing an ordinary Tuesday up as an anniversary.
     func testBlankDayFallsBackToTheAlbum() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday-empty"])
-        app.buttons["onthisday-button"].tap()
+        openOnThisDay(in: app)
         XCTAssertTrue(onThisDayPhoto(in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["相册里翻到的"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["相册里还没有照片。"].exists)
@@ -539,7 +540,7 @@ final class MurmurUITests: XCTestCase {
     /// The one honest dead end left: full access, and nothing anywhere.
     func testAnEmptyLibrarySaysSo() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday-barren"])
-        app.buttons["onthisday-button"].tap()
+        openOnThisDay(in: app)
         XCTAssertTrue(app.staticTexts["相册里还没有照片。"].waitForExistence(timeout: 5))
     }
 
@@ -547,7 +548,7 @@ final class MurmurUITests: XCTestCase {
     /// instead of looping back to the first card.
     func testTheShelfCarriesOnPastTheDaysOwnPhotos() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday"])
-        app.buttons["onthisday-button"].tap()
+        openOnThisDay(in: app)
         let photo = readyOnThisDayPhoto(in: app)
         XCTAssertTrue(app.staticTexts["去年的今天"].waitForExistence(timeout: 5))
 
@@ -562,7 +563,7 @@ final class MurmurUITests: XCTestCase {
     /// vertical — which the stubbed shelf makes repeatable.
     func testOnThisDaySwipesBetweenYearsAndOpensTheRoom() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday"])
-        app.buttons["onthisday-button"].tap()
+        openOnThisDay(in: app)
         let photo = readyOnThisDayPhoto(in: app)
         XCTAssertTrue(app.staticTexts["去年的今天"].waitForExistence(timeout: 5))
 
@@ -581,7 +582,7 @@ final class MurmurUITests: XCTestCase {
     /// in the field rather than sending it — the person still decides.
     func testThePhotoRoomShowsTheReadingAndItsThreeOpeners() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday"])
-        app.buttons["onthisday-button"].tap()
+        openOnThisDay(in: app)
         openPhotoRoom(in: app)
 
         XCTAssertTrue(line("这是……刚下过雨？", in: app).waitForExistence(timeout: 10))
@@ -596,11 +597,11 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(app.buttons["opener-0"].exists)
     }
 
-    /// Saying something closes the doors and gets an answer back — and the
-    /// exchange is still there in the conversation after the room is gone.
-    func testSayingSomethingInTheRoomAnswersAndJoinsTheConversation() throws {
+    /// Saying something closes the doors and gets an answer back — and none of
+    /// it leaks into the conversation, which is the whole point of the archive.
+    func testSayingSomethingInTheRoomAnswersAndStaysOutOfTheChat() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday"])
-        app.buttons["onthisday-button"].tap()
+        openOnThisDay(in: app)
         openPhotoRoom(in: app)
 
         // Through an opener rather than the keyboard: it is the way in the
@@ -621,12 +622,13 @@ final class MurmurUITests: XCTestCase {
             evaluatedWith: app.buttons["close-photo-room"]
         )
         wait(for: [roomGone], timeout: 5)
-        // The room was where it was said, not a separate place it lives: the
-        // line and the answer to it are in the conversation now, and the empty
-        // state is gone with them.
-        XCTAssertTrue(line("那天的天气", in: app).waitForExistence(timeout: 5))
-        XCTAssertTrue(line("这一刻，我收到了。", in: app).exists)
-        XCTAssertFalse(app.staticTexts["发来眼前的一刻。"].exists)
+        // Back on 当年今日's calendar, and today now carries a mark.
+        XCTAssertTrue(app.buttons["onthisday-entry"].waitForExistence(timeout: 5))
+        // The conversation is untouched: still on its empty state, with no row
+        // of the room's anywhere in it.
+        app.buttons["tab-chat"].tap()
+        XCTAssertTrue(app.staticTexts["发来眼前的一刻。"].waitForExistence(timeout: 5))
+        XCTAssertFalse(line("那天的天气", in: app).exists)
     }
 
     /// A reading that never lands says why and offers the same upload again,
@@ -635,7 +637,7 @@ final class MurmurUITests: XCTestCase {
         let app = launchApp(arguments: [
             "--murmur-stub-onthisday", "--murmur-stub-reading-fails"
         ])
-        app.buttons["onthisday-button"].tap()
+        openOnThisDay(in: app)
         openPhotoRoom(in: app)
 
         XCTAssertTrue(app.buttons["retry-photo-room"].waitForExistence(timeout: 10))
@@ -651,7 +653,7 @@ final class MurmurUITests: XCTestCase {
     /// not racing the animation.
     func testClosingDuringTheDissolveCallsTheSendOff() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday", "--murmur-slow-dissolve"])
-        app.buttons["onthisday-button"].tap()
+        openOnThisDay(in: app)
         let photo = readyOnThisDayPhoto(in: app)
 
         photo.swipeUp()
@@ -662,6 +664,42 @@ final class MurmurUITests: XCTestCase {
         XCTAssertFalse(
             app.descendants(matching: .any)["photo-room-photo"].waitForExistence(timeout: 6)
         )
+    }
+
+    /// Three screens are alive at once so each keeps its place, which makes
+    /// "off screen" a claim that has to be checked rather than assumed: a
+    /// VoiceOver reader on 聊天 must not be able to swipe into 设置's switches.
+    func testTheTabsNotOnScreenAreOutOfReach() throws {
+        let app = launchApp()
+        XCTAssertTrue(app.buttons["tab-chat"].waitForExistence(timeout: 5))
+        // Two things that exist only in 我的 and only in 当年今日.  Both are
+        // near the top of their screen, so "not there" is about reachability
+        // rather than about a Form row that has not been scrolled to yet.
+        XCTAssertFalse(app.descendants(matching: .any)["build-stamp"].firstMatch.exists)
+        XCTAssertFalse(app.buttons["onthisday-entry"].exists)
+
+        app.buttons["tab-me"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["build-stamp"].firstMatch.waitForExistence(timeout: 5)
+        )
+        // The composer belongs to 聊天 and is now the one out of reach.
+        XCTAssertFalse(app.textFields["moment-composer"].exists)
+    }
+
+    /// The pill is one view that travels rather than three that blink, which
+    /// is a claim about drawing.  What a test can hold is the state underneath
+    /// it: exactly one stop is selected, and it is the one that was pressed.
+    func testPressingAStopMovesTheSelectionToIt() throws {
+        let app = launchApp()
+        XCTAssertTrue(app.buttons["tab-chat"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-chat"].isSelected)
+        XCTAssertFalse(app.buttons["tab-onThisDay"].isSelected)
+
+        app.buttons["tab-onThisDay"].tap()
+        XCTAssertTrue(app.buttons["onthisday-entry"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-onThisDay"].isSelected)
+        XCTAssertFalse(app.buttons["tab-chat"].isSelected)
+        XCTAssertFalse(app.buttons["tab-me"].isSelected)
     }
 
     /// The photo card surfaces as an image element once its picture is in;
@@ -684,6 +722,17 @@ final class MurmurUITests: XCTestCase {
         )
         wait(for: [loaded], timeout: 10)
         return photo
+    }
+
+    /// 当年今日, opened the way a person opens it: the tab is a calendar, and
+    /// the browser is behind the card under it.
+    private func openOnThisDay(in app: XCUIApplication) {
+        let tab = app.buttons["tab-onThisDay"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 5))
+        tab.tap()
+        let entry = app.buttons["onthisday-entry"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 5))
+        entry.tap()
     }
 
     /// The room, opened the way a person opens it.

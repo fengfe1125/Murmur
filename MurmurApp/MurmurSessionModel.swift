@@ -46,6 +46,10 @@ final class MurmurSessionModel: ObservableObject {
     @Published private(set) var isAwaitingReply = false
 
     let transcriptStore: MurmurTranscriptStore
+    /// 当年今日's own history, kept apart from the conversation.  Owned here
+    /// because this is what hands it to a room; 当年今日's tab reads the same
+    /// object back, so a room that just closed is already on the calendar.
+    let archive: MurmurArchive
     private let api: any MurmurAPIClient
     private let photoLoader: PhotoLoader
     private let requestTimeoutSeconds: TimeInterval
@@ -72,6 +76,9 @@ final class MurmurSessionModel: ObservableObject {
     /// idempotency key and, for a photo, a temporary file that has not been
     /// swept up yet.  Everything else shows the mark and no offer.
     private var resendable: [String: Submission] = [:]
+    /// Reads of a failed row's photo back out of transcript storage, keyed by
+    /// that row, so a second press does not start a second copy.
+    private var rebuildTasks: [String: Task<Void, Never>] = [:]
     private var lastBubbleAt: Date?
     private var lastSubmission: Submission?
     private var didBootstrap = false
@@ -87,6 +94,7 @@ final class MurmurSessionModel: ObservableObject {
         requestTimeoutSeconds: TimeInterval = 45,
         uploadTimeoutSeconds: TimeInterval = 300,
         transcriptStore: MurmurTranscriptStore = MurmurTranscriptStore(),
+        archive: MurmurArchive? = nil,
         bubblePacing: MurmurBubblePacing = .human
     ) {
         self.api = api
@@ -94,6 +102,7 @@ final class MurmurSessionModel: ObservableObject {
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.uploadTimeoutSeconds = uploadTimeoutSeconds
         self.transcriptStore = transcriptStore
+        self.archive = archive ?? MurmurArchive()
         self.bubblePacing = bubblePacing
     }
 
@@ -108,6 +117,8 @@ final class MurmurSessionModel: ObservableObject {
         messages = []
         pendingMessageID = nil
         adoptTasks = [:]
+        for task in rebuildTasks.values { task.cancel() }
+        rebuildTasks = [:]
         // The marks belonged to rows that no longer exist; the originals those
         // rows were holding for a resend go with them.
         withdrawResendOffers()
@@ -270,9 +281,10 @@ final class MurmurSessionModel: ObservableObject {
             uploadTimeoutSeconds: uploadTimeoutSeconds,
             requestTimeoutSeconds: requestTimeoutSeconds,
             bubblePacing: bubblePacing,
-            // The room's exchange is part of the same conversation and joins
-            // the same scrollback; the room screen is just where it happened.
-            transcript: self
+            // Into the archive, never the conversation: what is said about an
+            // old photo belongs to the day it was said on, and the chat stays
+            // a chat.  当年今日 reads that archive back as a calendar.
+            transcript: archive
         )
     }
 
@@ -357,17 +369,19 @@ final class MurmurSessionModel: ObservableObject {
         let photo = draftPhoto
         // The outgoing turn joins the transcript before anything is queued, so
         // the bubble is on screen the instant the send button is pressed.
+        let key = UUID().uuidString.lowercased()
         let outgoing = MurmurMessage(
             author: .you,
             text: note,
             sentAt: Date(),
-            delivery: .sending
+            delivery: .sending,
+            idempotencyKey: key
         )
         let submission = Submission(
             messageID: outgoing.id,
             note: note.isEmpty ? nil : note,
             photo: photo,
-            idempotencyKey: UUID().uuidString.lowercased(),
+            idempotencyKey: key,
             replyToProactiveMomentID: note.isEmpty ? nil : proactiveMomentID
         )
         draftText = ""
@@ -396,19 +410,69 @@ final class MurmurSessionModel: ObservableObject {
     /// reaches for the mark they may have sent two more lines, and the one they
     /// pressed is the one that has to go.  The submission keeps its original
     /// idempotency key, so a moment the server did accept before the wire broke
-    /// is picked back up rather than said twice.  Anything the app no longer
-    /// holds a submission for is simply not on offer, and its mark is not a
-    /// button — see `sendFailures`.
+    /// is picked back up rather than said twice.
+    ///
+    /// A submission still in memory is used as it stands.  Otherwise the row
+    /// itself is enough to build one: the transcript holds the words, its own
+    /// copy of the photo, and the key the send went up under.  Before this, a
+    /// relaunch turned every failed row into a mark that could not be pressed —
+    /// which, after a bad afternoon on the server, is a screen full of messages
+    /// with no way to send any of them.
     func resend(_ messageID: String) {
-        guard let submission = resendable.removeValue(forKey: messageID) else { return }
         sendFailures.removeValue(forKey: messageID)
-        // The failed turn is already in the transcript; it goes back to
-        // spinning rather than being said a second time.
         if let index = messages.firstIndex(where: { $0.id == messageID }) {
             messages[index].delivery = .sending
             persistTranscript()
         }
-        enqueue(submission)
+        if let submission = resendable.removeValue(forKey: messageID) {
+            enqueue(submission)
+            return
+        }
+        guard let row = messages.first(where: { $0.id == messageID }) else { return }
+        // Re-reading the photo is I/O, so the row spins from the moment the
+        // button is pressed rather than after the file comes back.
+        rebuildTasks[messageID]?.cancel()
+        rebuildTasks[messageID] = Task { [weak self] in
+            guard let self else { return }
+            let photo = await self.reloadPhoto(for: row)
+            guard !Task.isCancelled else {
+                await self.photoLoader.discard(photo)
+                return
+            }
+            self.rebuildTasks.removeValue(forKey: messageID)
+            let note = row.text.isEmpty ? nil : row.text
+            guard note != nil || photo != nil else {
+                // Nothing left to send: the picture this row carried is gone
+                // from transcript storage and there were never any words.
+                self.markRebuildFailed(messageID)
+                return
+            }
+            self.enqueue(Submission(
+                messageID: messageID,
+                note: note,
+                photo: photo,
+                idempotencyKey: row.idempotencyKey ?? UUID().uuidString.lowercased(),
+                replyToProactiveMomentID: nil
+            ))
+        }
+    }
+
+    /// Copies a row's photo back out of transcript storage into a temporary
+    /// original the uploader can use.  The transcript keeps its own copy, so
+    /// the send's cleanup deletes only the temporary one.
+    private func reloadPhoto(for row: MurmurMessage) async -> PhotoAttachment? {
+        guard let name = row.imageFile else { return nil }
+        let url = transcriptStore.imageURL(for: name)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try? await photoLoader.load(fileURL: url)
+    }
+
+    private func markRebuildFailed(_ messageID: String) {
+        rebuildTasks.removeValue(forKey: messageID)
+        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
+        messages[index].delivery = .failed
+        persistTranscript()
+        sendFailures[messageID] = .init(message: "这条的内容已经不在了。", canResend: false)
     }
 
     func cancelCurrentOperation() {
@@ -643,20 +707,17 @@ final class MurmurSessionModel: ObservableObject {
         return resendable.values.contains { $0.photo?.id == photo.id }
     }
 
-    /// Withdraw every standing resend offer and delete the originals they were
-    /// holding.  The marks stay — those rows really did fail — but they stop
-    /// promising a send the app can no longer perform.
+    /// Drop every held submission and delete the temporary originals they were
+    /// holding.  The marks stay, and so do their offers: what a resend needs is
+    /// in the transcript — the words, its own copy of the photo, and the key —
+    /// so losing the in-memory submission no longer costs the person the send.
     ///
-    /// This is the terminal path for an original held by a failed row, and the
-    /// reason cancelling or clearing does not leave full-resolution photos
-    /// behind in the temporary directory.
+    /// This is the terminal path for a temporary original held by a failed row,
+    /// and the reason cancelling or clearing does not leave full-resolution
+    /// photos behind in the temporary directory.
     private func withdrawResendOffers() {
         guard !resendable.isEmpty else { return }
         let photos = resendable.values.compactMap(\.photo)
-        for id in resendable.keys {
-            guard let standing = sendFailures[id] else { continue }
-            sendFailures[id] = .init(message: standing.message, canResend: false)
-        }
         resendable = [:]
         Task { [photoLoader] in
             for photo in photos { await photoLoader.discard(photo) }
@@ -907,41 +968,6 @@ private extension MurmurStreamEvent {
         case let .accepted(id), let .bubble(id, _), let .angles(id, _), let .quiet(id),
              let .done(id, _, _), let .failure(id, _): id
         }
-    }
-}
-
-// MARK: - Writing 当年今日's room into the same history
-
-/// The conversation owns the scrollback, so the room hands its rows here rather
-/// than writing the file itself.  Everything below goes through the same
-/// `messages` array and the same save the composer uses; nothing about a row is
-/// different for having been said in the room.
-extension MurmurSessionModel: MurmurTranscriptRecorder {
-    func record(_ message: MurmurMessage, photoURL: URL?) async {
-        var row = message
-        // The copy finishes before the row lands.  The room deletes its
-        // original the moment the reading is over, and a row that named a file
-        // deleted a turn later would show an empty frame forever after.
-        if let photoURL {
-            row.imageFile = await transcriptStore.adoptImage(at: photoURL, id: row.id)
-        }
-        // A row with neither words nor a picture is an empty bubble; the copy
-        // failing is not a reason to put one in the scrollback.
-        guard !row.text.isEmpty || row.imageFile != nil else { return }
-        append(row)
-    }
-
-    func setDelivery(_ delivery: MurmurDeliveryState, for messageID: String) {
-        guard let index = messages.firstIndex(where: { $0.id == messageID }) else { return }
-        guard messages[index].delivery != delivery else { return }
-        messages[index].delivery = delivery
-        persistTranscript()
-    }
-
-    func withdraw(_ messageID: String) {
-        guard messages.contains(where: { $0.id == messageID }) else { return }
-        messages.removeAll { $0.id == messageID }
-        persistTranscript()
     }
 }
 
