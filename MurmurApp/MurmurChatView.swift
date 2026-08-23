@@ -114,19 +114,33 @@ enum MurmurTheme {
 }
 
 /// The one glass recipe, so the header, the composer and the tab bar cannot
-/// drift apart: system material for the blur, a paper-warm tint on top of it,
-/// a hairline edge, and a soft shadow that lifts the pane off the page.
+/// drift apart.
+///
+/// On iOS 26 the system's own glass draws it — the same call the floating discs
+/// make.  That is not only for the look: the tab bar's selected pill morphs
+/// between stops through `glassEffectID`, and a glass shape can only flow into
+/// another glass shape.  Hand-rolled material under a native pill would be two
+/// blurs stacked, and the pane it travels over would not be part of the motion.
+///
+/// Before iOS 26 it is drawn by hand: system material for the blur, a
+/// paper-warm tint on top of it, a hairline edge, and a soft shadow that lifts
+/// the pane off the page.
 struct MurmurGlass: ViewModifier {
     var radius: CGFloat = MurmurTheme.glassCorner
 
+    @ViewBuilder
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        return content.background {
-            shape
-                .fill(.ultraThinMaterial)
-                .overlay { shape.fill(MurmurTheme.glassTint) }
-                .overlay { shape.strokeBorder(MurmurTheme.glassEdge, lineWidth: 1) }
-                .shadow(color: MurmurTheme.glassShadow, radius: 14, y: 6)
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: shape)
+        } else {
+            content.background {
+                shape
+                    .fill(.ultraThinMaterial)
+                    .overlay { shape.fill(MurmurTheme.glassTint) }
+                    .overlay { shape.strokeBorder(MurmurTheme.glassEdge, lineWidth: 1) }
+                    .shadow(color: MurmurTheme.glassShadow, radius: 14, y: 6)
+            }
         }
     }
 }

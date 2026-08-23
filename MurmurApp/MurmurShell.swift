@@ -94,6 +94,12 @@ struct MurmurShell: View {
                 MurmurSettingsView(model: model).environmentObject(notifications)
             }
         }
+        // The tap that moves the pill runs inside `withAnimation`, and a
+        // conditional swap caught by one of those gets SwiftUI's default
+        // opacity transition for free — the whole screen would cross-fade
+        // under a bar that is only meant to flow.  The screen cuts; the bar
+        // flows.
+        .transaction { $0.animation = nil }
         // The bar floats over the tabs and the content is inset by exactly its
         // height.  A `safeAreaInset` on the TabView itself does not reach the
         // pages inside it — the chat's own composer inset simply stopped being
@@ -118,24 +124,75 @@ struct MurmurShell: View {
     }
 }
 
-/// One pane of glass with three stops on it.
+/// One pane of glass with three stops on it, and one pill that travels between
+/// them rather than blinking out on one and in on the next.
+///
+/// The pill is a single view that is never inserted or removed — only its frame
+/// changes, published by whichever stop is selected through
+/// `matchedGeometryEffect`.  That is the whole trick, and it was arrived at the
+/// hard way: giving each stop its own conditional pill and matching them by
+/// `glassEffectID` looks right in principle and, recorded frame by frame, is a
+/// cross-fade — the old pill fading out where it stood while the new one faded
+/// in where it stood.  A view that is never removed has no fade available to it
+/// and has to move.
+///
+/// On iOS 26 that one travelling shape is real glass, so it refracts and
+/// wobbles as it goes; before that it is a plain tinted capsule that slides.
 struct MurmurTabBar: View {
     @Binding var selection: MurmurTab
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var pill
+
+    private static let pillID = "murmur-tab-pill"
 
     var body: some View {
+        stops
+            .background(alignment: .leading) { travellingPill }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
+            .murmurGlass(radius: MurmurTheme.tabBarCorner)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 6)
+    }
+
+    /// The one pill.  `isSource: false` makes it a follower: it takes the frame
+    /// the selected stop publishes, and animating that frame is the travel.
+    @ViewBuilder
+    private var travellingPill: some View {
+        if #available(iOS 26.0, *) {
+            Capsule()
+                .fill(.clear)
+                .glassEffect(.regular.tint(MurmurTheme.accent), in: Capsule())
+                .matchedGeometryEffect(id: Self.pillID, in: pill, isSource: false)
+        } else {
+            Capsule()
+                .fill(MurmurTheme.accent)
+                .matchedGeometryEffect(id: Self.pillID, in: pill, isSource: false)
+        }
+    }
+
+    private var stops: some View {
         HStack(spacing: 0) {
             ForEach(MurmurTab.allCases) { tab in
-                MurmurTabButton(tab: tab, isSelected: selection == tab) {
+                MurmurTabButton(
+                    tab: tab,
+                    isSelected: selection == tab,
+                    pill: pill,
+                    pillID: Self.pillID
+                ) {
                     guard selection != tab else { return }
-                    selection = tab
+                    // A spring rather than a curve, and an underdamped one: the
+                    // pill arrives, overshoots a hair and settles, which is what
+                    // reads as liquid rather than as a slide.  Reduce Motion
+                    // takes the travel away and leaves the colours to change.
+                    withAnimation(
+                        reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.72)
+                    ) {
+                        selection = tab
+                    }
                 }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 8)
-        .murmurGlass(radius: MurmurTheme.tabBarCorner)
-        .padding(.horizontal, 16)
-        .padding(.bottom, 6)
         // Deliberately no identifier on the bar itself: one here overrides
         // every child's, and all three stops came back as "murmur-tab-bar".
     }
@@ -144,9 +201,9 @@ struct MurmurTabBar: View {
 private struct MurmurTabButton: View {
     let tab: MurmurTab
     let isSelected: Bool
+    let pill: Namespace.ID
+    let pillID: String
     let action: () -> Void
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button(action: action) {
@@ -157,21 +214,21 @@ private struct MurmurTabButton: View {
                 Text(tab.title)
                     .font(MurmurTheme.body(.caption2, weight: isSelected ? .semibold : .regular))
             }
-            // Selected is a filled pill, which is a shape change as well as a
-            // colour one — the label goes bolder in the same breath, so the
-            // state survives both colour blindness and a greyscale screenshot.
+            // The glyph and the label stay put and only change colour: the
+            // motion belongs to the pill, and two things moving at once reads
+            // as jitter rather than flow.  The weight change is the second
+            // signal the colour cannot carry on its own.
             .foregroundStyle(isSelected ? MurmurTheme.onAccent : MurmurTheme.secondaryInk)
             .frame(maxWidth: .infinity, minHeight: 44)
+            // The selected stop publishes the frame; it draws nothing itself.
             .background {
                 if isSelected {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(MurmurTheme.accent)
+                    Color.clear.matchedGeometryEffect(id: pillID, in: pill, isSource: true)
                 }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(MurmurPressStyle())
-        .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.84), value: isSelected)
         .accessibilityLabel(tab.title)
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
         .accessibilityIdentifier("tab-\(tab.rawValue)")

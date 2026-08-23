@@ -686,6 +686,22 @@ final class MurmurUITests: XCTestCase {
         XCTAssertFalse(app.textFields["moment-composer"].exists)
     }
 
+    /// The pill is one view that travels rather than three that blink, which
+    /// is a claim about drawing.  What a test can hold is the state underneath
+    /// it: exactly one stop is selected, and it is the one that was pressed.
+    func testPressingAStopMovesTheSelectionToIt() throws {
+        let app = launchApp()
+        XCTAssertTrue(app.buttons["tab-chat"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-chat"].isSelected)
+        XCTAssertFalse(app.buttons["tab-onThisDay"].isSelected)
+
+        app.buttons["tab-onThisDay"].tap()
+        XCTAssertTrue(app.buttons["onthisday-entry"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-onThisDay"].isSelected)
+        XCTAssertFalse(app.buttons["tab-chat"].isSelected)
+        XCTAssertFalse(app.buttons["tab-me"].isSelected)
+    }
+
     /// The photo card surfaces as an image element once its picture is in;
     /// matching any type keeps the test out of SwiftUI's element-type choices.
     private func onThisDayPhoto(in app: XCUIApplication) -> XCUIElement {
