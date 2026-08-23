@@ -52,6 +52,11 @@ BLOCKS: dict[str, tuple[str, int]] = {
 # 攒够多少条新记录就整理一次。kirabot 用 15，这里用 12。
 REFRESH_EVERY = 12
 
+# 整理调用的 token 上限。deepseek 系会先烧一截隐藏思考再写正文——
+# 线上见过 1148 字符的响应在 1800 上限处被截断（思考占了大头），
+# 截断的 JSON 谁也解析不了。整理一天没几次，上限放宽比整个丢掉便宜。
+MEMORY_MAX_TOKENS = 3000
+
 
 @dataclass
 class Dossier:
@@ -179,26 +184,78 @@ _REWRITE = """\
 """
 
 
+def _brace_fragment(text: str) -> str | None:
+    """抓第一个花括号平衡的片段——模型有时在 JSON 前后裹一层废话。"""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        depth += (ch == "{") - (ch == "}")
+        if depth == 0:
+            return text[start : i + 1]
+    return None
+
+
 def _loads_tolerant(raw: str) -> dict | None:
     """逐层放宽地解析模型返回的 JSON 对象。
 
     deepseek 直连在全中文 prompt 下会把引号、冒号、逗号也写成全角。
     只在窄的一档失败后才换更宽的：能直接解析就不动正文；最后一档
     会把正文里的全角标点也换成半角——保真让位给「这轮整理别整个丢掉」。
+    整段都不是 JSON 时，退到第一个花括号平衡的片段上再试一遍。
     """
-    for candidate in (
-        raw,
-        raw.replace("“", '"').replace("”", '"'),
-        raw.replace("“", '"').replace("”", '"')
-           .replace("：", ":").replace("，", ","),
-    ):
+    candidates = [raw]
+    if (fragment := _brace_fragment(raw)) is not None and fragment != raw:
+        candidates.append(fragment)
+    for text in candidates:
+        for candidate in (
+            text,
+            text.replace("“", '"').replace("”", '"'),
+            text.replace("“", '"').replace("”", '"')
+               .replace("：", ":").replace("，", ","),
+        ):
+            try:
+                obj = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+    return None
+
+
+def _extract_blocks(raw: str) -> dict | None:
+    """只认至少带一个已知分区的对象。
+
+    模型偶尔返回的是别的 dict（比如把 say 数组包回来）——那种东西
+    不能进流程：三个分区会被一起刷成「（还不知道）」，旧记忆全没。
+    """
+    obj = _loads_tolerant(raw)
+    if obj is None or not any(k in obj for k in BLOCKS):
+        return None
+    return obj
+
+
+def _salvage_blocks(raw: str) -> dict[str, str]:
+    """JSON 被 max_tokens 截断时的分区级抢救。
+
+    prompt 没规定分区顺序，但截断点之前的分区通常完整写完了——
+    哪个完整就收哪个，写到一半的不要。返回值可能只是三个分区里
+    的一部分，怎么合并由调用方决定。
+    """
+    raw = raw.replace("“", '"').replace("”", '"')
+    found: dict[str, str] = {}
+    for name in BLOCKS:
+        m = re.search(rf'"{re.escape(name)}"\s*[:：]\s*"((?:[^"\\]|\\.)*)"', raw)
+        if not m:
+            continue
         try:
-            obj = json.loads(candidate)
+            value = json.loads(f'"{m.group(1)}"')
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict):
-            return obj
-    return None
+        if isinstance(value, str) and value.strip():
+            found[name] = value.strip()
+    return found
 
 
 def _fmt_entries(entries: list[Entry]) -> str:
@@ -269,12 +326,14 @@ def refresh(
     else:
         kwargs["response_format"] = {"type": "json_object"}
     # deepseek 的输出风格有随机性：全角标点、或偶尔思考烧光 token。
-    # json_prefix 模式下给两次机会；都不成就放弃这轮，下一批 12 条再来。
+    # json_prefix 模式下给两次机会；完整解析不成再试分区级抢救；
+    # 都不成就放弃这轮，下一批 12 条再来。
     data = None
+    partial: dict[str, str] = {}
     for _ in range(2 if cfg.json_prefix else 1):
         resp = client.chat.completions.create(
             model=cfg.memory_model or cfg.model,
-            max_tokens=1800,
+            max_tokens=MEMORY_MAX_TOKENS,
             messages=messages,
             **kwargs,
         )
@@ -282,13 +341,32 @@ def refresh(
         if cfg.json_prefix:
             raw = "{" + raw
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.M)
-        data = _loads_tolerant(raw)
+        data = _extract_blocks(raw)
         if data is not None:
             break
-        log.warning("整理记忆：这一轮没拿到可解析的 JSON（响应长度=%d）", len(raw))
-    if data is None:
+        # 失败也要留证据：长度相同的全角病和截断病在日志里长得一模一样，
+        # 不看开头几十个字根本分不出来。
+        partial = _salvage_blocks(raw) or partial
+        log.warning(
+            "整理记忆：这一轮没拿到可解析的 JSON（响应长度=%d，开头=%r）",
+            len(raw), raw[:120],
+        )
+    if data is None and not partial:
         log.error("整理记忆失败，模型没返回 JSON")
         return None
+    if data is None:
+        # 截断抢救：只更新完整捞回的分区，没捞到的保持旧内容。
+        # covered_upto 不前进——这轮没消化完的记录下一轮还会再见到。
+        for name, (_, limit) in BLOCKS.items():
+            if name in partial:
+                d.blocks[name] = partial[name][:limit]
+        d.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
+        d.save()
+        log.warning(
+            "整理记忆：JSON 不完整，只更新了 %d 个分区（%s），记录留到下一轮",
+            len(partial), "、".join(partial),
+        )
+        return d
 
     for name, (_, limit) in BLOCKS.items():
         val = str(data.get(name, "")).strip()

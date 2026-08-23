@@ -20,6 +20,7 @@ _BY_TYPE = {
     "str | None": None,
     "str": "",
     "bool": False,
+    "float | None": None,
     "set[int]": set(),
     "set[str]": set(),
     "list[str]": [],

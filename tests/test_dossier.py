@@ -92,7 +92,82 @@ class DossierRefreshPrefixTests(unittest.TestCase):
                 {"role": "assistant", "content": "{", "prefix": True},
             )
             self.assertNotIn("response_format", client.calls[0])
+            # deepseek 的思考会先烧掉一截 token，整理上限不能卡在 1800。
+            self.assertEqual(client.calls[0]["max_tokens"], 3000)
             mem.conn.close()
+
+
+def _seed_entry(mem: Memory, chat_id: int = 7, thread: str = "t") -> None:
+    mem.record(
+        chat_id=chat_id, thread=thread, shot_at=None, bucket="午间",
+        weekday="周六", spot=None, scene="测试", move="speak",
+        said="出门了", note=None,
+    )
+
+
+class DossierRefreshRobustnessTests(unittest.TestCase):
+    """整理记忆是「越聊越懂你」的命根子，线上却每次都整个丢掉。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.cfg = make_config(
+            db_path=str(self.root / "m.db"),
+            model="deepseek-v4-flash",
+            json_prefix=True,
+        )
+        self.mem = Memory(str(self.root / "memory.db"))
+        _seed_entry(self.mem)
+
+    def tearDown(self):
+        self.mem.conn.close()
+        self.tmp.cleanup()
+
+    def _refresh(self, content: str):
+        client = _FakeClient(content)
+        with patch.object(dossier, "_client", return_value=client):
+            return dossier.refresh(
+                self.cfg, self.mem, 7, "t", root=self.root, force=True
+            )
+
+    def test_prose_wrapped_json_is_extracted(self):
+        # 模型在 JSON 前后裹废话：抓第一个花括号平衡的片段照样能用。
+        d = self._refresh(
+            '好的，整理好了：\n{"他是谁": "- 他住杭州", "正在发生": "- 在散步", '
+            '"怎么跟他说话": "- 随意点"}\n希望对你有帮助'
+        )
+        self.assertIsNotNone(d)
+        self.assertEqual(d.blocks["他是谁"], "- 他住杭州")
+
+    def test_unrelated_dict_does_not_clobber_existing_blocks(self):
+        # 模型返回了合法 JSON 但不是分区（比如把 say 数组包回来）：
+        # 不能走「缺省刷成（还不知道）」的路径，那会把旧记忆清空。
+        old = Dossier(thread="t", path=self.root / "t.md")
+        old.blocks = {"他是谁": "- 他住杭州"}
+        old.save()
+        d = self._refresh('{"move": "speak", "say": "- 他周末会出门"}')
+        self.assertIsNone(d)
+        self.assertEqual(
+            Dossier.load(self.root, "t").blocks["他是谁"], "- 他住杭州"
+        )
+
+    def test_truncated_json_salvages_only_the_finished_blocks(self):
+        # 响应在第二个分区写到一半被 max_tokens 截断：写完的分区收下，
+        # 没写完的保持旧内容，covered_upto 不前进，剩下的下轮再消化。
+        old = Dossier(thread="t", path=self.root / "t.md")
+        old.blocks = {"正在发生": "- 旧内容别动"}
+        old.save()
+        d = self._refresh('{"他是谁": "- 他住杭州", "正在发生": "- 在找工')
+        self.assertIsNotNone(d)
+        self.assertEqual(d.blocks["他是谁"], "- 他住杭州")
+        self.assertEqual(d.blocks["正在发生"], "- 旧内容别动")
+        self.assertEqual(d.covered_upto, 0)
+
+    def test_fullwidth_truncated_json_still_salvages(self):
+        # deepseek 的全角病和截断病会同时发作。
+        d = self._refresh('{“他是谁”: “- 他住杭州”, “正在发生”: “- 在找工')
+        self.assertIsNotNone(d)
+        self.assertEqual(d.blocks["他是谁"], "- 他住杭州")
 
 
 if __name__ == "__main__":

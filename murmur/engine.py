@@ -488,6 +488,17 @@ def _response_format() -> dict:
     }
 
 
+def _sampling_kwargs(cfg: Config) -> dict:
+    """对话采样参数。没配就一个都不带，请求行为和不支持这俩参数的
+    网关保持兼容；读图/记忆整理不走这里——它们要的是稳定，不是鲜活。"""
+    out: dict = {}
+    if cfg.temperature is not None:
+        out["temperature"] = cfg.temperature
+    if cfg.presence_penalty is not None:
+        out["presence_penalty"] = cfg.presence_penalty
+    return out
+
+
 def _fallback_attempts(
     cfg: Config, *, primary: str, use_schema: bool = True,
 ) -> list[tuple[str, bool]]:
@@ -563,9 +574,11 @@ def initiate(
                 log.info("主动消息：降级模型 %s 接住了", model)
             return reply
         except (OpenAIError, ValueError) as error:
+            # 带上错误原文：ValueError 的信息里有模型返回的前 200 字，
+            # 线上只靠异常类型名根本分不清是截断、思考烧光还是直接说人话。
             log.warning(
-                "主动消息：模型 %s 失败（%s），再试一次",
-                model, type(error).__name__,
+                "主动消息：模型 %s 失败（%s: %s），再试一次",
+                model, type(error).__name__, str(error)[:200],
             )
             last_error = error
     raise last_error  # attempts 至少有一个，跑不到这里才怪
@@ -592,6 +605,7 @@ def _initiate_once(
         # 抢救出来的那一条又整个数组当成一句话发了出去。
         messages = [*messages, {"role": "assistant", "content": "{", "prefix": True}]
     kwargs = dict(model=model, max_tokens=MAX_TOKENS, messages=messages)
+    kwargs.update(_sampling_kwargs(cfg))
     if use_schema:
         kwargs["response_format"] = _response_format()
     resp = _client(cfg).chat.completions.create(**kwargs)
@@ -712,16 +726,19 @@ def respond(
                 history=history,
                 dossier=dossier,
                 client=client,
+                cfg=cfg,
                 on_bubble=on_bubble,
                 photo=photo,
-                json_prefix=cfg.json_prefix,
             )
             if last_error is not None:
                 log.info("降级模型 %s 接住了回复", model)
             return reply
         except (OpenAIError, ValueError) as error:
+            # 带上错误原文：ValueError 的信息里有模型返回的前 200 字，
+            # 线上只靠异常类型名根本分不清是截断、思考烧光还是直接说人话。
             log.warning(
-                "模型 %s 失败（%s），再试一次", model, type(error).__name__,
+                "模型 %s 失败（%s: %s），再试一次",
+                model, type(error).__name__, str(error)[:200],
             )
             last_error = error
     raise last_error  # attempts 至少有一个，跑不到这里才怪
@@ -735,10 +752,11 @@ def _respond_once(
     history: list[dict],
     dossier: str | None,
     client: OpenAI,
+    cfg: Config,
     on_bubble,
     photo: Photo | None,
-    json_prefix: bool = False,
 ) -> Reply:
+    json_prefix = cfg.json_prefix
     messages = [
         {"role": "system", "content": SYSTEM},
         # 长期记忆放在 system 之后、对话之前：它是背景知识，
@@ -757,6 +775,7 @@ def _respond_once(
         max_tokens=MAX_TOKENS,
         messages=messages,
     )
+    kwargs.update(_sampling_kwargs(cfg))
     if use_schema:
         kwargs["response_format"] = _response_format()
 

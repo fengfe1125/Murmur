@@ -306,6 +306,34 @@ class EngineFallbackTests(unittest.TestCase):
         )
         self.assertNotIn("response_format", client.calls[0])
 
+    def test_sampling_params_are_sent_only_when_configured(self):
+        # MURMUR_TEMPERATURE / MURMUR_PRESENCE_PENALTY：配了就带上，
+        # 没配一个都不带——不支持的网关不该被塞陌生参数。
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "m5.db"),
+            model="deepseek-v4-flash",
+            fallback_model="",
+            image_model="",
+            json_schema=False,
+            json_prefix=True,
+            temperature=1.1,
+            presence_penalty=0.3,
+        )
+        client = FakeClient(
+            {"deepseek-v4-flash":
+             '"move":"speak","say":["鲜活起来的"],"scene":"测试"}'}
+        )
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        self.assertEqual(reply.say, ["鲜活起来的"])
+        self.assertEqual(client.calls[0]["temperature"], 1.1)
+        self.assertEqual(client.calls[0]["presence_penalty"], 0.3)
+
+        client = FakeClient({"kimi-k2.6": PRIMARY_JSON})
+        reply = self._call(client)
+        self.assertNotIn("temperature", client.calls[0])
+        self.assertNotIn("presence_penalty", client.calls[0])
+
 
 class ExtractJsonTests(unittest.TestCase):
     def test_fullwidth_quotes_are_normalized_after_plain_parse_fails(self):
