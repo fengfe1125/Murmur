@@ -780,9 +780,11 @@ def _initiate_once(
     if not say:
         raise _guard_error(raw, finish_reason)
 
-    # 代码层去重：重了就重来一次，还重就这次不发。
+    # 代码层去重：重了就重来一次，还重就这次不发。这道保护和 P1 的近端
+    # 指令无关——它在 MURMUR_REPLY_DIRECTIVES 出现之前就一直默认生效，
+    # 挂到开关后面等于默认允许连着两条"在干嘛"。
     prev = [e.said for e in said_before if e.said]
-    if cfg.reply_directives and say and _too_similar(" ".join(say), prev):
+    if say and _too_similar(" ".join(say), prev):
         raise _TooSimilar(length=len(raw), finish_reason=finish_reason)
 
     log.info(
@@ -885,6 +887,7 @@ def respond(
                 photo=photo,
                 attempt=attempt,
                 current_text=note,
+                allow_retry=attempt < len(attempts),
             )
             if last_error is not None:
                 log.info("降级模型 %s 接住了回复", model)
@@ -908,7 +911,12 @@ def _respond_once(
     photo: Photo | None,
     attempt: int,
     current_text: str | None,
+    allow_retry: bool = False,
 ) -> Reply:
+    # 相似度否决只有在还剩一次尝试时才划算。最后一次也否决的话，
+    # initiate 能安静跳过，respond 却只能把异常抛给调用方——用户会
+    # 收到"（出错了：_TooSimilar）"。重一点的回复也远好过没有回复。
+    veto_similar = cfg.reply_directives and allow_retry
     json_prefix = cfg.json_prefix
     previous = _recent_assistant_texts(history)
     messages = [
@@ -969,11 +977,7 @@ def _respond_once(
                 if not guarded:
                     continue
                 clean = guarded[0]
-                if (
-                    cfg.reply_directives
-                    and not emitted
-                    and _too_similar(clean, previous)
-                ):
+                if veto_similar and not emitted and _too_similar(clean, previous):
                     # 第一条尚未交付，整次结果仍可安全丢弃并重试。
                     raise _TooSimilar(
                         length=len(raw), finish_reason=finish_reason
@@ -995,11 +999,7 @@ def _respond_once(
         salvaged = _guard_bubbles(_salvage_bubbles(raw, 3), limit=3)
         if not salvaged:
             raise _output_error(raw, finish_reason) from None
-        if (
-            cfg.reply_directives
-            and not emitted
-            and _too_similar(" ".join(salvaged), previous)
-        ):
+        if veto_similar and not emitted and _too_similar(" ".join(salvaged), previous):
             raise _TooSimilar(
                 length=len(raw), finish_reason=finish_reason
             ) from None
@@ -1028,11 +1028,14 @@ def _respond_once(
             )
             return Reply(scene=str(data.get("scene", "")), move="quiet", say=[])
         raise _guard_error(raw, finish_reason)
-    if (
-        cfg.reply_directives
-        and not emitted
-        and _too_similar(" ".join(say), previous)
-    ):
+
+    # 纯文字消息不许沉默。空 say 上面已经交回失败链——不拿"嗯"伪装成功；
+    # 这里只管"明明说了话却标成 quiet"：reply.silent 会让每个调用方
+    # 直接不发，而"跟它说话没反应"是最劝退的体验。
+    if photo is None and move == "quiet":
+        move = "brief"
+
+    if veto_similar and not emitted and _too_similar(" ".join(say), previous):
         raise _TooSimilar(length=len(raw), finish_reason=finish_reason)
 
     if emitted:

@@ -391,6 +391,72 @@ class EngineFallbackTests(unittest.TestCase):
         self.assertTrue(reply.silent)
         self.assertEqual(reply.scene, "只是普通桌面")
 
+    def test_text_only_quiet_with_content_is_still_delivered(self):
+        # 模型偶尔会说了话却把 move 标成 quiet。reply.silent 会让每个调用方
+        # 直接不发，用户那边就是"发消息没反应"——最劝退的一种失败。
+        cfg = self._no_fallback_config("text-quiet.db")
+        client = FakeClient({
+            "kimi-k2.6": '{"move":"quiet","say":["我在的，怎么了"],"scene":"（纯文字）"}'
+        })
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="在吗", chat_id=0)
+        self.assertEqual(reply.say, ["我在的，怎么了"])
+        self.assertEqual(reply.move, "brief")
+        self.assertFalse(reply.silent)
+
+    def test_text_only_empty_say_still_fails_instead_of_faking_a_reply(self):
+        # 上面那道兜底只救"说了话却标 quiet"，不能顺手把空回复
+        # 变成罐头"嗯"——空的仍然要走重试/失败链。
+        cfg = self._no_fallback_config("text-empty.db")
+        client = FakeClient({
+            "kimi-k2.6": '{"move":"quiet","say":[],"scene":"（纯文字）"}'
+        })
+        with patch("murmur.engine._client", return_value=client):
+            with self.assertRaises(ValueError):
+                respond(self.moment, self.mem, cfg, note="在吗", chat_id=0)
+
+    def test_proactive_duplicate_is_suppressed_without_directives(self):
+        # 主动消息去重比 MURMUR_REPLY_DIRECTIVES 早得多，默认就该生效，
+        # 否则连着两条"在干嘛"会直接发出去。
+        cfg = self._no_fallback_config("proactive-dup.db")
+        self.assertFalse(cfg.reply_directives)
+        self.mem.record(
+            chat_id=0, thread="t", shot_at=None, bucket="午后", weekday="周一",
+            spot=None, scene="s", move="speak", said="在干嘛呢", note=None,
+            kind="out", intent="在干嘛",
+        )
+        client = FakeClient({
+            "kimi-k2.6": '{"move":"speak","say":["在干嘛呢"],"scene":"测试"}'
+        })
+        with patch("murmur.engine._client", return_value=client):
+            reply = initiate(self.moment, self.mem, cfg, INTENTS[0], chat_id=0)
+        self.assertEqual(reply.say, [])
+        self.assertTrue(reply.silent)
+
+    def test_last_attempt_delivers_rather_than_veto_on_similarity(self):
+        # initiate 判定太像可以安静跳过，respond 不行——它只能把异常抛给
+        # 调用方，用户会收到"（出错了：_TooSimilar）"。最后一次尝试宁可
+        # 发一条重一点的回复。
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "similar-last.db"),
+            model="kimi-k2.6", fallback_model="", image_model="",
+            reply_directives=True,
+        )
+        self.mem.record(
+            chat_id=0, thread="t", shot_at=None, bucket="午后", weekday="周一",
+            spot=None, scene="（纯文字）", move="speak", said="今天也挺累的吧",
+            note="累死了", kind="in",
+        )
+        client = FakeClient({
+            "kimi-k2.6": '{"move":"speak","say":["今天也挺累的吧"],"scene":"测试"}'
+        })
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="又加班", chat_id=0)
+        # 第一次否决并重试，第二次（最后一次）照发。
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(reply.say, ["今天也挺累的吧"])
+        self.assertFalse(reply.silent)
+
     def test_parse_failure_log_is_structured_and_never_contains_raw(self):
         cfg = self._no_fallback_config("safe-log.db")
         secret = "PRIVATE_RAW_MODEL_TEXT"
