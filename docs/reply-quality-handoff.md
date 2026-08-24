@@ -27,6 +27,8 @@ P0 承诺是“零静默丢失”，不是伪造成功回复，也不是承诺�
 - engine、dossier、开环提取和 worker 日志只写结构化元数据：模型、尝试、
   `finish_reason`、响应长度、分类和数量。
 - 不写模型正文、用户消息、dossier 内容或异常消息。
+- 四个渠道（bot / wechat / qq / dingtalk）的“整理记忆失败”日志只记异常
+  类型：`OpenAIError` 的消息可能带网关响应正文。
 - 可聚合分类包括：回复 `full_output / salvaged_output / quiet_output /
   retryable_failure`，dossier `full_saved / partial_saved / no_usable_blocks`，
   以及 `reply_guard` 的 emoji、无效残骸和重复命中数。
@@ -37,6 +39,10 @@ P0 承诺是“零静默丢失”，不是伪造成功回复，也不是承诺�
   `_guard_bubbles()`。
 - guard 清理 emoji、历史拼接符、JSON 残骸、空内容和同批重复。
 - guard 把所有内容清空时进入重试/失败链；不会用“嗯”之类罐头伪装成功。
+- 流式已交付过气泡时，成功路径和 salvage 路径都用 `say = emitted` 对账：
+  Reply 只描述真正发出去的那几条。salvage 从 raw 重捞会把被
+  `previous_exact` 拦下的重复气泡一起捞回来，而调用方会照 `reply.say`
+  补发一遍。
 - 带图回复明确选择 `quiet` 仍是合法无输出动作。
 - 纯文字回复说了话却标成 `quiet` 时强制改判为 `brief`：`reply.silent` 会让
   所有渠道直接不发，"发消息没反应"属于静默丢失。空 `say` 不受这条影响，

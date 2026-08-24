@@ -484,7 +484,8 @@ class MurmurHandler(ChatbotHandler):
         try:
             refresh(self.cfg, self.mem, key, label, _dossier_root(self.cfg))
         except Exception as e:
-            log.warning("整理记忆失败（不影响聊天）：%s: %s", type(e).__name__, e)
+            # 只记异常类型：OpenAIError 的消息可能带网关响应正文。
+            log.warning("整理记忆失败（不影响聊天）：%s", type(e).__name__)
         return AckMessage.STATUS_OK, "OK"
 
 

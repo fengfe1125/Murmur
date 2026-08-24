@@ -457,6 +457,33 @@ class EngineFallbackTests(unittest.TestCase):
         self.assertEqual(reply.say, ["今天也挺累的吧"])
         self.assertFalse(reply.silent)
 
+    def test_salvaged_stream_reply_only_reports_delivered_bubbles(self):
+        # 成功路径用 `say = emitted` 对账，salvage 路径也必须对账：salvage
+        # 是从 raw 重新捞的，会把被 previous_exact 拦下、故意没发的重复气泡
+        # 一起捞回来，而调用方会照着 reply.say 补发一遍。
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "salvage-emitted.db"),
+            model="kimi-k2.6", fallback_model="", image_model="",
+            reply_directives=True,
+        )
+        self.mem.record(
+            chat_id=0, thread="t", shot_at=None, bucket="午后", weekday="周一",
+            spot=None, scene="（纯文字）", move="speak", said="我也刚到家",
+            note="到家了", kind="in",
+        )
+        # 第二条和最近历史逐字相同 -> 流式拦下不发；JSON 又截断走 salvage。
+        truncated = '{"move":"speak","say":["先去洗个澡","我也刚到家"'
+        client = FakeClient({"kimi-k2.6": truncated})
+        seen: list[str] = []
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(
+                self.moment, self.mem, cfg, note="累死了", chat_id=0,
+                on_bubble=seen.append,
+            )
+        self.assertEqual(seen, ["先去洗个澡"])
+        self.assertEqual(reply.say, seen)
+        self.assertNotIn("我也刚到家", reply.say)
+
     def test_parse_failure_log_is_structured_and_never_contains_raw(self):
         cfg = self._no_fallback_config("safe-log.db")
         secret = "PRIVATE_RAW_MODEL_TEXT"

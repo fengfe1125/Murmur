@@ -1003,6 +1003,12 @@ def _respond_once(
             raise _TooSimilar(
                 length=len(raw), finish_reason=finish_reason
             ) from None
+        if emitted:
+            # 和成功路径同一条对账规矩：流式已经交付过气泡时，Reply 只能
+            # 描述实际发出去的那几条。salvage 是从 raw 重新捞的，会把被
+            # previous_exact 拦下、故意没发的重复气泡一起捞回来——调用方
+            # 会把 reply.say 补发一遍（app_worker.py），等于绕过那道拦截。
+            salvaged = emitted
         log.warning(
             "respond model=%s attempt=%d category=salvaged_output "
             "length=%d finish_reason=%s bubbles=%d",
