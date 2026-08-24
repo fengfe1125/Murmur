@@ -484,6 +484,20 @@ class EngineFallbackTests(unittest.TestCase):
         self.assertEqual(reply.say, seen)
         self.assertNotIn("我也刚到家", reply.say)
 
+    def test_directive_tells_proactive_apart_from_a_wordless_photo(self):
+        # 用户发一张不带配文的图时 note 也是 None。用"没有文字"去猜主动开口，
+        # 会让它对着用户发起的这一轮解释"我为什么找你"。
+        history = [{"role": "assistant", "content": "昨天那事怎么样了"}]
+        proactive = _reply_style_note(history, proactive=True)
+        wordless_photo = _reply_style_note(history, None)
+        short_text = _reply_style_note(history, "是的")
+
+        self.assertIn("主动开口", proactive)
+        self.assertNotIn("主动开口", wordless_photo)
+        self.assertIn("图", wordless_photo)
+        self.assertNotIn("主动开口", short_text)
+        self.assertIn("不脑补背景", short_text)
+
     def test_parse_failure_log_is_structured_and_never_contains_raw(self):
         cfg = self._no_fallback_config("safe-log.db")
         secret = "PRIVATE_RAW_MODEL_TEXT"
