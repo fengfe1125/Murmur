@@ -9,19 +9,25 @@ import tempfile
 import unittest
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from _helpers import make_config  # noqa: E402
 from cryptography.hazmat.primitives import serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 
 from murmur.app_push import (  # noqa: E402
     APNsProvider,
+    EngineProactiveGenerator,
     ProactiveScheduler,
     plan_proactive_day,
 )
 from murmur.app_store import AppStore  # noqa: E402
+from murmur.dossier import Dossier  # noqa: E402
+from murmur.engine import Reply  # noqa: E402
+from murmur.memory import Memory, thread_key  # noqa: E402
 
 
 class Response:
@@ -119,6 +125,441 @@ class APNsTests(unittest.TestCase):
             self.assertLessEqual(slot.timetz().replace(tzinfo=None), time(22, 30))
         self.assertEqual(slots, plan_proactive_day("user", date(2026, 8, 14), tz, 3))
         self.assertEqual(plan_proactive_day("user", date(2026, 8, 14), tz, 0), [])
+
+    def test_due_open_loop_is_source_bound_and_followed_up_only_once(self):
+        memory_path = self.root / "continuity.db"
+        cfg = make_config(memory_path, open_loops=True)
+        generator = EngineProactiveGenerator(
+            cfg, data_root=self.root, memory_db_path=memory_path
+        )
+        chat_id, _ = thread_key("app", "direct", "listener")
+        now = datetime.now(UTC)
+        with Memory(memory_path) as memory:
+            loop = memory.upsert_open_loop(
+                chat_id,
+                "周五的面试结果",
+                "event",
+                due_at=now - timedelta(hours=1),
+                now=now - timedelta(days=1),
+            )
+        captured = []
+
+        def fake_initiate(_moment, _memory, _cfg, intent, **_kwargs):
+            captured.append(intent)
+            return Reply("desk", "speak", ["面试结果出来了吗"])
+
+        with patch("murmur.app_push.initiate", side_effect=fake_initiate):
+            generated = generator("listener", ZoneInfo("Asia/Shanghai"))
+        self.assertEqual(generated.material.material_id, f"open_loop:{loop.id}")
+        self.assertEqual(generated.material.source_ref, "周五的面试结果")
+        self.assertEqual(captured[0].key, "问结果")
+        self.assertIn("周五的面试结果", captured[0].brief)
+        # The one allowed follow-up is claimed before the generated text can
+        # leave this component; a concurrent generator can no longer win too.
+        with Memory(memory_path) as memory:
+            claimed = memory.conn.execute(
+                "SELECT followup_count,last_followup_at FROM open_loops WHERE id=?",
+                (loop.id,),
+            ).fetchone()
+            self.assertEqual(int(claimed["followup_count"]), 0)
+            self.assertIsNotNone(claimed["last_followup_at"])
+            self.assertEqual(memory.due_open_loops(chat_id, datetime.now(UTC)), [])
+        entry_id = generator.record("listener", generated)
+        generator.finalize("listener", generated, entry_id)
+
+        with Memory(memory_path) as memory:
+            saved_loop = memory.conn.execute(
+                "SELECT followup_count FROM open_loops WHERE id=?", (loop.id,)
+            ).fetchone()
+            entry = memory.conn.execute(
+                "SELECT material_id FROM entries WHERE id=?", (entry_id,)
+            ).fetchone()
+            due_again = memory.due_open_loops(chat_id, datetime.now(UTC))
+        self.assertEqual(int(saved_loop["followup_count"]), 1)
+        self.assertEqual(entry["material_id"], f"open_loop:{loop.id}")
+        self.assertEqual(due_again, [])
+
+    def test_generic_proactive_memory_is_hidden_until_app_is_durable(self):
+        memory_path = self.root / "generic-proactive.db"
+        generator = EngineProactiveGenerator(
+            make_config(memory_path), data_root=self.root,
+            memory_db_path=memory_path,
+        )
+
+        def fake_initiate(*_args, **_kwargs):
+            return Reply("desk", "speak", ["路过来看看你"])
+
+        with patch("murmur.app_push.initiate", side_effect=fake_initiate):
+            generated = generator("listener", ZoneInfo("Asia/Shanghai"))
+        self.assertIsNone(generated.material)
+        entry_id = generator.record("listener", generated)
+        chat_id, _ = thread_key("app", "direct", "listener")
+        with Memory(memory_path) as memory:
+            self.assertEqual(memory.recent_outbound(chat_id), [])
+
+        generator.finalize("listener", generated, entry_id)
+
+        with Memory(memory_path) as memory:
+            self.assertEqual(
+                [entry.id for entry in memory.recent_outbound(chat_id)], [entry_id]
+            )
+
+    def test_missing_memory_row_keeps_durable_app_outbox_pending(self):
+        store = AppStore(self.root / "missing-memory-outbox.db")
+        memory_path = self.root / "missing-memory.db"
+        try:
+            enrolled = self.enrolled_device_on(
+                store, "ios", token="9" * 64, key_id="dev-missing-memory"
+            )
+            moment_id = store.create_proactive(
+                enrolled.user_id, ["路过"], memory_entry_id=999,
+                now=datetime.now(UTC),
+            )
+            generator = EngineProactiveGenerator(
+                make_config(memory_path), data_root=self.root,
+                memory_db_path=memory_path,
+            )
+            scheduler = ProactiveScheduler(
+                store, self.provider(Transport()), generator
+            )
+
+            with self.assertLogs("murmur.app_push", level="ERROR") as captured:
+                scheduler._recover_pending_memory()
+
+            pending = store.pending_proactive_memory_finalizations(
+                enrolled.user_id
+            )
+            self.assertEqual([item["moment_id"] for item in pending], [moment_id])
+            self.assertIn("error_type=RuntimeError", "\n".join(captured.output))
+        finally:
+            store.close()
+
+    def test_scheduler_sweeps_generic_pre_app_crash_orphan(self):
+        store = AppStore(self.root / "generic-orphan-app.db")
+        memory_path = self.root / "generic-orphan-memory.db"
+        try:
+            enrolled = self.enrolled_device_on(
+                store, "ios", token="8" * 64, key_id="dev-generic-orphan"
+            )
+            generator = EngineProactiveGenerator(
+                make_config(memory_path), data_root=self.root,
+                memory_db_path=memory_path,
+            )
+
+            def fake_initiate(*_args, **_kwargs):
+                return Reply("desk", "speak", ["路过来看看你"])
+
+            with patch("murmur.app_push.initiate", side_effect=fake_initiate):
+                generated = generator(
+                    enrolled.user_id, ZoneInfo("Asia/Shanghai")
+                )
+            orphan_id = generator.record(enrolled.user_id, generated)
+            scheduler = ProactiveScheduler(
+                store, self.provider(Transport()), generator,
+                lock_root=self.root,
+            )
+
+            scheduler._sweep_orphan_memory()
+
+            with Memory(memory_path) as memory:
+                row = memory.conn.execute(
+                    "SELECT 1 FROM entries WHERE id=?", (orphan_id,)
+                ).fetchone()
+            self.assertIsNone(row)
+        finally:
+            store.close()
+
+    def test_resolved_loop_keeps_durable_entry_for_outbox_recovery(self):
+        store = AppStore(self.root / "resolved-outbox-app.db")
+        memory_path = self.root / "resolved-outbox-memory.db"
+        try:
+            enrolled = self.enrolled_device_on(
+                store, "ios", token="7" * 64, key_id="dev-resolved-outbox"
+            )
+            chat_id, _ = thread_key("app", "direct", enrolled.user_id)
+            now = datetime.now(UTC)
+            with Memory(memory_path) as memory:
+                loop = memory.upsert_open_loop(
+                    chat_id, "周五的面试结果", "event",
+                    due_at=now - timedelta(hours=1),
+                    now=now - timedelta(days=1),
+                )
+            generator = EngineProactiveGenerator(
+                make_config(memory_path, open_loops=True), data_root=self.root,
+                memory_db_path=memory_path,
+            )
+
+            def fake_initiate(*_args, **_kwargs):
+                return Reply("desk", "speak", ["面试结果出来了吗"])
+
+            with patch("murmur.app_push.initiate", side_effect=fake_initiate):
+                generated = generator(
+                    enrolled.user_id, ZoneInfo("Asia/Shanghai")
+                )
+            entry_id = generator.record(enrolled.user_id, generated)
+            moment_id = store.create_proactive(
+                enrolled.user_id, generated.bubbles,
+                memory_entry_id=entry_id, now=now,
+            )
+            store.acknowledge(moment_id, enrolled.user_id)
+            with Memory(memory_path) as memory:
+                memory.resolve_open_loops_from_text(
+                    chat_id, "周五的面试结果出来了，已经结束了", now
+                )
+                self.assertIsNotNone(memory.conn.execute(
+                    "SELECT 1 FROM entries WHERE id=?", (entry_id,)
+                ).fetchone())
+
+            scheduler = ProactiveScheduler(
+                store, self.provider(Transport()), generator,
+                lock_root=self.root,
+            )
+            scheduler._recover_pending_memory()
+
+            self.assertEqual(
+                store.pending_proactive_memory_finalizations(enrolled.user_id), []
+            )
+            with Memory(memory_path) as memory:
+                entry = memory.outbound_entry_delivery(entry_id, chat_id)
+                saved = memory.conn.execute(
+                    "SELECT status FROM open_loops WHERE id=?", (loop.id,)
+                ).fetchone()
+            self.assertEqual(entry, (f"open_loop:{loop.id}", "committed"))
+            self.assertEqual(saved["status"], "resolved")
+        finally:
+            store.close()
+
+    def test_failed_open_loop_generation_does_not_spend_the_followup(self):
+        memory_path = self.root / "continuity-retry.db"
+        cfg = make_config(memory_path, open_loops=True)
+        generator = EngineProactiveGenerator(
+            cfg, data_root=self.root, memory_db_path=memory_path
+        )
+        chat_id, _ = thread_key("app", "direct", "listener")
+        now = datetime.now(UTC)
+        with Memory(memory_path) as memory:
+            loop = memory.upsert_open_loop(
+                chat_id,
+                "周五的面试结果",
+                "event",
+                due_at=now - timedelta(hours=1),
+                now=now - timedelta(days=1),
+            )
+
+        with patch("murmur.app_push.initiate", side_effect=RuntimeError("gateway")):
+            with self.assertRaises(RuntimeError):
+                generator("listener", ZoneInfo("Asia/Shanghai"))
+
+        with Memory(memory_path) as memory:
+            saved = memory.conn.execute(
+                "SELECT followup_count FROM open_loops WHERE id=?", (loop.id,)
+            ).fetchone()
+            self.assertEqual(int(saved["followup_count"]), 0)
+            self.assertEqual(
+                [item.id for item in memory.due_open_loops(chat_id, datetime.now(UTC))],
+                [loop.id],
+            )
+
+    def test_open_loop_record_and_app_persistence_failures_are_retryable(self):
+        for failure_point in ("record", "create"):
+            with self.subTest(failure_point=failure_point):
+                store = AppStore(self.root / f"continuity-{failure_point}.db")
+                memory_path = self.root / f"continuity-{failure_point}-memory.db"
+                try:
+                    now = datetime.now(UTC)
+                    enrolled = self.enrolled_device_on(
+                        store,
+                        "ios",
+                        token=("a" if failure_point == "record" else "b") * 64,
+                        key_id=f"dev-continuity-{failure_point}",
+                    )
+                    store.replace_slots(
+                        enrolled.user_id, now.date(), [now - timedelta(seconds=1)]
+                    )
+                    chat_id, _ = thread_key(
+                        "app", "direct", enrolled.user_id
+                    )
+                    with Memory(memory_path) as memory:
+                        loop = memory.upsert_open_loop(
+                            chat_id,
+                            "周五的面试结果",
+                            "event",
+                            due_at=now - timedelta(hours=1),
+                            now=now - timedelta(days=1),
+                        )
+                    generator = EngineProactiveGenerator(
+                        make_config(memory_path, open_loops=True),
+                        data_root=self.root,
+                        memory_db_path=memory_path,
+                    )
+
+                    def fake_initiate(*_args, **_kwargs):
+                        return Reply("desk", "speak", ["面试结果出来了吗"])
+
+                    scheduler = ProactiveScheduler(
+                        store, self.provider(Transport()), generator
+                    )
+                    target = generator if failure_point == "record" else store
+                    method = "record" if failure_point == "record" else "create_proactive"
+                    with (
+                        patch("murmur.app_push.initiate", side_effect=fake_initiate),
+                        patch.object(target, method, side_effect=RuntimeError("write failed")),
+                        self.assertLogs("murmur.app_push", level="ERROR"),
+                    ):
+                        self.assertEqual(scheduler.run_once(now), 0)
+
+                    with Memory(memory_path) as memory:
+                        saved = memory.conn.execute(
+                            "SELECT followup_count FROM open_loops WHERE id=?",
+                            (loop.id,),
+                        ).fetchone()
+                        outbound = memory.conn.execute(
+                            "SELECT COUNT(*) FROM entries WHERE chat_id=? AND kind='out'",
+                            (chat_id,),
+                        ).fetchone()[0]
+                        self.assertEqual(int(saved["followup_count"]), 0)
+                        self.assertEqual(outbound, 0)
+                        self.assertEqual(
+                            [item.id for item in memory.due_open_loops(chat_id, now)],
+                            [loop.id],
+                        )
+
+                    retry = ProactiveScheduler(
+                        store, self.provider(Transport()), generator
+                    )
+                    with patch(
+                        "murmur.app_push.initiate", side_effect=fake_initiate
+                    ):
+                        self.assertEqual(retry.run_once(now), 1)
+                    with Memory(memory_path) as memory:
+                        saved = memory.conn.execute(
+                            "SELECT followup_count FROM open_loops WHERE id=?",
+                            (loop.id,),
+                        ).fetchone()
+                        outbound = memory.conn.execute(
+                            "SELECT COUNT(*) FROM entries WHERE chat_id=? AND kind='out'",
+                            (chat_id,),
+                        ).fetchone()[0]
+                        self.assertEqual(int(saved["followup_count"]), 1)
+                        self.assertEqual(outbound, 1)
+                finally:
+                    store.close()
+
+    def test_durable_app_moment_reconciles_claim_after_worker_restart(self):
+        store = AppStore(self.root / "continuity-finalize.db")
+        memory_path = self.root / "continuity-finalize-memory.db"
+        try:
+            now = datetime.now(UTC)
+            enrolled = self.enrolled_device_on(
+                store, "ios", token="c" * 64, key_id="dev-continuity-finalize"
+            )
+            store.replace_slots(
+                enrolled.user_id, now.date(), [now - timedelta(seconds=1)]
+            )
+            chat_id, _ = thread_key("app", "direct", enrolled.user_id)
+            with Memory(memory_path) as memory:
+                loop = memory.upsert_open_loop(
+                    chat_id,
+                    "周五的面试结果",
+                    "event",
+                    due_at=now - timedelta(hours=1),
+                    now=now - timedelta(days=1),
+                )
+            generator = EngineProactiveGenerator(
+                make_config(memory_path, open_loops=True),
+                data_root=self.root,
+                memory_db_path=memory_path,
+            )
+
+            def fake_initiate(*_args, **_kwargs):
+                return Reply("desk", "speak", ["面试结果出来了吗"])
+
+            first = ProactiveScheduler(store, self.provider(Transport()), generator)
+            with (
+                patch("murmur.app_push.initiate", side_effect=fake_initiate),
+                patch.object(generator, "finalize", side_effect=RuntimeError("crash")),
+                self.assertLogs("murmur.app_push", level="ERROR"),
+            ):
+                self.assertEqual(first.run_once(now), 0)
+            current = store.current_proactive(enrolled.user_id)
+            self.assertIsNotNone(current)
+            with Memory(memory_path) as memory:
+                pending = memory.conn.execute(
+                    "SELECT followup_count,last_followup_at FROM open_loops WHERE id=?",
+                    (loop.id,),
+                ).fetchone()
+                self.assertEqual(int(pending["followup_count"]), 0)
+                self.assertIsNotNone(pending["last_followup_at"])
+
+            # The App can ACK before the worker comes back.  Recovery must use
+            # the durable slot link, not the public "current" (acked=0) view.
+            store.acknowledge(current["moment_id"], enrolled.user_id)
+            self.assertIsNone(store.current_proactive(enrolled.user_id))
+            store.update_preferences(
+                enrolled.user_id,
+                daily_frequency=0,
+                quiet_start="22:30",
+                quiet_end="08:30",
+            )
+            self.assertEqual(
+                store.conn.execute(
+                    "SELECT COUNT(*) FROM app_proactive_slots WHERE user_id=?",
+                    (enrolled.user_id,),
+                ).fetchone()[0],
+                0,
+            )
+
+            # A fresh scheduler represents a restarted worker: it sees the
+            # durable outbox even though ACK + stop deleted every slot, then
+            # finalizes the same memory entry without generating a second one.
+            restarted = ProactiveScheduler(
+                store, self.provider(Transport()), generator
+            )
+            with patch(
+                "murmur.app_push.initiate",
+                side_effect=AssertionError("must not generate twice"),
+            ):
+                self.assertEqual(restarted.run_once(now), 0)
+            with Memory(memory_path) as memory:
+                saved = memory.conn.execute(
+                    "SELECT followup_count FROM open_loops WHERE id=?", (loop.id,)
+                ).fetchone()
+                outbound = memory.conn.execute(
+                    "SELECT COUNT(*) FROM entries WHERE chat_id=? AND kind='out'",
+                    (chat_id,),
+                ).fetchone()[0]
+                self.assertEqual(int(saved["followup_count"]), 1)
+                self.assertEqual(outbound, 1)
+        finally:
+            store.close()
+
+    def test_dossier_material_keeps_its_source_and_rotates_on_cooldown(self):
+        memory_path = self.root / "materials.db"
+        cfg = make_config(memory_path, proactive_materials=True)
+        generator = EngineProactiveGenerator(
+            cfg, data_root=self.root, memory_db_path=memory_path
+        )
+        _, label = thread_key("app", "direct", "listener")
+        dossier = Dossier.load(self.root / "dossiers", label)
+        dossier.blocks["正在发生"] = "- 泡面视频\n- 西瓜到货"
+        dossier.save()
+        captured = []
+
+        def fake_initiate(_moment, _memory, _cfg, intent, **_kwargs):
+            captured.append(intent)
+            return Reply("desk", "speak", ["接着说"])
+
+        with patch("murmur.app_push.initiate", side_effect=fake_initiate):
+            first = generator("listener", ZoneInfo("Asia/Shanghai"))
+            entry_id = generator.record("listener", first)
+            generator.finalize("listener", first, entry_id)
+            second = generator("listener", ZoneInfo("Asia/Shanghai"))
+
+        self.assertEqual(first.material.source_ref, "泡面视频")
+        self.assertIn("泡面视频", captured[0].brief)
+        self.assertNotIn("西瓜到货", captured[0].brief)
+        self.assertEqual(second.material.source_ref, "西瓜到货")
+        self.assertNotEqual(first.material.material_id, second.material.material_id)
 
     def test_scheduler_creates_one_current_message_and_pushes_each_device(self):
         store = AppStore(self.root / "app.db")

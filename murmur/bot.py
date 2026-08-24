@@ -80,7 +80,8 @@ async def _maybe_refresh(cfg: Config, mem: Memory, key: int, label: str) -> None
     try:
         await asyncio.to_thread(refresh, cfg, mem, key, label, _dossier_root(cfg))
     except Exception as e:
-        log.warning("整理记忆失败（不影响聊天）：%s: %s", type(e).__name__, e)
+        # 只记异常类型：OpenAIError 的消息可能带网关响应正文。
+        log.warning("整理记忆失败（不影响聊天）：%s", type(e).__name__)
 
 
 def _load_dossier(cfg: Config, label: str) -> str | None:

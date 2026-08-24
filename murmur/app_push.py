@@ -32,9 +32,14 @@ from .app_store import AccountDeleting, AppStore, MomentInFlight, NotFound
 from .config import Config
 from .dossier import Dossier
 from .engine import initiate
-from .initiative import pick_intent
+from .initiative import intent_for_material, pick_intent
 from .memory import Memory, thread_key
 from .moment import Moment
+from .proactive_materials import (
+    ProactiveMaterial,
+    dossier_materials,
+    select_material,
+)
 
 log = logging.getLogger("murmur.app_push")
 
@@ -94,6 +99,21 @@ class GeneratedProactive:
     scene: str
     moment: Moment
     intent: str
+    material: ProactiveMaterial | None = None
+
+
+class OpenLoopFollowupClaimed(RuntimeError):
+    """Another generator atomically won the one allowed follow-up."""
+
+
+def _open_loop_id(material_id: str) -> int | None:
+    if not material_id.startswith("open_loop:"):
+        return None
+    try:
+        return int(material_id.rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        log.error("invalid open-loop material id")
+        return None
 
 
 class APNsProvider:
@@ -270,22 +290,74 @@ class EngineProactiveGenerator:
     def __call__(self, user_id: str, tz: ZoneInfo | None = None) -> GeneratedProactive:
         chat_id, label = thread_key("app", "direct", user_id)
         with Memory(self.memory_db_path) as memory:
-            intent = pick_intent([e.intent for e in memory.recent_outbound(chat_id, limit=8)])
             dossier = Dossier.load(self.data_root / "dossiers", label)
             # 此刻要按用户设备的时区算：slot 是按它的本地时间排的。
             moment = Moment.text_only(tz or self.cfg.tz)
+            recent_intents = [
+                entry.intent for entry in memory.recent_outbound(chat_id, limit=8)
+            ]
+            material: ProactiveMaterial | None = None
+            open_loop_id: int | None = None
+            if self.cfg.open_loops:
+                memory.expire_open_loops(chat_id, moment.at)
+                if due := memory.due_open_loops(chat_id, moment.at, limit=1):
+                    open_loop_id = due[0].id
+                    material = ProactiveMaterial(
+                        f"open_loop:{due[0].id}", "open_loop", due[0].title
+                    )
+                elif memory.has_active_open_loop_claim(chat_id, moment.at):
+                    # A worker may have died after reserving this follow-up.
+                    # Keep the slot retryable until its lease can be recovered.
+                    raise OpenLoopFollowupClaimed("active lease")
+            if material is None and self.cfg.proactive_materials:
+                candidates = dossier_materials(dossier.blocks)
+                for candidate in candidates:
+                    memory.upsert_proactive_material(
+                        chat_id,
+                        candidate.material_id,
+                        candidate.category,
+                        candidate.source_ref,
+                        moment.at,
+                    )
+                material = select_material(
+                    candidates,
+                    memory.material_cooldowns(
+                        chat_id, [candidate.material_id for candidate in candidates]
+                    ),
+                    moment.at,
+                )
+            intent = (
+                intent_for_material(material.category, material.source_ref)
+                if material is not None
+                else pick_intent(recent_intents, material_available=False)
+            )
             reply = initiate(
                 moment, memory, self.cfg, intent, chat_id=chat_id,
                 dossier=None if dossier.is_empty else dossier.as_prompt(),
             )
+            # Claim only after a usable reply exists: model failures remain
+            # retryable, while concurrent workers cannot both deliver the loop.
+            if (
+                open_loop_id is not None
+                and reply.say
+                and not memory.claim_open_loop_followup(open_loop_id, moment.at)
+            ):
+                raise OpenLoopFollowupClaimed(open_loop_id)
             # Model work is deliberately outside the per-user deletion lock.
             # Memory is committed later, together with the App moment check.
-            return GeneratedProactive(reply.say, reply.scene, moment, intent.key)
+            return GeneratedProactive(
+                reply.say,
+                reply.scene,
+                moment,
+                intent.key,
+                material,
+            )
 
     def record(self, user_id: str, generated: GeneratedProactive) -> int | None:
         if not generated.bubbles:
             return None
         chat_id, label = thread_key("app", "direct", user_id)
+        material = generated.material
         with Memory(self.memory_db_path) as memory:
             return memory.record(
                 chat_id=chat_id, thread=label, shot_at=None,
@@ -293,7 +365,84 @@ class EngineProactiveGenerator:
                 spot=None, scene=generated.scene, move="speak",
                 said=" ⏎ ".join(generated.bubbles), note=None, kind="out",
                 intent=generated.intent, has_photo=False,
+                material_id=material.material_id if material else None,
+                delivery_state="pending",
             )
+
+    def finalize(
+        self, user_id: str, generated: GeneratedProactive, entry_id: int | None
+    ) -> None:
+        """Commit cooldown bookkeeping after the App moment is durable."""
+        chat_id, _ = thread_key("app", "direct", user_id)
+        with Memory(self.memory_db_path) as memory:
+            if entry_id is None or not memory.commit_outbound_entry(entry_id, chat_id):
+                raise RuntimeError("proactive memory entry missing")
+            material = generated.material
+            if material is None:
+                return
+            if material.category == "open_loop":
+                loop_id = _open_loop_id(material.material_id)
+                if loop_id is not None:
+                    memory.commit_open_loop_followup(loop_id)
+            memory.upsert_proactive_material(
+                chat_id,
+                material.material_id,
+                material.category,
+                material.source_ref,
+                generated.moment.at,
+            )
+            memory.mark_proactive_material_used(
+                chat_id, material.material_id, generated.moment.at
+            )
+
+    def rollback(
+        self,
+        user_id: str,
+        generated: GeneratedProactive,
+        entry_id: int | None = None,
+    ) -> None:
+        """Make a failed pre-delivery attempt eligible for a clean retry."""
+        chat_id, _ = thread_key("app", "direct", user_id)
+        material = generated.material
+        with Memory(self.memory_db_path) as memory:
+            if entry_id is not None:
+                memory.discard_outbound_entry(entry_id, chat_id)
+            if material is None or material.category != "open_loop":
+                return
+            if (loop_id := _open_loop_id(material.material_id)) is not None:
+                memory.release_open_loop_followup(loop_id, generated.moment.at)
+
+    def sweep_orphans(self, user_id: str, keep_entry_ids: set[int]) -> int:
+        """Discard pending rows that no durable App moment references.
+
+        ProactiveScheduler calls this while holding the same per-user lock as
+        record -> create_proactive, closing the otherwise unavoidable crash
+        window between the two SQLite databases.
+        """
+        chat_id, _ = thread_key("app", "direct", user_id)
+        with Memory(self.memory_db_path) as memory:
+            return memory.discard_unlinked_outbound_entries(
+                chat_id, keep_entry_ids
+            )
+
+    def reconcile(self, user_id: str, entry_id: int) -> None:
+        """Finish bookkeeping after a crash that left an App moment durable."""
+        chat_id, _ = thread_key("app", "direct", user_id)
+        with Memory(self.memory_db_path) as memory:
+            delivery = memory.outbound_entry_delivery(entry_id, chat_id)
+            if delivery is None:
+                raise RuntimeError("proactive memory entry missing")
+            material_id, _delivery_state = delivery
+            if not memory.commit_outbound_entry(entry_id, chat_id):
+                raise RuntimeError("proactive memory entry missing")
+            if material_id is None:
+                return
+            if (loop_id := _open_loop_id(material_id)) is not None:
+                memory.commit_open_loop_followup(loop_id)
+            else:
+                memory.mark_proactive_material_used(
+                    chat_id, material_id, datetime.now(UTC)
+                )
 
 
 class ProactiveScheduler:
@@ -344,6 +493,88 @@ class ProactiveScheduler:
     def _user_lock(self, user_id: str):
         return (UserOperationLock(self.lock_root, user_id)
                 if self.lock_root is not None else nullcontext())
+
+    def _rollback_generated(
+        self, user_id: str, generated, entry_id: int | None = None
+    ) -> None:
+        if not isinstance(generated, GeneratedProactive):
+            return
+        rollback = getattr(self.generator, "rollback", None)
+        if not callable(rollback):
+            return
+        try:
+            rollback(user_id, generated, entry_id)
+        except Exception as error:
+            log.error(
+                "could not roll back proactive generation user_id=%s error_type=%s",
+                user_id, type(error).__name__,
+            )
+
+    def _finalize_generated(
+        self, user_id: str, generated, entry_id: int | None
+    ) -> None:
+        if not isinstance(generated, GeneratedProactive):
+            return
+        finalize = getattr(self.generator, "finalize", None)
+        if not callable(finalize):
+            return
+        finalize(user_id, generated, entry_id)
+
+    def _recover_pending_memory(self, user_id: str | None = None) -> None:
+        try:
+            pending = self.store.pending_proactive_memory_finalizations(user_id)
+        except Exception as error:
+            log.error(
+                "could not scan proactive memory outbox error_type=%s",
+                type(error).__name__,
+            )
+            return
+        reconcile = getattr(self.generator, "reconcile", None)
+        for item in pending:
+            try:
+                if callable(reconcile):
+                    reconcile(item["user_id"], int(item["memory_entry_id"]))
+                self.store.finish_proactive_memory_finalization(
+                    item["moment_id"], item["user_id"]
+                )
+            except (AccountDeleting, NotFound):
+                continue
+            except Exception as error:
+                log.error(
+                    "could not reconcile proactive memory user_id=%s error_type=%s",
+                    item["user_id"], type(error).__name__,
+                )
+
+    def _sweep_orphan_memory(self) -> None:
+        """Clean pre-App crash rows using AppStore as the durable authority."""
+        sweep = getattr(self.generator, "sweep_orphans", None)
+        if not callable(sweep):
+            return
+        try:
+            users = self.store.active_users()
+        except Exception as error:
+            log.error(
+                "could not scan proactive memory users error_type=%s",
+                type(error).__name__,
+            )
+            return
+        for user in users:
+            user_id = str(user["id"])
+            try:
+                with self._user_lock(user_id):
+                    self.store.require_user_ready(user_id)
+                    pending = self.store.pending_proactive_memory_finalizations(
+                        user_id
+                    )
+                    keep = {int(item["memory_entry_id"]) for item in pending}
+                    sweep(user_id, keep)
+            except (AccountDeleting, NotFound):
+                continue
+            except Exception as error:
+                log.error(
+                    "could not sweep proactive memory user_id=%s error_type=%s",
+                    user_id, type(error).__name__,
+                )
 
     def deliver_pending(self, now: datetime | None = None) -> int:
         """Replay durable per-device APNs work, including after a restart."""
@@ -435,15 +666,23 @@ class ProactiveScheduler:
         # the wall clock instead made fixed-date tests rot after 24 hours.
         self.store.expire_stale_proactive(now=now)
         self.deliver_pending(now)
+        # This durable outbox is independent of ACK, 24h expiry, preferences,
+        # and slots (which a stop preference may delete altogether).
+        self._recover_pending_memory()
+        self._sweep_orphan_memory()
         self.ensure_schedules(now)
         created = 0
         timezones = {u["id"]: u["timezone"] for u in self.store.proactive_users()}
         for slot in self.store.due_slots(now):
             user_id = slot["user_id"]
+            generated = None
+            entry_id: int | None = None
+            proactive_created = False
             if time.monotonic() < self._gen_retry_after.get(user_id, 0.0):
                 continue
             # Advisory check prevents needless model calls in the common case.
             if self.store.current_proactive(user_id):
+                self._recover_pending_memory(user_id)
                 self.store.mark_slot_delivered(user_id, slot["slot_at"])
                 continue
             try:
@@ -456,22 +695,30 @@ class ProactiveScheduler:
                     self.store.require_user_ready(user_id)
                     # A second worker may have won while the model was running.
                     if self.store.current_proactive(user_id):
+                        self._rollback_generated(user_id, generated)
+                        self._recover_pending_memory(user_id)
                         self.store.mark_slot_delivered(user_id, slot["slot_at"])
                         continue
                     if not self.store.push_devices(user_id):
+                        self._rollback_generated(user_id, generated)
                         self.store.mark_slot_delivered(user_id, slot["slot_at"])
                         continue
                     if not bubbles:
+                        self._rollback_generated(user_id, generated)
                         self.store.mark_slot_delivered(user_id, slot["slot_at"])
                         continue
                     if isinstance(generated, GeneratedProactive):
                         entry_id = self.generator.record(user_id, generated)
                     else:
                         entry_id = generated[2] if len(generated) > 2 else None
-                    self.store.create_proactive(
+                    proactive_id = self.store.create_proactive(
                         user_id, bubbles, scene=scene, memory_entry_id=entry_id, now=now
                     )
-                    self.store.mark_slot_delivered(user_id, slot["slot_at"])
+                    proactive_created = True
+                    self._finalize_generated(user_id, generated, entry_id)
+                    self.store.finish_proactive_memory_finalization(
+                        proactive_id, user_id
+                    )
                     self._gen_failures.pop(user_id, None)
                     self._gen_retry_after.pop(user_id, None)
                     created += 1
@@ -479,9 +726,13 @@ class ProactiveScheduler:
                 # Account erasure owns the per-user lock and cascades its slots.
                 continue
             except MomentInFlight:
+                self._rollback_generated(user_id, generated, entry_id)
+                self._recover_pending_memory(user_id)
                 self.store.mark_slot_delivered(user_id, slot["slot_at"])
                 continue
             except Exception as error:
+                if not proactive_created:
+                    self._rollback_generated(user_id, generated, entry_id)
                 failures = self._gen_failures.get(user_id, 0) + 1
                 self._gen_failures[user_id] = failures
                 delay = min(

@@ -44,12 +44,12 @@ class Intent:
 INTENTS: list[Intent] = [
     Intent("时段应景", "跟当下这个时间点有关的一句话。早上、午饭、下班、睡前各不一样。"),
     Intent("在干嘛", "最基本的搭话，问他此刻在做什么。别每次都用同一个问法。"),
-    Intent("接上次", "上次聊到一半的事，追一下后续。记录里有就用，没有就换个意图。"),
-    Intent("分享自己", "说一个你自己的念头、或你'看到'的东西。不用真实，像朋友随口一提。"),
-    Intent("想到他", "因为某个东西想起他了。'刚看到XX，想起你上次说的'那种。"),
+    Intent("接上次", "只在调用方提供了明确的旧事素材时追后续；没有素材就换意图。"),
+    Intent("分享自己", "只分享一个当下念头，不编造你今天做过、看过或遇到的事情。"),
+    Intent("想到他", "只围绕调用方提供的具体素材说想起他；没有素材就换意图。"),
     Intent("关心", "问一句身体或状态。不要说教，不要'记得多喝水'那种模板。"),
     Intent("无聊", "直接说自己有点无聊、想找人说话。人机之间这么说反而真实。"),
-    Intent("小事汇报", "像室友那样报一件微不足道的事，不图回应。"),
+    Intent("小事汇报", "说一个不要求回应的小念头，不编造现实中发生过的事。"),
 ]
 
 
@@ -126,11 +126,37 @@ def split_due(
     return sorted(due), stale, sorted(pending)
 
 
-def pick_intent(recent_intents: list[str | None]) -> Intent:
+_MATERIAL_BOUND = frozenset({"接上次", "想到他"})
+
+
+def pick_intent(
+    recent_intents: list[str | None], *, material_available: bool = True
+) -> Intent:
     """挑一个最近没用过的意图。连着两条都是"在干嘛"就露馅了。"""
     used = [i for i in recent_intents if i]
-    fresh = [x for x in INTENTS if x.key not in used[-4:]]
-    return random.choice(fresh or INTENTS)
+    available = [
+        intent
+        for intent in INTENTS
+        if material_available or intent.key not in _MATERIAL_BOUND
+    ]
+    fresh = [x for x in available if x.key not in used[-4:]]
+    return random.choice(fresh or available)
+
+
+def intent_for_material(category: str, source_ref: str) -> Intent:
+    """Bind one proactive generation to one concrete source, never a loose theme."""
+    source = " ".join(str(source_ref).split())[:240]
+    if not source:
+        raise ValueError("proactive material source cannot be empty")
+    if category == "open_loop":
+        return Intent(
+            "问结果",
+            f"只接这一件旧事的结果：{source}。自然地问一次，不施压，不扩写别的素材。",
+        )
+    return Intent(
+        "接上次",
+        f"只围绕这条已经确认的近况接续：{source}。不要替换成别的食物、物品或事件。",
+    )
 
 
 def should_hold(

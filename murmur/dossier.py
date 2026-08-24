@@ -52,6 +52,11 @@ BLOCKS: dict[str, tuple[str, int]] = {
 # 攒够多少条新记录就整理一次。kirabot 用 15，这里用 12。
 REFRESH_EVERY = 12
 
+# 整理调用的 token 上限。deepseek 系会先烧一截隐藏思考再写正文——
+# 线上见过 1148 字符的响应在 1800 上限处被截断（思考占了大头），
+# 截断的 JSON 谁也解析不了。整理一天没几次，上限放宽比整个丢掉便宜。
+MEMORY_MAX_TOKENS = 3000
+
 
 @dataclass
 class Dossier:
@@ -179,26 +184,93 @@ _REWRITE = """\
 """
 
 
+def _brace_fragment(text: str) -> str | None:
+    """抓第一个花括号平衡的片段——模型有时在 JSON 前后裹一层废话。"""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for i, ch in enumerate(text[start:], start):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif (quote == '"' and ch == '"') or (quote == "“" and ch == "”"):
+                quote = None
+            continue
+        if ch in {'"', "“"}:
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def _loads_tolerant(raw: str) -> dict | None:
     """逐层放宽地解析模型返回的 JSON 对象。
 
     deepseek 直连在全中文 prompt 下会把引号、冒号、逗号也写成全角。
     只在窄的一档失败后才换更宽的：能直接解析就不动正文；最后一档
     会把正文里的全角标点也换成半角——保真让位给「这轮整理别整个丢掉」。
+    整段都不是 JSON 时，退到第一个花括号平衡的片段上再试一遍。
     """
-    for candidate in (
-        raw,
-        raw.replace("“", '"').replace("”", '"'),
-        raw.replace("“", '"').replace("”", '"')
-           .replace("：", ":").replace("，", ","),
-    ):
+    candidates = [raw]
+    if (fragment := _brace_fragment(raw)) is not None and fragment != raw:
+        candidates.append(fragment)
+    for text in candidates:
+        for candidate in (
+            text,
+            text.replace("“", '"').replace("”", '"'),
+            text.replace("“", '"').replace("”", '"')
+               .replace("：", ":").replace("，", ","),
+        ):
+            try:
+                obj = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+    return None
+
+
+def _extract_blocks(raw: str) -> dict | None:
+    """只认至少带一个已知分区的对象。
+
+    模型偶尔返回的是别的 dict（比如把 say 数组包回来）——那种东西
+    不能进流程：三个分区会被一起刷成「（还不知道）」，旧记忆全没。
+    """
+    obj = _loads_tolerant(raw)
+    if obj is None or not any(k in obj for k in BLOCKS):
+        return None
+    return obj
+
+
+def _salvage_blocks(raw: str) -> dict[str, str]:
+    """JSON 被 max_tokens 截断时的分区级抢救。
+
+    prompt 没规定分区顺序，但截断点之前的分区通常完整写完了——
+    哪个完整就收哪个，写到一半的不要。返回值可能只是三个分区里
+    的一部分，怎么合并由调用方决定。
+    """
+    raw = raw.replace("“", '"').replace("”", '"')
+    found: dict[str, str] = {}
+    for name in BLOCKS:
+        m = re.search(rf'"{re.escape(name)}"\s*[:：]\s*"((?:[^"\\]|\\.)*)"', raw)
+        if not m:
+            continue
         try:
-            obj = json.loads(candidate)
+            value = json.loads(f'"{m.group(1)}"')
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict):
-            return obj
-    return None
+        if isinstance(value, str) and value.strip():
+            found[name] = value.strip()
+    return found
 
 
 def _fmt_entries(entries: list[Entry]) -> str:
@@ -232,9 +304,20 @@ def refresh(
     root = root or (cfg.db_path.parent / "dossiers")
     d = Dossier.load(root, thread)
 
+    # A proactive entry is written before the App moment.  Do not let dossier
+    # refresh read it—or advance covered_upto past it—until delivery is durable.
+    # The pending id is a barrier so a later inbound row cannot make that gap
+    # disappear forever when the cursor advances.
     rows = mem.conn.execute(
-        "SELECT * FROM entries WHERE chat_id = ? AND id > ? ORDER BY id",
-        (chat_id, d.covered_upto),
+        """SELECT * FROM entries
+           WHERE chat_id = ? AND id > ? AND delivery_state = 'committed'
+             AND id < COALESCE(
+                 (SELECT MIN(id) FROM entries
+                  WHERE chat_id = ? AND id > ? AND delivery_state = 'pending'),
+                 9223372036854775807
+             )
+           ORDER BY id""",
+        (chat_id, d.covered_upto, chat_id, d.covered_upto),
     ).fetchall()
     if not rows:
         return None
@@ -269,26 +352,107 @@ def refresh(
     else:
         kwargs["response_format"] = {"type": "json_object"}
     # deepseek 的输出风格有随机性：全角标点、或偶尔思考烧光 token。
-    # json_prefix 模式下给两次机会；都不成就放弃这轮，下一批 12 条再来。
+    # json_prefix 模式下给两次机会；完整解析不成再试分区级抢救；
+    # 都不成就放弃这轮，下一批 12 条再来。
+    model = cfg.memory_model or cfg.model
     data = None
-    for _ in range(2 if cfg.json_prefix else 1):
+    partial: dict[str, str] = {}
+    attempts = 2 if cfg.json_prefix else 1
+    for attempt in range(1, attempts + 1):
         resp = client.chat.completions.create(
-            model=cfg.memory_model or cfg.model,
-            max_tokens=1800,
+            model=model,
+            max_tokens=MEMORY_MAX_TOKENS,
             messages=messages,
             **kwargs,
         )
-        raw = resp.choices[0].message.content or ""
-        if cfg.json_prefix:
-            raw = "{" + raw
+        choice = resp.choices[0]
+        raw = choice.message.content or ""
+        finish_reason = getattr(choice, "finish_reason", None) or "unknown"
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.M)
-        data = _loads_tolerant(raw)
+        candidates = [raw]
+        # Prefix 端点正常只返回「{」之后的 continuation，但兼容网关
+        # 仍返回完整 JSON，或在完整 JSON 前后包了废话。先按原文
+        # 解析，只有原文不成立且确实缺开头花括号时才补。
+        stripped = raw.lstrip()
+        if cfg.json_prefix and stripped.startswith(('"', "“")):
+            candidates.append("{" + raw)
+        parsed_objects = [
+            parsed
+            for text in candidates
+            if (parsed := _extract_blocks(text)) is not None
+        ]
+        data = next(
+            (
+                parsed
+                for parsed in parsed_objects
+                if all(
+                    name in parsed and isinstance(parsed[name], str)
+                    for name in BLOCKS
+                )
+            ),
+            None,
+        )
         if data is not None:
             break
-        log.warning("整理记忆：这一轮没拿到可解析的 JSON（响应长度=%d）", len(raw))
-    if data is None:
-        log.error("整理记忆失败，模型没返回 JSON")
+        object_partial = next(
+            (
+                {
+                    name: value.strip()
+                    for name, value in parsed.items()
+                    if name in BLOCKS and isinstance(value, str) and value.strip()
+                }
+                for parsed in parsed_objects
+            ),
+            {},
+        )
+        partial = object_partial or next(
+            (found for text in reversed(candidates) if (found := _salvage_blocks(text))),
+            partial,
+        )
+        if parsed_objects:
+            category = "partial_object"
+        elif any(_loads_tolerant(text) is not None for text in candidates):
+            category = "unrecognized_object"
+        elif not raw:
+            category = "empty_response"
+        elif partial:
+            category = "partial_json"
+        elif finish_reason == "length":
+            category = "truncated_json"
+        else:
+            category = "invalid_json"
+        # 模型正文可能包含用户隐私，日志只记诊断元数据。
+        log.warning(
+            "dossier_refresh model=%s attempt=%d finish_reason=%s "
+            "length=%d category=%s",
+            model,
+            attempt,
+            finish_reason,
+            len(raw),
+            category,
+        )
+    if data is None and not partial:
+        log.error(
+            "dossier_refresh model=%s attempts=%d category=no_usable_blocks",
+            model,
+            attempts,
+        )
         return None
+    if data is None:
+        # 截断抢救：只更新完整捞回的分区，没捞到的保持旧内容。
+        # covered_upto 不前进——这轮没消化完的记录下一轮还会再见到。
+        for name, (_, limit) in BLOCKS.items():
+            if name in partial:
+                d.blocks[name] = partial[name][:limit]
+        d.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
+        d.save()
+        log.warning(
+            "dossier_refresh model=%s category=partial_saved blocks=%d "
+            "covered_upto_advanced=false",
+            model,
+            len(partial),
+        )
+        return d
 
     for name, (_, limit) in BLOCKS.items():
         val = str(data.get(name, "")).strip()
@@ -296,5 +460,10 @@ def refresh(
     d.covered_upto = newest_id
     d.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
     d.save()
-    log.info("记忆文件已更新 %s（消化 %d 条）", d.path.name, len(entries))
+    log.info(
+        "dossier_refresh model=%s category=full_saved entries=%d "
+        "covered_upto_advanced=true",
+        model,
+        len(entries),
+    )
     return d

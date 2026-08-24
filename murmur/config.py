@@ -54,6 +54,20 @@ def _parse_channel_mode() -> str:
     return value
 
 
+def _parse_float(name: str, *, low: float, high: float) -> float | None:
+    """可选的采样参数。留空 = 请求里不带这个参数，用服务商自己的默认值。"""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name} 必须是一个数字，收到：{raw!r}") from None
+    if not low <= value <= high:
+        raise ValueError(f"{name} 必须在 {low} 到 {high} 之间，收到：{value!r}")
+    return value
+
+
 def _parse_identities(raw: str) -> list[list[str]]:
     """解析 "a|b, c" → [[a, b], [c]]。| 表示同一个人的多个身份。"""
     out: list[list[str]] = []
@@ -85,6 +99,17 @@ class Config:
     # 十次有九次直接回聊天正文）时打开：用 DeepSeek beta 端点的
     # assistant prefix 把回复的第一个字符钉死成 "{"，模型只能续写 JSON。
     json_prefix: bool
+    # 对话采样参数（只作用于 respond/initiate，读图和记忆整理不用）。
+    # None = 请求里不带，用服务商默认值。复读明显时把 presence_penalty
+    # 调到 0.3 左右比堆提示词管用。
+    temperature: float | None
+    presence_penalty: float | None
+    # 回复质量 P1 分阶段开关。默认全关，先完成 P0 线上结构化验收，
+    # 再一次只开一个，任何一项退化都能独立回滚。
+    open_loops: bool
+    reply_directives: bool
+    proactive_materials: bool
+    affect: bool
     telegram_token: str | None
     allowed_chat_ids: set[int]
     dingtalk_client_id: str | None
@@ -185,6 +210,16 @@ class Config:
             image_model=os.getenv("MURMUR_IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
             json_schema=_parse_bool("MURMUR_JSON_SCHEMA", default=True),
             json_prefix=_parse_bool("MURMUR_JSON_PREFIX", default=False),
+            temperature=_parse_float("MURMUR_TEMPERATURE", low=0.0, high=2.0),
+            presence_penalty=_parse_float(
+                "MURMUR_PRESENCE_PENALTY", low=-2.0, high=2.0
+            ),
+            open_loops=_parse_bool("MURMUR_OPEN_LOOPS", default=False),
+            reply_directives=_parse_bool("MURMUR_REPLY_DIRECTIVES", default=False),
+            proactive_materials=_parse_bool(
+                "MURMUR_PROACTIVE_MATERIALS", default=False
+            ),
+            affect=_parse_bool("MURMUR_AFFECT", default=False),
             telegram_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             allowed_chat_ids=allowed,
             dingtalk_client_id=os.getenv("DINGTALK_CLIENT_ID") or None,

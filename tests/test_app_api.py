@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -19,12 +20,20 @@ import httpx  # noqa: E402
 from _helpers import make_config  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from murmur.app_api import RateLimiter, create_app, validate_bind_host  # noqa: E402
+from murmur.affect import AffectState  # noqa: E402
+from murmur.app_api import (  # noqa: E402
+    RateLimiter,
+    create_app,
+    erase_account,
+    record_memory_reply,
+    validate_bind_host,
+)
 from murmur.app_lock import UserOperationLock  # noqa: E402
 from murmur.app_settings import AppSettings  # noqa: E402
 from murmur.app_store import AppStore, NotFound  # noqa: E402
 from murmur.app_worker import AppWorker, ProcessedMoment  # noqa: E402
 from murmur.engine import Reply  # noqa: E402
+from murmur.memory import Memory, thread_key  # noqa: E402
 from murmur.moment import Moment  # noqa: E402
 
 
@@ -264,6 +273,74 @@ class AppAPITests(unittest.TestCase):
         self.assertEqual(self.store.conn.execute(
             "SELECT COUNT(*) FROM app_users"
         ).fetchone()[0], 0)
+
+    def test_ack_reply_resolves_open_loop_and_updates_affect_once(self):
+        cfg = replace(self.cfg, open_loops=True, affect=True)
+        chat_id, label = thread_key("app", "direct", self.identity["user_id"])
+        now = datetime.now(UTC)
+        with Memory(self.settings.memory_db_path) as memory:
+            entry_id = memory.record(
+                chat_id=chat_id,
+                thread=label,
+                shot_at=None,
+                bucket="evening",
+                weekday="周日",
+                spot=None,
+                scene="",
+                move="speak",
+                said="面试怎么样了",
+                note=None,
+                kind="out",
+                intent="问结果",
+            )
+            memory.upsert_open_loop(
+                chat_id,
+                "面试结果",
+                "event",
+                due_at=now - timedelta(hours=1),
+                source_entry_id=entry_id,
+                now=now - timedelta(days=1),
+            )
+
+        record_memory_reply(
+            self.settings, cfg, entry_id, "面试结果成功了，终于通过"
+        )
+        record_memory_reply(
+            self.settings, cfg, entry_id, "面试结果成功了，终于通过"
+        )
+
+        with Memory(self.settings.memory_db_path) as memory:
+            entry = memory.recent(chat_id)[0]
+            loop = memory.conn.execute(
+                "SELECT status FROM open_loops WHERE chat_id=?", (chat_id,)
+            ).fetchone()
+            state = memory.conn.execute(
+                "SELECT valence,last_entry_id FROM affect_states WHERE chat_id=?",
+                (chat_id,),
+            ).fetchone()
+        self.assertEqual(entry.reply, "面试结果成功了，终于通过")
+        self.assertEqual(loop["status"], "resolved")
+        self.assertGreater(float(state["valence"]), 0)
+        self.assertEqual(int(state["last_entry_id"]), entry_id * 2 + 1)
+
+    def test_account_erasure_removes_all_continuity_tables(self):
+        chat_id, _ = thread_key("app", "direct", self.identity["user_id"])
+        now = datetime.now(UTC)
+        with Memory(self.settings.memory_db_path) as memory:
+            memory.upsert_open_loop(chat_id, "复诊", "event", now=now)
+            memory.upsert_proactive_material(
+                chat_id, "topic:test", "current_topic", "复诊", now
+            )
+            memory.save_affect_state(chat_id, AffectState(0.4, 0.2, now))
+
+        erase_account(self.store, self.settings, self.identity["user_id"])
+
+        with Memory(self.settings.memory_db_path) as memory:
+            for table in ("open_loops", "proactive_materials", "affect_states"):
+                count = memory.conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE chat_id=?", (chat_id,)
+                ).fetchone()[0]
+                self.assertEqual(count, 0, table)
 
     def test_limits_replay_and_uniform_errors(self):
         headers = self.authenticated_headers()

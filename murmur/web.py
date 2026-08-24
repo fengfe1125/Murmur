@@ -506,7 +506,7 @@ def _contexts(conn: sqlite3.Connection, cfg: Config) -> list[dict]:
         "       MIN(logged_at)       AS first_at,"
         "       MAX(logged_at)       AS last_at,"
         "       MAX(CASE WHEN kind = 'out' THEN logged_at END) AS last_outbound"
-        " FROM entries GROUP BY chat_id",
+        " FROM entries WHERE delivery_state = 'committed' GROUP BY chat_id",
         (local_midnight,),
     ).fetchall()
 
@@ -522,13 +522,15 @@ def _contexts(conn: sqlite3.Connection, cfg: Config) -> list[dict]:
         kind, label = _conversation_label(platform, conv, sender)
         last = conn.execute(
             "SELECT note, said, move FROM entries"
-            " WHERE chat_id = ? ORDER BY id DESC LIMIT 1", (cid,)
+            " WHERE chat_id = ? AND delivery_state = 'committed'"
+            " ORDER BY id DESC LIMIT 1", (cid,)
         ).fetchone()
         preview = (last["said"] or last["note"] or "") if last else ""
         if last is not None and last["move"] == "quiet" and not last["said"]:
             preview = "（它选择了不说话）"
         unanswered_rows = conn.execute(
-            "SELECT kind, reply FROM entries WHERE chat_id = ? ORDER BY id DESC LIMIT 12",
+            "SELECT kind, reply FROM entries WHERE chat_id = ?"
+            " AND delivery_state = 'committed' ORDER BY id DESC LIMIT 12",
             (cid,),
         ).fetchall()
         unanswered = 0
@@ -687,7 +689,8 @@ def _person(conn: sqlite3.Connection, cfg: Config, key: str, limit: int) -> dict
     merged: list[dict] = []
     for ctx in p["contexts"]:
         rows = conn.execute(
-            "SELECT * FROM entries WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            "SELECT * FROM entries WHERE chat_id = ?"
+            " AND delivery_state = 'committed' ORDER BY id DESC LIMIT ?",
             (ctx["chat_id"], limit),
         ).fetchall()
         # 去重要靠前后相邻，所以必须**先按上下文各自还原**，再合并时间线
@@ -732,7 +735,8 @@ def _dossier_full(cfg: Config, thread: str | None, conn: sqlite3.Connection,
         return meta
     d = Dossier.load(_dossier_root(cfg), thread)
     pending = conn.execute(
-        "SELECT COUNT(*) AS n FROM entries WHERE chat_id = ? AND id > ?",
+        "SELECT COUNT(*) AS n FROM entries WHERE chat_id = ? AND id > ?"
+        " AND delivery_state = 'committed'",
         (chat_id, d.covered_upto),
     ).fetchone()["n"]
     meta["blocks"] = [
@@ -930,7 +934,8 @@ class Handler(BaseHTTPRequestHandler):
             stats = {}
             rows = c.execute(
                 "SELECT kind, COUNT(*) n FROM entries"
-                " WHERE datetime(logged_at) >= datetime(?) GROUP BY kind",
+                " WHERE delivery_state = 'committed'"
+                " AND datetime(logged_at) >= datetime(?) GROUP BY kind",
                 (self._local_midnight_utc(),),
             ).fetchall()
             for r in rows:
@@ -938,7 +943,8 @@ class Handler(BaseHTTPRequestHandler):
             stats.setdefault("today_in", 0)
             stats.setdefault("today_out", 0)
             stats["entries"] = c.execute(
-                "SELECT COUNT(*) n FROM entries").fetchone()["n"]
+                "SELECT COUNT(*) n FROM entries"
+                " WHERE delivery_state = 'committed'").fetchone()["n"]
             stats["optouts"] = c.execute(
                 "SELECT COUNT(*) n FROM optouts").fetchone()["n"]
 

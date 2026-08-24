@@ -121,6 +121,10 @@ with tempfile.TemporaryDirectory() as d:
     mem = Memory(p)        # 打开旧库应该自动补表补列
     check("旧库打得开", True)
     check("老数据还在", len(mem.recent(chat_id=0, limit=5)) == 1)
+    state = mem.conn.execute(
+        "SELECT delivery_state FROM entries LIMIT 1"
+    ).fetchone()[0]
+    check("老数据迁移后默认视为已送达", state == "committed")
     check("roster 表自动建出来了", mem.roster("dt") == [])
     check("能往旧库里入册", mem.enroll("dt", "x", 1, "dt:oto:x") is True)
 
