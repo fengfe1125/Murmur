@@ -21,10 +21,13 @@ from urllib.parse import urlparse
 
 from PIL import Image
 
+from .affect import apply_message as preview_affect
+from .affect import prompt_context
 from .app_lock import UserOperationLock
 from .app_settings import AppSettings
 from .app_store import AccountDeleting, AppStore, Job, NotFound
 from .config import Config
+from .continuity import refresh_open_loops
 from .dossier import Dossier, refresh
 from .engine import Reply, read_photo, respond
 from .memory import Memory, thread_key
@@ -108,7 +111,25 @@ class EngineMomentProcessor:
         )
         chat_id, label = thread_key("app", "direct", job.user_id)
         dossier = Dossier.load(self.data_root / "dossiers", label)
-        prompt_dossier = None if dossier.is_empty else dossier.as_prompt()
+        prompt_parts: list[str] = []
+        if not dossier.is_empty:
+            prompt_parts.append(dossier.as_prompt())
+        if self.cfg.open_loops:
+            loops = memory.pending_open_loops(chat_id, limit=4)
+            if loops:
+                prompt_parts.append(
+                    "仍未闭合的近期待办（只有与本轮明显相关时才自然接上，"
+                    "不要逐条盘问）：\n" + "\n".join(
+                        f"- {loop.title}" for loop in loops
+                    )
+                )
+        if self.cfg.affect:
+            state = preview_affect(
+                memory.affect_state(chat_id, moment.at), job.note, moment.at
+            )
+            if tone := prompt_context(state):
+                prompt_parts.append(tone)
+        prompt_dossier = "\n\n".join(prompt_parts) or None
         if job.intent == "photo_reading" and photo is not None:
             reading = self._read(job, moment, photo, prompt_dossier)
             if reading is not None:
@@ -348,6 +369,7 @@ class AppWorker:
                 # Raw originals have a shorter lifetime than sleep-time dossier
                 # work.  Delete before refresh can block or fail.
                 self._safe_remove_upload(job.image_path)
+                self._refresh_continuity(memory, job, int(linked["id"]))
                 self._refresh_dossier(memory, job)
             return completed
 
@@ -402,6 +424,44 @@ class AppWorker:
                 "App dossier refresh failed user_id=%s error_type=%s",
                 job.user_id, type(error).__name__,
             )
+
+    def _refresh_continuity(
+        self, memory: Memory, job: Job, entry_id: int
+    ) -> None:
+        """Update continuity state only after the reply is already terminal.
+
+        These are enrichment jobs, never delivery prerequisites.  A model or
+        SQLite failure here must not turn a reply the user has seen into a
+        retryable moment.
+        """
+        chat_id, _ = thread_key("app", "direct", job.user_id)
+        now = datetime.now(self.cfg.tz)
+        if self.cfg.affect:
+            try:
+                # Reserve the even sequence for the inbound note; the odd one
+                # is used if the user later acknowledges this reply in App API.
+                memory.apply_affect_message(chat_id, entry_id * 2, job.note, now)
+            except Exception as error:
+                log.warning(
+                    "App affect update failed user_id=%s error_type=%s",
+                    job.user_id, type(error).__name__,
+                )
+        if self.cfg.open_loops:
+            try:
+                refresh_open_loops(
+                    self.cfg,
+                    memory,
+                    chat_id,
+                    entry_id,
+                    job.note,
+                    now=now,
+                )
+                memory.expire_open_loops(chat_id, now)
+            except Exception as error:
+                log.warning(
+                    "App open-loop refresh failed user_id=%s error_type=%s",
+                    job.user_id, type(error).__name__,
+                )
 
     def process_one(self) -> bool:
         job = self.store.claim_job(self.worker_id, lease=self.lease)
@@ -462,6 +522,7 @@ class AppWorker:
                     )
                     if cleaned_by_terminal_owner:
                         self._safe_remove_upload(job.image_path)
+                        self._refresh_continuity(memory, job, entry_id)
                         # Release the downsampled base64 before dossier refresh can
                         # spend up to the model timeout doing sleep-time work.
                         del result
@@ -488,7 +549,7 @@ class AppWorker:
             return True
         except Exception as error:
             log.error(
-                "App moment failed moment_id=%s error_type=%s",
+                "app_moment category=retryable_failure moment_id=%s error_type=%s",
                 job.moment_id, type(error).__name__,
             )
             # Do not leak gateway messages or user content into the API response.

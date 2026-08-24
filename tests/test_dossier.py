@@ -44,21 +44,29 @@ class DossierSaveTests(unittest.TestCase):
 
 
 class _Resp:
-    def __init__(self, content: str):
+    def __init__(self, content: str, finish_reason: str | None = None):
         self.choices = [
-            type("C", (), {"message": type("M", (), {"content": content})()})()
+            type(
+                "C",
+                (),
+                {
+                    "message": type("M", (), {"content": content})(),
+                    "finish_reason": finish_reason,
+                },
+            )()
         ]
 
 
 class _FakeClient:
-    def __init__(self, content: str):
+    def __init__(self, content: str, finish_reason: str | None = None):
         self.content = content
+        self.finish_reason = finish_reason
         self.calls: list[dict] = []
         self.chat = type("X", (), {"completions": self})()
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return _Resp(self.content)
+        return _Resp(self.content, self.finish_reason)
 
 
 class DossierRefreshPrefixTests(unittest.TestCase):
@@ -70,6 +78,8 @@ class DossierRefreshPrefixTests(unittest.TestCase):
                 db_path=str(Path(tmp) / "m.db"),
                 model="deepseek-v4-flash",
                 json_prefix=True,
+                temperature=1.1,
+                presence_penalty=0.3,
             )
             mem = Memory(str(Path(tmp) / "memory.db"))
             mem.record(
@@ -86,12 +96,15 @@ class DossierRefreshPrefixTests(unittest.TestCase):
                                     root=Path(tmp), force=True)
             self.assertIsNotNone(d)
             self.assertEqual(d.blocks["他是谁"], "- 他周末会出门")
+            self.assertEqual(d.covered_upto, 1)
             messages = client.calls[0]["messages"]
             self.assertEqual(
                 messages[-1],
                 {"role": "assistant", "content": "{", "prefix": True},
             )
             self.assertNotIn("response_format", client.calls[0])
+            self.assertNotIn("temperature", client.calls[0])
+            self.assertNotIn("presence_penalty", client.calls[0])
             # deepseek 的思考会先烧掉一截 token，整理上限不能卡在 1800。
             self.assertEqual(client.calls[0]["max_tokens"], 3000)
             mem.conn.close()
@@ -138,6 +151,25 @@ class DossierRefreshRobustnessTests(unittest.TestCase):
         )
         self.assertIsNotNone(d)
         self.assertEqual(d.blocks["他是谁"], "- 他住杭州")
+        self.assertEqual(d.covered_upto, 1)
+
+    def test_wrapped_json_ignores_closing_brace_inside_a_partition_string(self):
+        d = self._refresh(
+            '整理如下：{"他是谁": "- 常用 } 表情", "正在发生": "- 在散步", '
+            '"怎么跟他说话": "- 随意点"} 完成'
+        )
+        self.assertIsNotNone(d)
+        self.assertEqual(d.blocks["他是谁"], "- 常用 } 表情")
+        self.assertEqual(d.covered_upto, 1)
+
+    def test_prefix_mode_accepts_an_already_complete_json_object(self):
+        d = self._refresh(
+            '{"他是谁": "- 他住杭州", "正在发生": "- 在散步", '
+            '"怎么跟他说话": "- 随意点"}'
+        )
+        self.assertIsNotNone(d)
+        self.assertEqual(d.blocks["正在发生"], "- 在散步")
+        self.assertEqual(d.covered_upto, 1)
 
     def test_unrelated_dict_does_not_clobber_existing_blocks(self):
         # 模型返回了合法 JSON 但不是分区（比如把 say 数组包回来）：
@@ -163,11 +195,83 @@ class DossierRefreshRobustnessTests(unittest.TestCase):
         self.assertEqual(d.blocks["正在发生"], "- 旧内容别动")
         self.assertEqual(d.covered_upto, 0)
 
+    def test_complete_object_with_two_blocks_is_merged_as_partial(self):
+        # JSON 语法完整不等于三个分区都整理完：缺一块时不得
+        # 清空旧内容，也不得跳过这批 entries。
+        old = Dossier(thread="t", path=self.root / "t.md")
+        old.blocks = {"怎么跟他说话": "- 不要追问"}
+        old.save()
+        d = self._refresh(
+            '{"他是谁": "- 他住杭州", "正在发生": "- 在找工作"}'
+        )
+        self.assertIsNotNone(d)
+        self.assertEqual(d.blocks["他是谁"], "- 他住杭州")
+        self.assertEqual(d.blocks["怎么跟他说话"], "- 不要追问")
+        self.assertEqual(d.covered_upto, 0)
+
+    def test_all_three_blocks_must_be_strings_before_advancing(self):
+        old = Dossier(thread="t", path=self.root / "t.md")
+        old.blocks = {"正在发生": "- 旧内容别动"}
+        old.save()
+        d = self._refresh(
+            '{"他是谁": "- 他住杭州", "正在发生": ["- 在找工作"], '
+            '"怎么跟他说话": "- 随意点"}'
+        )
+        self.assertIsNotNone(d)
+        self.assertEqual(d.blocks["正在发生"], "- 旧内容别动")
+        self.assertEqual(d.covered_upto, 0)
+
     def test_fullwidth_truncated_json_still_salvages(self):
         # deepseek 的全角病和截断病会同时发作。
         d = self._refresh('{“他是谁”: “- 他住杭州”, “正在发生”: “- 在找工')
         self.assertIsNotNone(d)
         self.assertEqual(d.blocks["他是谁"], "- 他住杭州")
+
+    def test_failure_logs_structured_metadata_without_model_text(self):
+        secret = "PRIVATE_MODEL_OUTPUT_9f73"
+        client = _FakeClient(
+            f'{{"move": "speak", "say": "{secret}"}}',
+            finish_reason="length",
+        )
+        with self.assertLogs("murmur.dossier", level="WARNING") as captured:
+            with patch.object(dossier, "_client", return_value=client):
+                result = dossier.refresh(
+                    self.cfg, self.mem, 7, "t", root=self.root, force=True
+                )
+        self.assertIsNone(result)
+        logs = "\n".join(captured.output)
+        self.assertIn("model=deepseek-v4-flash", logs)
+        self.assertIn("attempt=1", logs)
+        self.assertIn("finish_reason=length", logs)
+        self.assertIn("length=", logs)
+        self.assertIn("category=unrecognized_object", logs)
+        self.assertNotIn(secret, logs)
+
+    def test_pending_delivery_is_a_cursor_barrier(self):
+        pending_id = self.mem.record(
+            chat_id=7, thread="t", shot_at=None, bucket="午间",
+            weekday="周六", spot=None, scene="不能归档", move="speak",
+            said="还没送达", note=None, kind="out", delivery_state="pending",
+        )
+        later_id = self.mem.record(
+            chat_id=7, thread="t", shot_at=None, bucket="午间",
+            weekday="周六", spot=None, scene="稍后的消息", move="speak",
+            said="已提交", note=None,
+        )
+        self.assertEqual((pending_id, later_id), (2, 3))
+
+        first = self._refresh(
+            '{"他是谁": "- 他住杭州", "正在发生": "- 在散步", '
+            '"怎么跟他说话": "- 随意点"}'
+        )
+        self.assertEqual(first.covered_upto, 1)
+
+        self.assertTrue(self.mem.commit_outbound_entry(pending_id, 7))
+        second = self._refresh(
+            '{"他是谁": "- 他住杭州", "正在发生": "- 在散步", '
+            '"怎么跟他说话": "- 随意点"}'
+        )
+        self.assertEqual(second.covered_upto, 3)
 
 
 if __name__ == "__main__":

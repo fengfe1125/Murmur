@@ -13,7 +13,7 @@ import time
 import unittest
 import zlib
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -24,11 +24,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _helpers import make_config  # noqa: E402
 from PIL import Image  # noqa: E402
 
+from murmur.affect import AffectState  # noqa: E402
 from murmur.app_api import erase_account  # noqa: E402
 from murmur.app_settings import AppSettings  # noqa: E402
 from murmur.app_store import AppStore  # noqa: E402
 from murmur.app_worker import (  # noqa: E402
     AppWorker,
+    EngineMomentProcessor,
     ProcessedMoment,
     validate_model_config,
 )
@@ -128,6 +130,66 @@ class AppWorkerTests(unittest.TestCase):
             entries = memory.recent(chat_id)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].said, "first ⏎ second")
+
+    def test_engine_processor_injects_bounded_open_loops_and_natural_affect(self):
+        self.queue()
+        job = self.store.claim_job("prompt-worker")
+        cfg = replace(self.cfg, open_loops=True, affect=True)
+        chat_id, _ = thread_key("app", "direct", self.enrollment.user_id)
+        captured: dict = {}
+
+        def fake_respond(*_args, **kwargs):
+            captured.update(kwargs)
+            return Reply("desk", "speak", ["接住了"])
+
+        with Memory(self.settings.memory_db_path) as memory:
+            for index in range(6):
+                memory.upsert_open_loop(
+                    chat_id,
+                    f"待办 {index}",
+                    "task",
+                    now=datetime.now(UTC),
+                )
+            memory.save_affect_state(
+                chat_id, AffectState(0.7, 0.3, datetime.now(UTC))
+            )
+            with patch("murmur.app_worker.respond", side_effect=fake_respond):
+                EngineMomentProcessor(cfg, self.root)(job, memory, lambda _text: None)
+
+        context = captured["dossier"]
+        self.assertIn("仍未闭合的近期待办", context)
+        self.assertEqual(context.count("- 待办"), 4)
+        self.assertIn("语气底色", context)
+        self.assertNotIn("0.7", context)
+
+    def test_post_delivery_continuity_failure_does_not_reopen_the_moment(self):
+        result, _ = self.queue()
+        cfg = replace(self.cfg, open_loops=True, affect=True)
+
+        def processor(_job, _memory, _on_bubble):
+            return ProcessedMoment(
+                Reply("desk", "speak", ["done"]),
+                Moment.text_only(cfg.tz),
+                None,
+            )
+
+        worker = AppWorker(self.store, cfg, self.settings, processor=processor)
+        with patch(
+            "murmur.app_worker.refresh_open_loops",
+            side_effect=RuntimeError("private model response"),
+        ):
+            with self.assertLogs("murmur.app_worker", level="WARNING") as captured:
+                self.assertTrue(worker.process_one())
+
+        events = self.store.events_after(result.moment_id, self.enrollment.user_id)
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertNotIn("private model response", "\n".join(captured.output))
+        chat_id, _ = thread_key("app", "direct", self.enrollment.user_id)
+        with Memory(self.settings.memory_db_path) as memory:
+            state = memory.conn.execute(
+                "SELECT last_entry_id FROM affect_states WHERE chat_id=?", (chat_id,)
+            ).fetchone()
+        self.assertEqual(int(state["last_entry_id"]), 2)
 
     def test_photo_preview_has_no_exif_and_original_is_always_removed(self):
         result, original = self.queue(image=True)

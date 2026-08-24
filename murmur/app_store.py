@@ -227,6 +227,8 @@ CREATE TABLE IF NOT EXISTS app_moments (
     push_preview     TEXT,
     acked            INTEGER NOT NULL DEFAULT 0,
     failure_retryable INTEGER CHECK(failure_retryable IN (0, 1)),
+    proactive_memory_finalized INTEGER NOT NULL DEFAULT 1
+                                      CHECK(proactive_memory_finalized IN (0, 1)),
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
     UNIQUE(user_id, idempotency_key)
@@ -353,6 +355,13 @@ class AppStore:
             # CHECK in SCHEMA is not reproduced here — SQLite cannot add one
             # to an existing table, and the write path validates the value.
             self.conn.execute("ALTER TABLE app_moments ADD COLUMN intent TEXT")
+        if "proactive_memory_finalized" not in moment_columns:
+            # Rows from before the durable continuity outbox predate this
+            # workflow and must not be replayed as unfinished work.
+            self.conn.execute(
+                "ALTER TABLE app_moments ADD COLUMN proactive_memory_finalized "
+                "INTEGER NOT NULL DEFAULT 1"
+            )
         # Every row that predates a second client platform is an iOS row, so the
         # column default backfills them correctly and no data migration is due.
         key_columns = {
@@ -1094,6 +1103,48 @@ class AppStore:
             return {"moment_id": row["id"], "bubbles": bubbles,
                     "preview": row["push_preview"], "created_at": row["created_at"]}
 
+    def pending_proactive_memory_finalizations(
+        self, user_id: str | None = None
+    ) -> list[dict]:
+        """Durable proactive sends whose cross-database bookkeeping is pending."""
+        sql = (
+            "SELECT m.id AS moment_id,m.user_id,m.memory_entry_id,m.created_at "
+            "FROM app_moments m JOIN app_users u ON u.id=m.user_id "
+            "WHERE m.source='proactive' AND m.status='complete' "
+            "AND m.memory_entry_id IS NOT NULL AND m.proactive_memory_finalized=0 "
+            "AND u.active=1 AND u.deleting=0"
+        )
+        params: tuple[object, ...] = ()
+        if user_id is not None:
+            sql += " AND m.user_id=?"
+            params = (user_id,)
+        sql += " ORDER BY m.created_at"
+        with self._lock:
+            return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+
+    def finish_proactive_memory_finalization(
+        self, moment_id: str, user_id: str
+    ) -> None:
+        """Commit the outbox and retire slots already covered by this send."""
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT created_at FROM app_moments WHERE id=? AND user_id=? "
+                "AND source='proactive' AND status='complete'",
+                (moment_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise NotFound("proactive moment not found")
+            db.execute(
+                "UPDATE app_moments SET proactive_memory_finalized=1,updated_at=? "
+                "WHERE id=?",
+                (_iso(), moment_id),
+            )
+            db.execute(
+                "UPDATE app_proactive_slots SET delivered_at=COALESCE(delivered_at,?) "
+                "WHERE user_id=? AND slot_at<=?",
+                (_iso(), user_id, row["created_at"]),
+            )
+
     def create_proactive(
         self, user_id: str, bubbles: list[str], *, scene: str = "",
         memory_entry_id: int | None = None, now: datetime | None = None,
@@ -1117,10 +1168,11 @@ class AppStore:
             db.execute(
                 "INSERT INTO app_moments"
                 "(id,user_id,source,request_digest,idempotency_key,status,scene,move,push_preview,"
-                "memory_entry_id,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,'complete',?,'speak',?,?,?,?)",
+                "memory_entry_id,proactive_memory_finalized,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,'complete',?,'speak',?,?,?,?,?)",
                 (moment_id, user_id, "proactive", "proactive", f"proactive:{moment_id}",
-                 scene, bubbles[0][:120], memory_entry_id, now_text, now_text),
+                 scene, bubbles[0][:120], memory_entry_id,
+                 0 if memory_entry_id is not None else 1, now_text, now_text),
             )
             seq = 1
             for bubble in bubbles[:3]:

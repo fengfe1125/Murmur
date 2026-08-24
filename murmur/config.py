@@ -104,6 +104,12 @@ class Config:
     # 调到 0.3 左右比堆提示词管用。
     temperature: float | None
     presence_penalty: float | None
+    # 回复质量 P1 分阶段开关。默认全关，先完成 P0 线上结构化验收，
+    # 再一次只开一个，任何一项退化都能独立回滚。
+    open_loops: bool
+    reply_directives: bool
+    proactive_materials: bool
+    affect: bool
     telegram_token: str | None
     allowed_chat_ids: set[int]
     dingtalk_client_id: str | None
@@ -208,6 +214,12 @@ class Config:
             presence_penalty=_parse_float(
                 "MURMUR_PRESENCE_PENALTY", low=-2.0, high=2.0
             ),
+            open_loops=_parse_bool("MURMUR_OPEN_LOOPS", default=False),
+            reply_directives=_parse_bool("MURMUR_REPLY_DIRECTIVES", default=False),
+            proactive_materials=_parse_bool(
+                "MURMUR_PROACTIVE_MATERIALS", default=False
+            ),
+            affect=_parse_bool("MURMUR_AFFECT", default=False),
             telegram_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             allowed_chat_ids=allowed,
             dingtalk_client_id=os.getenv("DINGTALK_CLIENT_ID") or None,

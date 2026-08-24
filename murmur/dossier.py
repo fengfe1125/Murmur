@@ -190,10 +190,25 @@ def _brace_fragment(text: str) -> str | None:
     if start < 0:
         return None
     depth = 0
+    quote: str | None = None
+    escaped = False
     for i, ch in enumerate(text[start:], start):
-        depth += (ch == "{") - (ch == "}")
-        if depth == 0:
-            return text[start : i + 1]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif (quote == '"' and ch == '"') or (quote == "“" and ch == "”"):
+                quote = None
+            continue
+        if ch in {'"', "“"}:
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
     return None
 
 
@@ -289,9 +304,20 @@ def refresh(
     root = root or (cfg.db_path.parent / "dossiers")
     d = Dossier.load(root, thread)
 
+    # A proactive entry is written before the App moment.  Do not let dossier
+    # refresh read it—or advance covered_upto past it—until delivery is durable.
+    # The pending id is a barrier so a later inbound row cannot make that gap
+    # disappear forever when the cursor advances.
     rows = mem.conn.execute(
-        "SELECT * FROM entries WHERE chat_id = ? AND id > ? ORDER BY id",
-        (chat_id, d.covered_upto),
+        """SELECT * FROM entries
+           WHERE chat_id = ? AND id > ? AND delivery_state = 'committed'
+             AND id < COALESCE(
+                 (SELECT MIN(id) FROM entries
+                  WHERE chat_id = ? AND id > ? AND delivery_state = 'pending'),
+                 9223372036854775807
+             )
+           ORDER BY id""",
+        (chat_id, d.covered_upto, chat_id, d.covered_upto),
     ).fetchall()
     if not rows:
         return None
@@ -328,31 +354,89 @@ def refresh(
     # deepseek 的输出风格有随机性：全角标点、或偶尔思考烧光 token。
     # json_prefix 模式下给两次机会；完整解析不成再试分区级抢救；
     # 都不成就放弃这轮，下一批 12 条再来。
+    model = cfg.memory_model or cfg.model
     data = None
     partial: dict[str, str] = {}
-    for _ in range(2 if cfg.json_prefix else 1):
+    attempts = 2 if cfg.json_prefix else 1
+    for attempt in range(1, attempts + 1):
         resp = client.chat.completions.create(
-            model=cfg.memory_model or cfg.model,
+            model=model,
             max_tokens=MEMORY_MAX_TOKENS,
             messages=messages,
             **kwargs,
         )
-        raw = resp.choices[0].message.content or ""
-        if cfg.json_prefix:
-            raw = "{" + raw
+        choice = resp.choices[0]
+        raw = choice.message.content or ""
+        finish_reason = getattr(choice, "finish_reason", None) or "unknown"
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.M)
-        data = _extract_blocks(raw)
+        candidates = [raw]
+        # Prefix 端点正常只返回「{」之后的 continuation，但兼容网关
+        # 仍返回完整 JSON，或在完整 JSON 前后包了废话。先按原文
+        # 解析，只有原文不成立且确实缺开头花括号时才补。
+        stripped = raw.lstrip()
+        if cfg.json_prefix and stripped.startswith(('"', "“")):
+            candidates.append("{" + raw)
+        parsed_objects = [
+            parsed
+            for text in candidates
+            if (parsed := _extract_blocks(text)) is not None
+        ]
+        data = next(
+            (
+                parsed
+                for parsed in parsed_objects
+                if all(
+                    name in parsed and isinstance(parsed[name], str)
+                    for name in BLOCKS
+                )
+            ),
+            None,
+        )
         if data is not None:
             break
-        # 失败也要留证据：长度相同的全角病和截断病在日志里长得一模一样，
-        # 不看开头几十个字根本分不出来。
-        partial = _salvage_blocks(raw) or partial
+        object_partial = next(
+            (
+                {
+                    name: value.strip()
+                    for name, value in parsed.items()
+                    if name in BLOCKS and isinstance(value, str) and value.strip()
+                }
+                for parsed in parsed_objects
+            ),
+            {},
+        )
+        partial = object_partial or next(
+            (found for text in reversed(candidates) if (found := _salvage_blocks(text))),
+            partial,
+        )
+        if parsed_objects:
+            category = "partial_object"
+        elif any(_loads_tolerant(text) is not None for text in candidates):
+            category = "unrecognized_object"
+        elif not raw:
+            category = "empty_response"
+        elif partial:
+            category = "partial_json"
+        elif finish_reason == "length":
+            category = "truncated_json"
+        else:
+            category = "invalid_json"
+        # 模型正文可能包含用户隐私，日志只记诊断元数据。
         log.warning(
-            "整理记忆：这一轮没拿到可解析的 JSON（响应长度=%d，开头=%r）",
-            len(raw), raw[:120],
+            "dossier_refresh model=%s attempt=%d finish_reason=%s "
+            "length=%d category=%s",
+            model,
+            attempt,
+            finish_reason,
+            len(raw),
+            category,
         )
     if data is None and not partial:
-        log.error("整理记忆失败，模型没返回 JSON")
+        log.error(
+            "dossier_refresh model=%s attempts=%d category=no_usable_blocks",
+            model,
+            attempts,
+        )
         return None
     if data is None:
         # 截断抢救：只更新完整捞回的分区，没捞到的保持旧内容。
@@ -363,8 +447,10 @@ def refresh(
         d.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
         d.save()
         log.warning(
-            "整理记忆：JSON 不完整，只更新了 %d 个分区（%s），记录留到下一轮",
-            len(partial), "、".join(partial),
+            "dossier_refresh model=%s category=partial_saved blocks=%d "
+            "covered_upto_advanced=false",
+            model,
+            len(partial),
         )
         return d
 
@@ -374,5 +460,10 @@ def refresh(
     d.covered_upto = newest_id
     d.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
     d.save()
-    log.info("记忆文件已更新 %s（消化 %d 条）", d.path.name, len(entries))
+    log.info(
+        "dossier_refresh model=%s category=full_saved entries=%d "
+        "covered_upto_advanced=true",
+        model,
+        len(entries),
+    )
     return d

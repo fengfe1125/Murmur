@@ -352,6 +352,26 @@ class AppStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.current_proactive(self.enrollment.user_id))
         self.assertEqual(self.store.preferences(self.enrollment.user_id)["consecutive_missed"], 0)
 
+    def test_proactive_recovery_link_survives_twenty_four_hour_expiry(self):
+        now = datetime.now(UTC)
+        created = now - timedelta(hours=25)
+        self.store.create_proactive(
+            self.enrollment.user_id,
+            ["one"],
+            memory_entry_id=77,
+            now=created,
+        )
+        self.store.expire_stale_proactive(now=now)
+        self.assertIsNone(self.store.current_proactive(self.enrollment.user_id))
+        pending = self.store.pending_proactive_memory_finalizations(
+            self.enrollment.user_id
+        )
+        self.assertEqual([item["memory_entry_id"] for item in pending], [77])
+        self.store.finish_proactive_memory_finalization(
+            pending[0]["moment_id"], self.enrollment.user_id
+        )
+        self.assertEqual(self.store.pending_proactive_memory_finalizations(), [])
+
     def test_inbound_activity_and_explicit_preferences_resume_four_miss_hold(self):
         self.store.conn.execute(
             "UPDATE app_preferences SET consecutive_missed=4 WHERE user_id=?",

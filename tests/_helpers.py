@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import unittest
 from dataclasses import fields
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -62,3 +63,16 @@ def make_config(db_path: str | Path = "/tmp/murmur-test.db", **overrides) -> Con
     if overrides:
         raise AssertionError(f"Config 没有这些字段：{sorted(overrides)}")
     return Config(**values)
+
+
+def run_unittest(*, verbosity: int = 2) -> None:
+    """Run the calling script's unittest suite with the repo-standard summary."""
+    program = unittest.main(verbosity=verbosity, exit=False)
+    result = program.result
+    failed = (
+        len(result.failures)
+        + len(result.errors)
+        + len(result.unexpectedSuccesses)
+    )
+    print(f"\n通过 {result.testsRun - failed}，失败 {failed}")
+    raise SystemExit(0 if result.wasSuccessful() else 1)

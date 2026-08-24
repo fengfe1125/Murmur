@@ -18,8 +18,12 @@ from _helpers import make_config  # noqa: E402
 from murmur.engine import (  # noqa: E402
     Reply,
     _extract_json,
+    _guard_bubbles,
+    _output_error,
+    _reply_style_note,
     _salvage_bubbles,
     initiate,
+    read_photo,
     respond,
 )
 from murmur.initiative import INTENTS  # noqa: E402
@@ -37,8 +41,9 @@ class _Msg:
 
 
 class _Choice:
-    def __init__(self, content: str):
+    def __init__(self, content: str, finish_reason: str = "stop"):
         self.message = _Msg(content)
+        self.finish_reason = finish_reason
 
 
 class _Resp:
@@ -48,7 +53,10 @@ class _Resp:
 
 class _StreamChunk:
     def __init__(self, content: str):
-        self.choices = [type("C", (), {"delta": type("D", (), {"content": content})()})()]
+        self.choices = [type("C", (), {
+            "delta": type("D", (), {"content": content})(),
+            "finish_reason": None,
+        })()]
 
 
 class _HttpResponse:
@@ -92,6 +100,8 @@ class FakeClient:
         content = self.content_by_model.get(
             model, '{"move":"brief","say":["默认回复"],"scene":"测试"}'
         )
+        if isinstance(content, list):
+            content = content.pop(0)
         if kwargs.get("stream"):
             return [_StreamChunk(content)]
         return _Resp(content)
@@ -304,6 +314,8 @@ class EngineFallbackTests(unittest.TestCase):
             client.calls[0]["messages"][-1],
             {"role": "assistant", "content": "{", "prefix": True},
         )
+        self.assertNotIn("temperature", client.calls[0])
+        self.assertNotIn("presence_penalty", client.calls[0])
         self.assertNotIn("response_format", client.calls[0])
 
     def test_sampling_params_are_sent_only_when_configured(self):
@@ -334,6 +346,219 @@ class EngineFallbackTests(unittest.TestCase):
         self.assertNotIn("temperature", client.calls[0])
         self.assertNotIn("presence_penalty", client.calls[0])
 
+    def test_all_reply_shapes_pass_through_the_same_emoji_guard(self):
+        cases = [
+            '{"move":"speak","say":["收到啦☀️"],"scene":"测试"}',
+            '["收到啦😊"]',
+            "收到啦❤️",
+        ]
+        for index, raw in enumerate(cases):
+            with self.subTest(index=index):
+                cfg = self._no_fallback_config(f"guard-{index}.db")
+                client = FakeClient({"kimi-k2.6": raw})
+                with patch("murmur.engine._client", return_value=client):
+                    reply = respond(self.moment, self.mem, cfg,
+                                    note="测试", chat_id=0)
+                self.assertEqual(reply.say, ["收到啦"])
+
+    def test_json_debris_inside_say_is_never_read_out(self):
+        cfg = self._no_fallback_config("debris.db")
+        client = FakeClient({
+            "kimi-k2.6": [
+                '{"move":"speak","say":["\\\"scene\\\": 半截"],"scene":""}',
+                '{"move":"speak","say":["这次是干净的"],"scene":""}',
+            ]
+        })
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        self.assertEqual(reply.say, ["这次是干净的"])
+        self.assertEqual(len(client.calls), 2)
+
+    def test_explicit_photo_quiet_remains_a_valid_non_output(self):
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "photo-quiet.db"),
+            model="kimi-k2.6", fallback_model="", image_model="mimo-v2.5",
+            json_schema=False,
+        )
+        client = FakeClient({
+            "mimo-v2.5": '{"move":"quiet","say":[],"scene":"只是普通桌面"}'
+        })
+        photo = Photo(None, None, None, None, "test", "QUJD")
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(
+                self.moment, self.mem, cfg, photo=photo, note=None, chat_id=0
+            )
+        self.assertTrue(reply.silent)
+        self.assertEqual(reply.scene, "只是普通桌面")
+
+    def test_parse_failure_log_is_structured_and_never_contains_raw(self):
+        cfg = self._no_fallback_config("safe-log.db")
+        secret = "PRIVATE_RAW_MODEL_TEXT"
+        client = FakeClient({"kimi-k2.6": secret * 20})
+        with patch("murmur.engine._client", return_value=client):
+            with self.assertLogs("murmur.engine", level="WARNING") as captured:
+                with self.assertRaises(ValueError):
+                    respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        joined = "\n".join(captured.output)
+        self.assertNotIn(secret, joined)
+        self.assertIn("model=kimi-k2.6", joined)
+        self.assertIn("attempt=1", joined)
+        self.assertIn("category=non_json", joined)
+        self.assertIn("length=", joined)
+        self.assertIn("finish_reason=stop", joined)
+
+    def test_parse_failures_have_aggregate_safe_categories(self):
+        self.assertEqual(_output_error("", "stop").category, "empty")
+        self.assertEqual(
+            _output_error('{"say":["写到一半', "length").category,
+            "truncated",
+        )
+        self.assertEqual(_output_error("直接说人话", "stop").category, "non_json")
+        self.assertEqual(_output_error("{broken", "stop").category, "invalid_json")
+
+    def test_style_note_is_after_history_and_before_current_user(self):
+        self.mem.record(
+            chat_id=0, shot_at=None, bucket=None, weekday=None, spot=None,
+            scene="（纯文字）", move="speak", said="怎么了呀 ⏎ 说说呗",
+            note="旧消息", kind="in",
+        )
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "style.db"),
+            model="kimi-k2.6", fallback_model="", image_model="",
+            reply_directives=True,
+        )
+        client = FakeClient({"kimi-k2.6": PRIMARY_JSON})
+        with patch("murmur.engine._client", return_value=client):
+            respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        messages = client.calls[0]["messages"]
+        style_index = next(i for i, m in enumerate(messages)
+                           if m["role"] == "system" and "本轮回复要求" in m["content"])
+        history_index = max(i for i, m in enumerate(messages[:style_index])
+                            if m["role"] == "assistant")
+        user_index = next(i for i in range(style_index + 1, len(messages))
+                          if messages[i]["role"] == "user")
+        self.assertLess(history_index, style_index)
+        self.assertLess(style_index, user_index)
+        self.assertIn("怎么了呀", messages[style_index]["content"])
+
+    def test_non_streaming_similarity_retries_once(self):
+        self.mem.record(
+            chat_id=0, shot_at=None, bucket=None, weekday=None, spot=None,
+            scene="（纯文字）", move="speak", said="怎么又这么晚",
+            note="旧消息", kind="in",
+        )
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "similar.db"),
+            model="kimi-k2.6", fallback_model="", image_model="",
+            reply_directives=True,
+        )
+        client = FakeClient({"kimi-k2.6": [
+            '{"move":"speak","say":["怎么又这么晚呀"],"scene":""}',
+            '{"move":"speak","say":["你今天是被事情绊住了吗"],"scene":""}',
+        ]})
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        self.assertEqual(reply.say, ["你今天是被事情绊住了吗"])
+        self.assertEqual(len(client.calls), 2)
+
+    def test_reply_directives_flag_off_adds_no_note_or_similarity_retry(self):
+        self.mem.record(
+            chat_id=0, shot_at=None, bucket=None, weekday=None, spot=None,
+            scene="（纯文字）", move="speak", said="怎么又这么晚",
+            note="旧消息", kind="in",
+        )
+        cfg = self._no_fallback_config("directives-off.db")
+        client = FakeClient({
+            "kimi-k2.6":
+            '{"move":"speak","say":["怎么又这么晚呀"],"scene":""}'
+        })
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="测试", chat_id=0)
+        self.assertEqual(reply.say, ["怎么又这么晚呀"])
+        self.assertEqual(len(client.calls), 1)
+        self.assertFalse(any(
+            m["role"] == "system" and "本轮回复要求" in m["content"]
+            for m in client.calls[0]["messages"]
+        ))
+
+    def test_streaming_similar_first_bubble_is_not_emitted_before_retry(self):
+        self.mem.record(
+            chat_id=0, shot_at=None, bucket=None, weekday=None, spot=None,
+            scene="（纯文字）", move="speak", said="怎么又这么晚",
+            note="旧消息", kind="in",
+        )
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "stream-similar.db"),
+            model="kimi-k2.6", fallback_model="", image_model="",
+            reply_directives=True,
+        )
+        client = FakeClient({"kimi-k2.6": [
+            '{"move":"speak","say":["怎么又这么晚呀"],"scene":""}',
+            '{"move":"speak","say":["今天忙到现在啊"],"scene":""}',
+        ]})
+        streamed: list[str] = []
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="测试", chat_id=0,
+                            on_bubble=streamed.append)
+        self.assertEqual(streamed, ["今天忙到现在啊"])
+        self.assertEqual(reply.say, ["今天忙到现在啊"])
+        self.assertEqual(len(client.calls), 2)
+
+    def test_streaming_suppresses_later_exact_duplicate(self):
+        client = FakeClient({
+            "kimi-k2.6": '{"move":"speak","say":["听见了","听见了"],"scene":""}'
+        })
+        streamed: list[str] = []
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, self.cfg, note="测试", chat_id=0,
+                            on_bubble=streamed.append)
+        self.assertEqual(streamed, ["听见了"])
+        self.assertEqual(reply.say, ["听见了"])
+
+    def test_streaming_later_bubble_cannot_repeat_history_exactly(self):
+        self.mem.record(
+            chat_id=0, shot_at=None, bucket=None, weekday=None, spot=None,
+            scene="（纯文字）", move="speak", said="说说呗",
+            note="旧消息", kind="in",
+        )
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "stream-exact.db"),
+            model="kimi-k2.6", fallback_model="", image_model="",
+            reply_directives=True,
+        )
+        client = FakeClient({
+            "kimi-k2.6":
+            '{"move":"speak","say":["我记得这件事","说说呗"],"scene":""}'
+        })
+        streamed: list[str] = []
+        with patch("murmur.engine._client", return_value=client):
+            reply = respond(self.moment, self.mem, cfg, note="测试", chat_id=0,
+                            on_bubble=streamed.append)
+        self.assertEqual(streamed, ["我记得这件事"])
+        self.assertEqual(reply.say, ["我记得这件事"])
+
+
+class StyleNoteTests(unittest.TestCase):
+    def test_note_sets_compact_reply_constraints(self):
+        note = _reply_style_note([
+            {"role": "assistant", "content": "怎么了呀 ⏎ 说说呗"},
+        ], "今天事情有点多")
+        self.assertIn("怎么了呀", note)
+        self.assertIn("最多一个问句", note)
+        self.assertIn("先回应具体内容", note)
+        self.assertIn("1–3 条气泡", note)
+
+    def test_emotional_result_is_marked_as_unsuitable_for_followup(self):
+        note = _reply_style_note([], "面试没过，我现在特别难受")
+        self.assertIn("明确表达的情绪", note)
+        self.assertIn("本轮不适合追问", note)
+        self.assertIn("建议 1–2 条", note)
+
+    def test_direct_question_is_answered_before_any_clarifying_question(self):
+        note = _reply_style_note([], "SSE 为什么会断开？")
+        self.assertIn("先直接回答", note)
+        self.assertIn("不适合用反问代替答案", note)
+
 
 class ExtractJsonTests(unittest.TestCase):
     def test_fullwidth_quotes_are_normalized_after_plain_parse_fails(self):
@@ -355,6 +580,10 @@ class ExtractJsonTests(unittest.TestCase):
     def test_bare_array_of_non_strings_is_not_a_reply(self):
         with self.assertRaises(ValueError):
             _extract_json("[1, 2, 3]")
+
+    def test_guard_never_coerces_non_string_json_values_into_bubbles(self):
+        self.assertEqual(_guard_bubbles([1, {"private": "value"}, None]), [])
+        self.assertEqual(_guard_bubbles(["能说的", 1]), ["能说的"])
 
 
 class SalvageTests(unittest.TestCase):
@@ -413,6 +642,8 @@ class InitiateTests(unittest.TestCase):
             client.calls[0]["messages"][-1],
             {"role": "assistant", "content": "{", "prefix": True},
         )
+        self.assertNotIn("temperature", client.calls[0])
+        self.assertNotIn("presence_penalty", client.calls[0])
 
     def test_prefix_is_not_added_when_the_schema_is_doing_the_work(self):
         cfg = make_config(
@@ -428,6 +659,46 @@ class InitiateTests(unittest.TestCase):
             initiate(self.moment, self.mem, cfg, INTENTS[0], chat_id=0)
         self.assertEqual(client.calls[0]["messages"][-1]["role"], "user")
         self.assertIn("response_format", client.calls[0])
+
+    def test_sampling_params_apply_to_initiate(self):
+        cfg = make_config(
+            db_path=str(Path(self.tmp.name) / "sampling.db"),
+            model="kimi-k2.6", fallback_model="", image_model="",
+            temperature=1.1, presence_penalty=0.3,
+        )
+        client = FakeClient({"kimi-k2.6": PRIMARY_JSON})
+        with patch("murmur.engine._client", return_value=client):
+            initiate(self.moment, self.mem, cfg, INTENTS[0], chat_id=0)
+        self.assertEqual(client.calls[0]["temperature"], 1.1)
+        self.assertEqual(client.calls[0]["presence_penalty"], 0.3)
+
+    def test_initiate_also_uses_the_unified_emoji_guard(self):
+        client = FakeClient({
+            "deepseek-v4-flash":
+            '"move":"speak","say":["想起你啦😊"],"scene":"测试"}'
+        })
+        reply = self._call(client)
+        self.assertEqual(reply.say, ["想起你啦"])
+
+
+class ReadPhotoSamplingTests(unittest.TestCase):
+    def test_read_photo_does_not_receive_dialogue_sampling_params(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                db_path=str(Path(tmp) / "read.db"), model="kimi-k2.6",
+                fallback_model="", image_model="mimo-v2.5",
+                temperature=1.1, presence_penalty=0.3,
+            )
+            client = FakeClient({
+                "mimo-v2.5":
+                '{"guess":"像是刚忙完","angles":["今天累吗"],"scene":"桌面"}'
+            })
+            photo = Photo(None, None, None, None, "test", "QUJD")
+            with patch("murmur.engine._client", return_value=client):
+                reading = read_photo(Moment.text_only(cfg.tz), photo, cfg)
+        self.assertEqual(reading.guess, "像是刚忙完")
+        self.assertNotIn("temperature", client.calls[0])
+        self.assertNotIn("presence_penalty", client.calls[0])
 
 
 if __name__ == "__main__":

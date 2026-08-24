@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from openai import BadRequestError, OpenAI, OpenAIError
 
+from .affect import has_negative_affect
 from .config import Config
 from .memory import Entry, Memory
 from .moment import Moment
@@ -174,7 +175,9 @@ def _as_bubbles(value) -> list[str]:
     if isinstance(value, str):
         parts = [ln.strip() for ln in value.splitlines()]
     elif isinstance(value, list):
-        parts = [str(x).strip() for x in value]
+        # Structured output is an API boundary.  Coercing arbitrary JSON values
+        # here can turn a malformed {"say":[1]} into user-visible text "1".
+        parts = [x.strip() for x in value if isinstance(x, str)]
     else:
         return []
     # 喂历史时多条气泡用 ' ⏎ ' 拼接，模型有时会把这个符号原样模仿回
@@ -237,7 +240,8 @@ def _extract_json(text: str) -> dict:
     if "“" in text or "”" in text:
         if (obj := _parse_json_obj(text.replace("“", '"').replace("”", '"'))) is not None:
             return obj
-    raise ValueError(f"模型没有返回可解析的 JSON：{text[:200]}")
+    # 原文可能包含用户隐私或模型泄漏的 prompt，绝不能进异常字符串和日志。
+    raise ValueError("模型没有返回可解析的 JSON")
 
 
 # JSON 碎片长得不像人说的话：半个数组、一行键值对、光秃秃一个括号。
@@ -375,7 +379,7 @@ def _parse_reading(text: str) -> PhotoReading:
         raise
     guess = _clean_guess(obj.get("guess"))
     if not guess:
-        raise ValueError(f"读图：没有可用的 guess：{text[:200]}")
+        raise ValueError("读图：没有可用的 guess")
     scene = obj.get("scene")
     return PhotoReading(
         guess=guess,
@@ -481,6 +485,152 @@ def _too_similar(text: str, previous: list[str]) -> bool:
     return False
 
 
+def _recent_assistant_texts(history: list[dict], limit: int = 8) -> list[str]:
+    return [
+        str(turn.get("content", ""))
+        for turn in history
+        if turn.get("role") == "assistant" and turn.get("content")
+    ][-limit:]
+
+
+def _reply_style_note(
+    history: list[dict], current_text: str | None = None
+) -> str:
+    """把本轮最容易忘的表达约束放到历史之后、当前输入之前。
+
+    SYSTEM 仍然负责身份和长期人格；这条只负责下一句话，短到不会挤掉历史。
+    """
+    openings: list[str] = []
+    for text in reversed(_recent_assistant_texts(history)):
+        first = text.split("⏎", 1)[0].strip()
+        first = re.split(r"[，。！？!?；;]", first, maxsplit=1)[0].strip()
+        if first and first not in openings:
+            openings.append(first[:12])
+        if len(openings) == 3:
+            break
+    avoid = "、".join(reversed(openings)) if openings else "无"
+    compact = re.sub(r"\s+", "", current_text or "")
+    emotional = has_negative_affect(compact)
+    explicit_question = any(mark in compact for mark in ("?", "？")) or any(
+        word in compact for word in ("怎么办", "为什么", "怎么做", "是什么")
+    )
+    if emotional:
+        focus = "先回应具体内容和他明确表达的情绪"
+        followup = "本轮不适合追问，先陪住；不要把解释责任推回给他"
+        bubble_count = "建议 1–2 条"
+    elif explicit_question:
+        focus = "先直接回答他的具体问题"
+        followup = "不适合用反问代替答案；只有必要澄清时才问一次"
+        bubble_count = "建议 1–2 条"
+    elif current_text is None:
+        focus = "先说清这次主动开口的具体来由"
+        followup = "只有素材本身需要结果时才问一次，不强拉新话题"
+        bubble_count = "建议 1–2 条"
+    elif len(compact) <= 4:
+        focus = "先回应这句短消息本身，不脑补背景"
+        followup = "信息不足也不要为了续聊强行追问"
+        bubble_count = "建议 1 条"
+    else:
+        focus = "先回应具体内容"
+        followup = "只有一个关键缺口会影响回应时才问，最多一次"
+        bubble_count = "建议 1–2 条"
+    return (
+        f"本轮回复要求：{focus}；气泡数量：{bubble_count}，总上限仍是 1–3 条气泡；"
+        f"追问判断：{followup}；最多一个问句；不要复用近期开头：{avoid}。"
+    )
+
+
+def _clean_outbound_text(value: str) -> str:
+    text = _EMOJI.sub("", value)
+    # emoji 序列里的连接符、文本/emoji 选择符和残留组合键不能单独漏出去。
+    text = re.sub(r"[\u200d\ufe0e\ufe0f]", "", text).strip()
+    if not text or not _looks_spoken(text):
+        return ""
+    return text
+
+
+def _guard_bubbles(value, *, limit: int = 3) -> list[str]:
+    """所有可见回复的唯一出口：清 emoji、JSON 残骸和同批精确重复。"""
+    source = _as_bubbles(value)
+    guarded: list[str] = []
+    emoji_hits = invalid = duplicates = 0
+    for bubble in source:
+        if _EMOJI.search(bubble):
+            emoji_hits += 1
+        clean = _clean_outbound_text(bubble)
+        if not clean:
+            invalid += 1
+        elif clean in guarded:
+            duplicates += 1
+        else:
+            guarded.append(clean)
+        if len(guarded) == limit:
+            break
+    if (
+        emoji_hits
+        or invalid
+        or duplicates
+        or len(source) > len(guarded)
+        or any(a != b for a, b in zip(source, guarded, strict=False))
+    ):
+        log.info(
+            "reply_guard category=filtered input_bubbles=%d output_bubbles=%d "
+            "emoji_hits=%d invalid=%d duplicates=%d",
+            len(source), len(guarded), emoji_hits, invalid, duplicates,
+        )
+    return guarded
+
+
+class _InvalidOutput(ValueError):
+    def __init__(
+        self, *, category: str, length: int = 0, finish_reason: str | None = None
+    ):
+        super().__init__(category)
+        self.category = category
+        self.length = length
+        self.finish_reason = finish_reason
+
+
+class _TooSimilar(_InvalidOutput):
+    def __init__(self, *, length: int = 0, finish_reason: str | None = None):
+        super().__init__(
+            category="too_similar", length=length, finish_reason=finish_reason
+        )
+
+
+def _output_error(raw: str, finish_reason: str | None) -> _InvalidOutput:
+    stripped = (raw or "").strip()
+    if not stripped:
+        category = "empty"
+    elif finish_reason == "length":
+        category = "truncated"
+    elif "{" not in stripped and "[" not in stripped:
+        category = "non_json"
+    else:
+        category = "invalid_json"
+    return _InvalidOutput(
+        category=category, length=len(raw), finish_reason=finish_reason
+    )
+
+
+def _guard_error(raw: str, finish_reason: str | None) -> _InvalidOutput:
+    return _InvalidOutput(
+        category="guard_empty", length=len(raw), finish_reason=finish_reason
+    )
+
+
+def _log_attempt_failure(
+    scope: str, model: str, attempt: int, error: Exception
+) -> None:
+    category = getattr(error, "category", "api_error")
+    length = getattr(error, "length", 0)
+    finish_reason = getattr(error, "finish_reason", None) or "unknown"
+    log.warning(
+        "%s model=%s attempt=%d category=%s length=%d finish_reason=%s",
+        scope, model, attempt, category, length, finish_reason,
+    )
+
+
 def _response_format() -> dict:
     return {
         "type": "json_schema",
@@ -529,7 +679,6 @@ def initiate(
     intent,
     *,
     chat_id: int = 0,
-    _retry: bool = True,
     dossier: str | None = None,
 ) -> Reply:
     """主动开口。没有人发消息给你，是你自己想说一句。
@@ -553,34 +702,36 @@ def initiate(
     else:
         lines += ["", "（你还没主动说过话，这是第一次）"]
 
+    history = history_turns(mem.recent(chat_id, limit=6))
     messages = [
         {"role": "system", "content": SYSTEM},
         *([{"role": "system", "content": dossier}] if dossier else []),
-        *history_turns(mem.recent(chat_id, limit=6)),
+        *history,
+        *(
+            [{"role": "system", "content": _reply_style_note(history)}]
+            if cfg.reply_directives else []
+        ),
         {"role": "user", "content": "\n".join(lines)},
     ]
 
     last_error: Exception | None = None
-    for model, use_schema in _fallback_attempts(
-        cfg, primary=cfg.model, use_schema=cfg.json_schema
-    ):
+    attempts = _fallback_attempts(cfg, primary=cfg.model, use_schema=cfg.json_schema)
+    for attempt, (model, use_schema) in enumerate(attempts, 1):
         try:
             reply = _initiate_once(
                 cfg, model, use_schema, messages,
-                moment=moment, mem=mem, intent=intent, chat_id=chat_id,
-                said_before=said_before, dossier=dossier, _retry=_retry,
+                said_before=said_before,
+                attempt=attempt,
             )
             if last_error is not None:
                 log.info("主动消息：降级模型 %s 接住了", model)
             return reply
         except (OpenAIError, ValueError) as error:
-            # 带上错误原文：ValueError 的信息里有模型返回的前 200 字，
-            # 线上只靠异常类型名根本分不清是截断、思考烧光还是直接说人话。
-            log.warning(
-                "主动消息：模型 %s 失败（%s: %s），再试一次",
-                model, type(error).__name__, str(error)[:200],
-            )
+            _log_attempt_failure("initiate", model, attempt, error)
             last_error = error
+    if isinstance(last_error, _TooSimilar):
+        log.info("主动消息连续两次和之前太像，跳过这次")
+        return Reply(scene="（跳过：和之前重复）", move="quiet", say=[])
     raise last_error  # attempts 至少有一个，跑不到这里才怪
 
 
@@ -590,13 +741,8 @@ def _initiate_once(
     use_schema: bool,
     messages: list[dict],
     *,
-    moment: Moment,
-    mem: Memory,
-    intent,
-    chat_id: int,
     said_before,
-    dossier: str | None,
-    _retry: bool,
+    attempt: int,
 ) -> Reply:
     if cfg.json_prefix and not use_schema:
         # 和 _respond_once、_read_once、dossier 同一招，之前只有这里漏了：
@@ -610,32 +756,40 @@ def _initiate_once(
         kwargs["response_format"] = _response_format()
     resp = _client(cfg).chat.completions.create(**kwargs)
     raw = resp.choices[0].message.content or ""
+    finish_reason = getattr(resp.choices[0], "finish_reason", None)
     if cfg.json_prefix and not use_schema:
         raw = "{" + raw
     try:
         data = _extract_json(raw)
     except ValueError:
-        salvaged = _salvage_bubbles(raw, 2)
+        salvaged = _guard_bubbles(_salvage_bubbles(raw, 2), limit=2)
         if not salvaged:
-            raise
+            raise _output_error(raw, finish_reason) from None
+        log.warning(
+            "initiate model=%s attempt=%d category=salvaged_output "
+            "length=%d finish_reason=%s bubbles=%d",
+            model, attempt, len(raw), finish_reason or "unknown", len(salvaged),
+        )
         return Reply(scene="（主动·输出被截断）", move="speak", say=salvaged)
 
     move = data.get("move", "quiet")
     if move not in ("speak", "brief", "quiet"):
         move = "brief"
     # 主动开口最多两条。三条太扑，像有事求人。
-    say = _as_bubbles(data.get("say"))[:2]
+    say = _guard_bubbles(data.get("say"), limit=2)
+    if not say:
+        raise _guard_error(raw, finish_reason)
 
     # 代码层去重：重了就重来一次，还重就这次不发。
     prev = [e.said for e in said_before if e.said]
-    if say and _too_similar(" ".join(say), prev):
-        if _retry:
-            log.info("主动消息和之前太像，重试一次")
-            return initiate(moment, mem, cfg, intent, chat_id=chat_id,
-                        _retry=False, dossier=dossier)
-        log.info("主动消息重复，跳过这次")
-        return Reply(scene="（跳过：和之前重复）", move="quiet", say=[])
+    if cfg.reply_directives and say and _too_similar(" ".join(say), prev):
+        raise _TooSimilar(length=len(raw), finish_reason=finish_reason)
 
+    log.info(
+        "initiate model=%s attempt=%d category=full_output length=%d "
+        "finish_reason=%s bubbles=%d",
+        model, attempt, len(raw), finish_reason or "unknown", len(say),
+    )
     return Reply(scene=str(data.get("scene", "")), move=move, say=say)
 
 
@@ -712,7 +866,7 @@ def respond(
         )
 
     last_error: Exception | None = None
-    for model, use_schema in attempts:
+    for attempt, (model, use_schema) in enumerate(attempts, 1):
         include_image = image_block is not None and model == attempts[0][0]
         content: list[dict] = []
         if include_image:
@@ -729,17 +883,14 @@ def respond(
                 cfg=cfg,
                 on_bubble=on_bubble,
                 photo=photo,
+                attempt=attempt,
+                current_text=note,
             )
             if last_error is not None:
                 log.info("降级模型 %s 接住了回复", model)
             return reply
         except (OpenAIError, ValueError) as error:
-            # 带上错误原文：ValueError 的信息里有模型返回的前 200 字，
-            # 线上只靠异常类型名根本分不清是截断、思考烧光还是直接说人话。
-            log.warning(
-                "模型 %s 失败（%s: %s），再试一次",
-                model, type(error).__name__, str(error)[:200],
-            )
+            _log_attempt_failure("respond", model, attempt, error)
             last_error = error
     raise last_error  # attempts 至少有一个，跑不到这里才怪
 
@@ -755,14 +906,24 @@ def _respond_once(
     cfg: Config,
     on_bubble,
     photo: Photo | None,
+    attempt: int,
+    current_text: str | None,
 ) -> Reply:
     json_prefix = cfg.json_prefix
+    previous = _recent_assistant_texts(history)
     messages = [
         {"role": "system", "content": SYSTEM},
         # 长期记忆放在 system 之后、对话之前：它是背景知识，
         # 不是这一轮的输入，混进 user turn 会被当成他刚说的话。
         *([{"role": "system", "content": dossier}] if dossier else []),
         *history,
+        *(
+            [{
+                "role": "system",
+                "content": _reply_style_note(history, current_text),
+            }]
+            if cfg.reply_directives else []
+        ),
         {"role": "user", "content": content},
     ]
     if json_prefix and not use_schema:
@@ -779,18 +940,51 @@ def _respond_once(
     if use_schema:
         kwargs["response_format"] = _response_format()
 
+    finish_reason: str | None = None
+    emitted: list[str] = []
+    previous_exact = {
+        clean
+        for text in previous
+        for bubble in text.split("⏎")
+        if (clean := _clean_outbound_text(bubble))
+    }
     if on_bubble is None:
-        raw = client.chat.completions.create(**kwargs).choices[0].message.content or ""
+        response = client.chat.completions.create(**kwargs)
+        raw = response.choices[0].message.content or ""
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
     else:
         streamer = BubbleStreamer()
         raw = ""
         for chunk in client.chat.completions.create(stream=True, **kwargs):
+            if chunk.choices:
+                finish_reason = (
+                    getattr(chunk.choices[0], "finish_reason", None) or finish_reason
+                )
             piece = (chunk.choices[0].delta.content or "") if chunk.choices else ""
             if not piece:
                 continue
             raw += piece
             for bubble in streamer.feed(piece):
-                on_bubble(bubble)
+                guarded = _guard_bubbles([bubble], limit=1)
+                if not guarded:
+                    continue
+                clean = guarded[0]
+                if (
+                    cfg.reply_directives
+                    and not emitted
+                    and _too_similar(clean, previous)
+                ):
+                    # 第一条尚未交付，整次结果仍可安全丢弃并重试。
+                    raise _TooSimilar(
+                        length=len(raw), finish_reason=finish_reason
+                    )
+                # 第一条一旦发出就不可撤回；之后只拦同批精确重复。
+                if clean in emitted or (
+                    cfg.reply_directives and clean in previous_exact
+                ):
+                    continue
+                emitted.append(clean)
+                on_bubble(clean)
     if json_prefix and not use_schema:
         raw = "{" + raw
     try:
@@ -798,21 +992,57 @@ def _respond_once(
     except ValueError:
         # JSON 截断了（模型话太多撑爆 max_tokens）。别整个崩掉——
         # 把已经写完整的那几条气泡捞出来照样能用。
-        salvaged = _salvage_bubbles(raw, 3)
+        salvaged = _guard_bubbles(_salvage_bubbles(raw, 3), limit=3)
         if not salvaged:
-            raise
-        log.warning("模型没按 JSON 返回，抢救出 %d 条气泡", len(salvaged))
-        return Reply(scene="（输出被截断）", move="speak", say=_as_bubbles(salvaged))
+            raise _output_error(raw, finish_reason) from None
+        if (
+            cfg.reply_directives
+            and not emitted
+            and _too_similar(" ".join(salvaged), previous)
+        ):
+            raise _TooSimilar(
+                length=len(raw), finish_reason=finish_reason
+            ) from None
+        log.warning(
+            "respond model=%s attempt=%d category=salvaged_output "
+            "length=%d finish_reason=%s bubbles=%d",
+            model, attempt, len(raw), finish_reason or "unknown", len(salvaged),
+        )
+        return Reply(scene="（输出被截断）", move="speak", say=salvaged)
 
     move = data.get("move", "quiet")
     if move not in ("speak", "brief", "quiet"):
         move = "brief"
 
-    say = _as_bubbles(data.get("say"))
+    say = _guard_bubbles(data.get("say"), limit=3)
 
-    # 纯文字消息不许沉默。提示词里写了，这里再兜一道——
-    # 模型偶尔还是会选 quiet，而"跟它说话没反应"是最劝退的体验。
-    if photo is None and (move == "quiet" or not say):
-        move, say = "brief", (say or ["嗯"])
+    # 带图回复可以明确选择 quiet；这是一个有意义的动作，不是坏输出。
+    # 纯文字则必须有可见内容。其余 guard 清空的情况交回尝试链，不能
+    # 拿“嗯”掩盖只有 emoji / JSON 残骸的输出。
+    if not say:
+        if photo is not None and move == "quiet":
+            log.info(
+                "respond model=%s attempt=%d category=quiet_output length=%d "
+                "finish_reason=%s bubbles=0",
+                model, attempt, len(raw), finish_reason or "unknown",
+            )
+            return Reply(scene=str(data.get("scene", "")), move="quiet", say=[])
+        raise _guard_error(raw, finish_reason)
+    if (
+        cfg.reply_directives
+        and not emitted
+        and _too_similar(" ".join(say), previous)
+    ):
+        raise _TooSimilar(length=len(raw), finish_reason=finish_reason)
 
+    if emitted:
+        # 流式路径的 Reply 只描述实际交付过的气泡；被 exact guard 拦下的
+        # 后续气泡不能重新出现在数据库记录或 done 事件里。
+        say = emitted
+
+    log.info(
+        "respond model=%s attempt=%d category=full_output length=%d "
+        "finish_reason=%s bubbles=%d",
+        model, attempt, len(raw), finish_reason or "unknown", len(say),
+    )
     return Reply(scene=str(data.get("scene", "")), move=move, say=say)

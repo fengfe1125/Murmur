@@ -20,6 +20,7 @@ import time
 import uuid
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -221,6 +222,11 @@ def erase_account(store: AppStore, settings: AppSettings, user_id: str) -> None:
             )
             memory.conn.execute("DELETE FROM greeted WHERE chat_id=?", (chat_id,))
             memory.conn.execute("DELETE FROM optouts WHERE chat_id=?", (chat_id,))
+            memory.conn.execute("DELETE FROM open_loops WHERE chat_id=?", (chat_id,))
+            memory.conn.execute(
+                "DELETE FROM proactive_materials WHERE chat_id=?", (chat_id,)
+            )
+            memory.conn.execute("DELETE FROM affect_states WHERE chat_id=?", (chat_id,))
             memory.conn.commit()
         paths = [Path(value) for value in artefacts["paths"]]
         paths.extend(settings.data_root / "photos" / f"{entry_id}.jpg" for entry_id in ids)
@@ -250,10 +256,33 @@ def apply_stop_preference(store: AppStore, user_id: str, text: str | None) -> bo
     return True
 
 
-def record_memory_reply(settings: AppSettings, entry_id: int, reply: str) -> None:
-    """Attach the user's acknowledgement to the stored memory entry."""
+def record_memory_reply(
+    settings: AppSettings, cfg: Config, entry_id: int, reply: str
+) -> None:
+    """Attach an acknowledgement and update optional continuity state."""
     with Memory(settings.memory_db_path) as memory:
+        row = memory.conn.execute(
+            "SELECT chat_id FROM entries WHERE id=?", (entry_id,)
+        ).fetchone()
         memory.add_reply(entry_id, reply)
+        if row is None:
+            return
+        chat_id = int(row["chat_id"])
+        now = datetime.now(cfg.tz)
+        try:
+            if cfg.open_loops:
+                memory.resolve_open_loops_from_text(chat_id, reply, now)
+            if cfg.affect:
+                memory.apply_affect_message(
+                    chat_id, entry_id * 2 + 1, reply, now
+                )
+        except Exception as error:
+            # The acknowledgement is already durable.  Optional state must not
+            # make the client retry an otherwise successful ACK.
+            log.warning(
+                "App acknowledgement continuity update failed error_type=%s",
+                type(error).__name__,
+            )
 
 
 def create_app(
@@ -772,7 +801,7 @@ def create_app(
         reply = reply.strip() if isinstance(reply, str) else ""
         if reply and moment.get("memory_entry_id"):
             await asyncio.to_thread(
-                record_memory_reply, settings,
+                record_memory_reply, settings, cfg,
                 int(moment["memory_entry_id"]), reply,
             )
         await asyncio.to_thread(apply_stop_preference, store, auth.user_id, reply)
