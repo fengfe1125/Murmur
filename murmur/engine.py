@@ -494,11 +494,15 @@ def _recent_assistant_texts(history: list[dict], limit: int = 8) -> list[str]:
 
 
 def _reply_style_note(
-    history: list[dict], current_text: str | None = None
+    history: list[dict], current_text: str | None = None, *, proactive: bool = False
 ) -> str:
     """把本轮最容易忘的表达约束放到历史之后、当前输入之前。
 
     SYSTEM 仍然负责身份和长期人格；这条只负责下一句话，短到不会挤掉历史。
+
+    `proactive` 必须显式传，不能用「current_text 是空的」去猜：用户发一张
+    不带配文的图时 note 同样是 None，猜的话会让它把用户发起的这一轮
+    当成自己主动搭话，开口就解释「我为什么找你」。
     """
     openings: list[str] = []
     for text in reversed(_recent_assistant_texts(history)):
@@ -514,7 +518,11 @@ def _reply_style_note(
     explicit_question = any(mark in compact for mark in ("?", "？")) or any(
         word in compact for word in ("怎么办", "为什么", "怎么做", "是什么")
     )
-    if emotional:
+    if proactive:
+        focus = "先说清这次主动开口的具体来由"
+        followup = "只有素材本身需要结果时才问一次，不强拉新话题"
+        bubble_count = "建议 1–2 条"
+    elif emotional:
         focus = "先回应具体内容和他明确表达的情绪"
         followup = "本轮不适合追问，先陪住；不要把解释责任推回给他"
         bubble_count = "建议 1–2 条"
@@ -522,9 +530,10 @@ def _reply_style_note(
         focus = "先直接回答他的具体问题"
         followup = "不适合用反问代替答案；只有必要澄清时才问一次"
         bubble_count = "建议 1–2 条"
-    elif current_text is None:
-        focus = "先说清这次主动开口的具体来由"
-        followup = "只有素材本身需要结果时才问一次，不强拉新话题"
+    elif not compact:
+        # 他发了图但一个字没写。这轮仍然是他起的头，别当成自己主动搭话。
+        focus = "先说你从这张图里真正看到的东西，不要脑补画面外的事"
+        followup = "只有一个关键缺口会影响回应时才问，最多一次"
         bubble_count = "建议 1–2 条"
     elif len(compact) <= 4:
         focus = "先回应这句短消息本身，不脑补背景"
@@ -708,7 +717,10 @@ def initiate(
         *([{"role": "system", "content": dossier}] if dossier else []),
         *history,
         *(
-            [{"role": "system", "content": _reply_style_note(history)}]
+            [{
+                "role": "system",
+                "content": _reply_style_note(history, proactive=True),
+            }]
             if cfg.reply_directives else []
         ),
         {"role": "user", "content": "\n".join(lines)},
