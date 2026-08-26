@@ -521,20 +521,20 @@ def _reply_style_note(
     if proactive:
         focus = "先说清这次主动开口的具体来由"
         followup = "只有素材本身需要结果时才问一次，不强拉新话题"
-        bubble_count = "建议 1–2 条"
+        bubble_count = "建议 1 条"
     elif emotional:
         focus = "先回应具体内容和他明确表达的情绪"
         followup = "本轮不适合追问，先陪住；不要把解释责任推回给他"
-        bubble_count = "建议 1–2 条"
+        bubble_count = "建议 1 条"
     elif explicit_question:
         focus = "先直接回答他的具体问题"
         followup = "不适合用反问代替答案；只有必要澄清时才问一次"
-        bubble_count = "建议 1–2 条"
+        bubble_count = "建议 1 条"
     elif not compact:
         # 他发了图但一个字没写。这轮仍然是他起的头，别当成自己主动搭话。
         focus = "先说你从这张图里真正看到的东西，不要脑补画面外的事"
         followup = "只有一个关键缺口会影响回应时才问，最多一次"
-        bubble_count = "建议 1–2 条"
+        bubble_count = "建议 1 条"
     elif len(compact) <= 4:
         focus = "先回应这句短消息本身，不脑补背景"
         followup = "信息不足也不要为了续聊强行追问"
@@ -542,9 +542,9 @@ def _reply_style_note(
     else:
         focus = "先回应具体内容"
         followup = "只有一个关键缺口会影响回应时才问，最多一次"
-        bubble_count = "建议 1–2 条"
+        bubble_count = "建议 1 条，确有两件不同的事要说才 2 条"
     return (
-        f"本轮回复要求：{focus}；气泡数量：{bubble_count}，总上限仍是 1–3 条气泡；"
+        f"本轮回复要求：{focus}；气泡数量：{bubble_count}，上限 2 条；"
         f"追问判断：{followup}；最多一个问句；不要复用近期开头：{avoid}。"
     )
 
