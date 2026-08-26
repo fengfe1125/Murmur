@@ -498,6 +498,19 @@ class EngineFallbackTests(unittest.TestCase):
         self.assertNotIn("主动开口", short_text)
         self.assertIn("不脑补背景", short_text)
 
+    def test_directive_never_asks_for_more_bubbles_than_persona_allows(self):
+        # persona 说"正常只放一条，永远不要三条"。近端指令要是还写着
+        # "建议 1–2 条，总上限 1–3 条"，两条规则每轮都在打架。
+        history = [{"role": "assistant", "content": "嗯"}]
+        for note in (_reply_style_note(history, proactive=True),
+                     _reply_style_note(history, None),
+                     _reply_style_note(history, "是的"),
+                     _reply_style_note(history, "今天被老板当众说了")):
+            self.assertIn("建议 1 条", note)
+            self.assertIn("上限 2 条", note)
+            self.assertNotIn("1–3 条", note)
+            self.assertNotIn("建议 1–2 条", note)
+
     def test_parse_failure_log_is_structured_and_never_contains_raw(self):
         cfg = self._no_fallback_config("safe-log.db")
         secret = "PRIVATE_RAW_MODEL_TEXT"
@@ -653,13 +666,13 @@ class StyleNoteTests(unittest.TestCase):
         self.assertIn("怎么了呀", note)
         self.assertIn("最多一个问句", note)
         self.assertIn("先回应具体内容", note)
-        self.assertIn("1–3 条气泡", note)
+        self.assertIn("上限 2 条", note)
 
     def test_emotional_result_is_marked_as_unsuitable_for_followup(self):
         note = _reply_style_note([], "面试没过，我现在特别难受")
         self.assertIn("明确表达的情绪", note)
         self.assertIn("本轮不适合追问", note)
-        self.assertIn("建议 1–2 条", note)
+        self.assertIn("建议 1 条", note)
 
     def test_direct_question_is_answered_before_any_clarifying_question(self):
         note = _reply_style_note([], "SSE 为什么会断开？")
