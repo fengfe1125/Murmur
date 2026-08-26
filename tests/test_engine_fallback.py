@@ -19,6 +19,7 @@ from murmur.engine import (  # noqa: E402
     Reply,
     _extract_json,
     _guard_bubbles,
+    _looks_like_question,
     _output_error,
     _reply_style_note,
     _salvage_bubbles,
@@ -510,6 +511,22 @@ class EngineFallbackTests(unittest.TestCase):
             self.assertIn("上限 2 条", note)
             self.assertNotIn("1–3 条", note)
             self.assertNotIn("建议 1–2 条", note)
+
+    def test_chinese_questions_without_a_question_mark_count_as_questions(self):
+        # 线上真实案例：「你觉得我是一个什么样子的人」没带问号，检测器漏了，
+        # 于是"别用反问代替回答"那条没注入，它连着两轮把问题推了回去。
+        for asked in ("你觉得我是一个什么样子的人", "你还记得我上次说的事吗",
+                      "严重吗", "今天怎么这么晚", "你是不是生气了", "后来呢"):
+            self.assertTrue(_looks_like_question(asked), asked)
+        for said in ("感觉很无聊", "没什么", "什么都不想做", "哪怕再累也要做完",
+                     "谁知道呢", "管他呢", "今天被老板当众说了"):
+            self.assertFalse(_looks_like_question(said), said)
+
+    def test_question_directive_forbids_deflecting_to_later(self):
+        note = _reply_style_note([], "你觉得我是一个什么样子的人")
+        self.assertIn("先直接回答", note)
+        self.assertIn("用你记得的具体内容答", note)
+        self.assertIn("让我想想再告诉你", note)
 
     def test_parse_failure_log_is_structured_and_never_contains_raw(self):
         cfg = self._no_fallback_config("safe-log.db")

@@ -493,6 +493,29 @@ def _recent_assistant_texts(history: list[dict], limit: int = 8) -> list[str]:
     ][-limit:]
 
 
+# 中文聊天里的问句常常不带问号。只认 ?/？ 会漏掉"你还记得我上次说的事吗"
+# 这种——而那正是最需要"别用反问代替回答"的场合。
+# 只收 吗/呢：单独作疑问语气的「么」在现代聊天里少见，而「什么」正好以它结尾。
+_QUESTION_TAIL = re.compile(r"(吗|呢)\s*[?？]?\s*$")
+# 以 呢 结尾但其实不是在问你的常见说法。
+_RHETORICAL = re.compile(r"谁知道呢|鬼知道呢|说不准呢|难说呢|管他呢")
+_QUESTION_WORD = re.compile(
+    r"(?<!没)什么(?!都|也)|怎么(?!也)|为何|哪(?!怕)|谁(?!知道)|多少|多久|几点|几时|"
+    r"是不是|有没有|能不能|要不要|会不会|好不好|行不行|记不记得|知不知道|想不想"
+)
+
+
+def _looks_like_question(compact: str) -> bool:
+    """他这句是不是在问你。问号只是其中一种信号，不是唯一一种。"""
+    if not compact:
+        return False
+    if any(mark in compact for mark in ("?", "？")):
+        return True
+    if _RHETORICAL.search(compact):
+        return False
+    return bool(_QUESTION_TAIL.search(compact) or _QUESTION_WORD.search(compact))
+
+
 def _reply_style_note(
     history: list[dict], current_text: str | None = None, *, proactive: bool = False
 ) -> str:
@@ -515,9 +538,7 @@ def _reply_style_note(
     avoid = "、".join(reversed(openings)) if openings else "无"
     compact = re.sub(r"\s+", "", current_text or "")
     emotional = has_negative_affect(compact)
-    explicit_question = any(mark in compact for mark in ("?", "？")) or any(
-        word in compact for word in ("怎么办", "为什么", "怎么做", "是什么")
-    )
+    explicit_question = _looks_like_question(compact)
     if proactive:
         focus = "先说清这次主动开口的具体来由"
         followup = "只有素材本身需要结果时才问一次，不强拉新话题"
@@ -527,8 +548,8 @@ def _reply_style_note(
         followup = "本轮不适合追问，先陪住；不要把解释责任推回给他"
         bubble_count = "建议 1 条"
     elif explicit_question:
-        focus = "先直接回答他的具体问题"
-        followup = "不适合用反问代替答案；只有必要澄清时才问一次"
+        focus = "先直接回答他的具体问题；问到你们之间的事就用你记得的具体内容答"
+        followup = "不适合用反问代替答案，也不要说'让我想想再告诉你'；只有必要澄清时才问一次"
         bubble_count = "建议 1 条"
     elif not compact:
         # 他发了图但一个字没写。这轮仍然是他起的头，别当成自己主动搭话。
