@@ -9,6 +9,13 @@ P0 的代码阻断项已经收口，可以进入灰度前检查；**尚未完成
 真实 DeepSeek 端点上的成功率、24–48 小时 dossier 持续推进和用户可见
 失败率，都必须在部署后用无正文指标验证。
 
+> 2026-08-27 更新：无正文指标已落地——`murmur/counters.py` 把本文列的
+> 分类口径（回复 full/salvaged/quiet、app_moment retryable_failure、
+> dossier full/partial/no_usable_blocks）按天写进 `daily_counters` 表，
+> 看板总览页有「回复质量 · 近 14 天」卡片。生产验收直接读这张表即可。
+> 另：降级链支持第二家网关（`MURMUR_FALLBACK_BASE_URL` /
+> `MURMUR_FALLBACK_API_KEY`），不配则维持同网关行为。
+
 两轮模型都失败时，App 仍返回可重试失败并保留客户端重发能力。这里的
 P0 承诺是“零静默丢失”，不是伪造成功回复，也不是承诺上游永不失败。
 

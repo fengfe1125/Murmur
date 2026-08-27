@@ -665,6 +665,36 @@ function renderOverview(d){
   }
   w.append(stats);
 
+  // 回复质量计数：服务端只记分类和次数（counters.py），不含任何正文，
+  // 是 P0 生产验收的数据源。
+  const COUNTER_LABELS = {
+    'respond.full_output':'回复 · 完整输出',
+    'respond.salvaged_output':'回复 · 截断抢救',
+    'respond.quiet_output':'回复 · 选择安静',
+    'initiate.full_output':'主动 · 完整输出',
+    'initiate.salvaged_output':'主动 · 截断抢救',
+    'app_moment.retryable_failure':'可重试失败',
+    'dossier.full_saved':'记忆整理 · 完整',
+    'dossier.partial_saved':'记忆整理 · 部分',
+    'dossier.no_usable_blocks':'记忆整理 · 失败',
+  };
+  const cntCard = el('div','card');
+  cntCard.append(el('h3',null,'回复质量 · 近 14 天'));
+  const agg = {};
+  (d.counters||[]).forEach(r=>{
+    const a = agg[r.key] = agg[r.key]||{today:0,total:0};
+    a.total += r.count;
+    if(r.day===d.today) a.today += r.count;
+  });
+  const cntKeys = Object.keys(COUNTER_LABELS).filter(k=>agg[k]);
+  if(!cntKeys.length){
+    cntCard.append(el('div','sub','还没有计数——升级后随每次回复开始积累。'));
+  }else{
+    cntKeys.forEach(k=>cntCard.append(
+      kv(COUNTER_LABELS[k], `今天 ${agg[k].today} · 14 天 ${agg[k].total}`)));
+  }
+  w.append(cntCard);
+
   const g1 = el('div','grid g3');
   g1.style.marginTop='14px';
   d.platforms.forEach(p=>g1.append(procCard(p)));

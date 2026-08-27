@@ -88,6 +88,11 @@ class Config:
     memory_model: str | None
     # 主模型报错时的降级模型（空字符串 = 不降级，直接失败）。
     fallback_model: str
+    # 降级走第二家网关时的端点和 key。默认空 = 和主网关同一家——
+    # 2026-08-16 的教训是网关整体 503 时"同一家换个模型"不算降级，
+    # 整条链一起挂。配上第二家（如 deepseek 直连）才算真降级。
+    fallback_base_url: str | None
+    fallback_api_key: str | None
     # 带图消息走这个多模态模型；空字符串 = 沿用主模型。
     image_model: str
     # 主模型是否支持 json_schema 响应格式。OpenCode 网关实测只有
@@ -207,6 +212,8 @@ class Config:
             fallback_model=os.getenv(
                 "MURMUR_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL
             ),
+            fallback_base_url=os.getenv("MURMUR_FALLBACK_BASE_URL") or None,
+            fallback_api_key=os.getenv("MURMUR_FALLBACK_API_KEY") or None,
             image_model=os.getenv("MURMUR_IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
             json_schema=_parse_bool("MURMUR_JSON_SCHEMA", default=True),
             json_prefix=_parse_bool("MURMUR_JSON_PREFIX", default=False),

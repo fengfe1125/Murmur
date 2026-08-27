@@ -35,13 +35,10 @@ jobs:
       - name: Tests
         # tests/ 里一半是普通 unittest 模块，另一半是脚本式的——import 的
         # 那一刻就把自己跑完再 sys.exit()，所以 unittest discover 会把它们
-        # 整批报成 import error。逐个当脚本跑是唯一对两种都成立的方式，也
-        # 正是 deploy/murmur-update 在 VPS 上的跑法：CI 和发布闸门问同一
-        # 个问题，答案才有意义。
-        run: |
-          for t in tests/test_*.py; do
-            python "$t" || { echo "::error file=$t::$t 挂了"; exit 1; }
-          done
+        # 整批报成 import error。scripts/run_tests.py 逐个当脚本跑，是唯一
+        # 对两种都成立的方式，也正是 deploy/murmur-update 在 VPS 上的跑法：
+        # CI 和发布闸门问同一个问题，答案才有意义。
+        run: python scripts/run_tests.py
 
   scripts:
     # murmur-update 是发布闸门本身：它有语法错误，VPS 就更不动了，而这种

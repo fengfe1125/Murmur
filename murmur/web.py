@@ -31,9 +31,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import vps_panel
+from . import counters, vps_panel
 from .config import Config
 from .dossier import BLOCKS, REFRESH_EVERY, Dossier, _safe
+from .quota import QUOTA_EVERY, QUOTA_SCHEMA, poller
+
+# 再导出给 tests/test_web.py 用，本文件内不直接调用
+from .quota import snapshot as _snapshot  # noqa: F401
 
 log = logging.getLogger("murmur.web")
 
@@ -50,32 +54,13 @@ PLATFORMS = {
     "qq": {"label": "QQ", "platform": "qq", "short": "QQ"},
 }
 
-# 额度快照间隔。OpenCode 的百分比是整数，5 分钟一采样足够看出趋势，
-# 又不至于把请求打得太密。
-QUOTA_EVERY = 300.0
-# 就算没变化也留一个点：不然停机一整天，图上会是一条直接连过去的直线，
-# 看不出中间其实没有数据。
-QUOTA_HEARTBEAT = timedelta(hours=1)
+# 额度快照间隔与表结构都收在 murmur/quota.py——采集现在有两个入口：
+# 这里的 poller（本机单跑看板的场景）和 app-worker 里的常驻 poller
+#（生产 VPS 上看板几乎不开，不挪过去曲线全是大段空白）。
 
 # /api/vps/status 的结果缓存：前端 30 秒一轮询，直连 ssh 最长要 45 秒，
 # 弱网下不缓存的话请求会叠在一起（ThreadingHTTPServer 没有线程上限）。
 VPS_STATUS_TTL = 20.0
-
-QUOTA_SCHEMA = """
-CREATE TABLE IF NOT EXISTS quota_snapshots (
-    id            INTEGER PRIMARY KEY,
-    at            TEXT NOT NULL,
-    rolling       REAL,
-    weekly        REAL,
-    monthly       REAL,
-    rolling_reset TEXT,
-    weekly_reset  TEXT,
-    monthly_reset TEXT,
-    ok            INTEGER NOT NULL DEFAULT 1,
-    detail        TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_quota_at ON quota_snapshots(at);
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -293,79 +278,8 @@ def _configured(kind: str, cfg: Config) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # 额度
 
-def fetch_quota(cfg: Config) -> dict:
-    """OpenCode Go 订阅的额度：滚动窗口 / 周 / 月，各是一个百分比。
-
-    这个接口只给"此刻"。要看变化就得自己按时间攒——见 _poller()。
-    """
-    if not cfg.api_key:
-        return {"ok": False, "detail": "没有配 API key"}
-    base = cfg.base_url.rstrip("/")
-    try:
-        import requests
-
-        r = requests.get(
-            f"{base}/usage",
-            headers={"Authorization": f"Bearer {cfg.api_key}"},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            return {"ok": False, "detail": f"HTTP {r.status_code}"}
-        data = r.json().get("usage", {})
-    except Exception as e:  # noqa: BLE001 - 网络的锅不该让看板整个 500
-        return {"ok": False, "detail": f"{type(e).__name__}: {e}"}
-
-    out = {"ok": True, "at": _now_iso()}
-    for k in ("rolling", "weekly", "monthly"):
-        blk = data.get(k) or {}
-        out[k] = {
-            "percent": blk.get("percent"),
-            "status": blk.get("status"),
-            "resets_at": blk.get("resetsAt"),
-        }
-    return out
-
-
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def _snapshot(conn: sqlite3.Connection, q: dict) -> None:
-    """只在有变化、或离上一条超过一小时的时候写一行。
-
-    每 5 分钟无脑插一行的话，一个月就是 8600 行几乎相同的数据，
-    图上全是噪点，还得在前端再抽稀一次。
-    """
-    last = conn.execute(
-        "SELECT * FROM quota_snapshots ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    vals = [
-        (q.get(k) or {}).get("percent") if q.get("ok") else None
-        for k in ("rolling", "weekly", "monthly")
-    ]
-    if last is not None:
-        same = (
-            last["ok"] == int(bool(q.get("ok")))
-            and [last["rolling"], last["weekly"], last["monthly"]] == list(vals)
-        )
-        try:
-            age = datetime.now(UTC) - datetime.fromisoformat(last["at"])
-        except ValueError:
-            age = QUOTA_HEARTBEAT
-        if same and age < QUOTA_HEARTBEAT:
-            return
-    conn.execute(
-        "INSERT INTO quota_snapshots"
-        " (at, rolling, weekly, monthly, rolling_reset, weekly_reset,"
-        "  monthly_reset, ok, detail) VALUES (?,?,?,?,?,?,?,?,?)",
-        (
-            _now_iso(), *vals,
-            *[(q.get(k) or {}).get("resets_at") for k in
-              ("rolling", "weekly", "monthly")],
-            int(bool(q.get("ok"))), q.get("detail"),
-        ),
-    )
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -968,11 +882,15 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT * FROM quota_snapshots ORDER BY id DESC LIMIT 1"
             ).fetchone()
             quota = dict(last) if last else None
+            # 回复质量的无正文计数（counters.py）：只有分类名和次数，
+            # 给 P0 生产验收用，不碰任何聊天内容。
+            counter_rows = counters.recent(c, days=14, tz=cfg.tz)
 
         return {
             "now": _now_iso(),
             "today": today,
             "tz": str(cfg.tz),
+            "counters": counter_rows,
             "model": {
                 "name": cfg.model,
                 "base_url": cfg.base_url,
@@ -1030,24 +948,6 @@ class Handler(BaseHTTPRequestHandler):
 
 # ---------------------------------------------------------------------------
 
-def _poller(cfg: Config, stop: threading.Event) -> None:
-    """后台按 QUOTA_EVERY 采一次额度。放独立线程，别拖慢页面。
-
-    每轮重建连接：备份恢复会整个换掉 db 文件，长驻连接感知不到，
-    会一直往已删除的 inode 上写。
-    """
-    while not stop.is_set():
-        try:
-            with closing(sqlite3.connect(cfg.db_path, timeout=10.0)) as conn:
-                conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA busy_timeout=10000")
-                conn.executescript(QUOTA_SCHEMA)
-                _snapshot(conn, fetch_quota(cfg))
-        except Exception as e:  # noqa: BLE001
-            log.warning("采额度失败：%s: %s", type(e).__name__, e)
-        stop.wait(QUOTA_EVERY)
-
-
 def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
         vps: vps_panel.VpsConfig | None = None) -> None:
     cfg = Config.load()
@@ -1057,7 +957,7 @@ def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
     stop = threading.Event()
-    threading.Thread(target=_poller, args=(cfg, stop),
+    threading.Thread(target=poller, args=(cfg, stop),
                      name="murmur-quota", daemon=True).start()
 
     httpd = ThreadingHTTPServer((host, port), partial(Handler, cfg, vps))

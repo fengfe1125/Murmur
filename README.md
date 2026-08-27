@@ -216,9 +216,10 @@ murmur web            # 打开 http://127.0.0.1:8765
   端口那一栏通常是空的——三个 bot 都是主动连出去的（长轮询 / websocket），
   谁都不监听端口，所以顺带把出站连接也列出来，免得看起来像挂了。
 - **OpenCode 额度**：滚动窗口 / 本周 / 本月各用了多少、什么时候重置。
-  官方接口只给"此刻的百分比"，所以看板每 5 分钟自己采一个点存进
+  官方接口只给"此刻的百分比"，所以每 5 分钟采一个点存进
   `quota_snapshots` 表，「额度变化」那一页画的就是这些点。
-  **看板不跑就没有数据**，曲线只有它开着的那些时段。
+  采集挂在常驻的 app-worker 上（`murmur/quota.py`），看板单跑时也会自己采一份，
+  同值去重保证两边同时跑不写重复行——面板开不开都有数据。
 - **每个人一个聊天窗口**：左边**按人**排，不是按会话。
   Murmur 内部的划分单位是 `(平台, 会话, 发送人)`——同一个人的单聊、
   每个群、换了组织的钉钉 id 各算一条，实测一个人能散成 4 条。
@@ -233,7 +234,10 @@ murmur web            # 打开 http://127.0.0.1:8765
   上次整理是什么时候、还有几条没消化。
   一个人有好几条会话就有好几份记忆：**它在群里认识的那个"他"和单聊里的
   不是同一份记忆**，窗口合并了，记忆没有。这一点面板上写明了。
-- **所在 app / 正在用的模型 / 数据库位置**都在总览页。
+- **所在 app / 正在用的模型 / 数据库位置**都在总览页。总览页还有一块
+  「回复质量 · 近 14 天」：每次回复 / 主动消息 / 记忆整理的**分类计数**
+  （完整输出、截断抢救、选择安静、可重试失败……，见 `murmur/counters.py`）——
+  只有分类名和次数，不含任何正文，是回复质量生产验收的数据源。
 
 侧栏的「VPS 面板」（http://127.0.0.1:8765/vps ）是生产 VPS 的管理页：
 四个服务 + Caddy 的运行状态、负载 / 内存 / 磁盘、两个服务日志的尾巴，
@@ -282,6 +286,9 @@ URL 里的 token 也会自动带到页面后续 API 和照片请求。没设就�
 
 - 主模型抛网关错误或吐不出 JSON → 自动换 `MURMUR_FALLBACK_MODEL`
   （默认 `deepseek-v4-flash`）重试一次，降级调用不带 json_schema。
+  默认降级仍走同一家网关；配了 `MURMUR_FALLBACK_BASE_URL` /
+  `MURMUR_FALLBACK_API_KEY` 后第二次尝试会打到第二家——网关整体挂掉时
+  「同一家换个模型」不算降级，建议配上。
 - 带图消息走 `MURMUR_IMAGE_MODEL`（默认 `mimo-v2.5`，多模态）；
   mimo 也挂掉时退回降级模型、**不带图**纯文本重试，消息不会断。
 - 每次降级都会在日志打 `模型 <name> 失败（<错误类型>），尝试降级`。
@@ -318,6 +325,8 @@ murmur/
   qq.py        QQ 测试通道
   web.py       只读看板：进程 / 端口 / 额度曲线 / 每人的聊天窗口和记忆
                （配 MURMUR_WEB_TOKEN 后支持开放访问）
+  quota.py     OpenCode 额度采样与快照（app-worker 与看板共用一个 poller）
+  counters.py  无正文的回复质量分类计数（daily_counters 表）
   vps_panel.py VPS 面板后端：经 gcloud/ssh 查服务状态、建邀请码
   webui/       看板的前端，单个 HTML，没有构建步骤
   cli.py       app-api / app-worker / 本地诊断 / 测试 Bot / web
@@ -388,9 +397,9 @@ sparse 规则，旧全量检出的 VPS 在下次更新时会自动把 App 目录
 `tests/` 里是自包含脚本，不依赖 pytest，直接用项目 venv 跑：
 
 ```bash
-.venv/bin/python tests/test_web.py     # 单个：看板逻辑（脱敏/去重/窗口合并）
-# 全部。别写成裸循环——那样只有最后一个文件的退出码算数，中间挂了看不出来
-for f in tests/test_*.py; do .venv/bin/python "$f" || { echo "FAILED: $f"; break; }; done
+.venv/bin/python scripts/run_tests.py                    # 全部，跑完汇总失败名单
+.venv/bin/python tests/test_web.py                      # 单个：看板逻辑（脱敏/去重/窗口合并）
+.venv/bin/python scripts/run_tests.py --fail-fast       # 第一个失败就停
 ```
 
 每个脚本结尾打一行 `通过 N，失败 M`，退出码非零就是有失败。
@@ -402,7 +411,8 @@ lint 用 ruff（`uv pip install -e '.[dev]'` 后 `ruff check murmur tests script
 
 CI 按三摊代码分开：`.github/workflows/server.yml` 在 Python 3.11（pyproject
 声明的下限）和 3.14（VPS 实际在跑的）上跑 lint + 全量测试，外加一道
-`bash -n`；`ios.yml` 只在 iOS 目录变了才起 Xcode。安卓还没有工作流。
+`bash -n`；`ios.yml` 只在 iOS 目录变了才起 Xcode；`android.yml`
+同理只在安卓目录变了才编一次 debug 包（安卓还没有单元测试，有了再补进同一 job）。
 
 ## 隐私
 
