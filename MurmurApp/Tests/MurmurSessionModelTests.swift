@@ -663,6 +663,7 @@ final class MurmurSessionModelTests: XCTestCase {
     }
 
     func testCancelDuringPhotoPrepareDiscardsFileAndIgnoresLateResult() async throws {
+        let before = Set(murmurTemporaryFiles())
         let source = try writeTestJPEG(size: CGSize(width: 1_200, height: 900), name: "cancel-prepare")
         let api = FakeMurmurAPIClient()
         let model = MurmurSessionModel(api: api, bubblePacing: .instant)
@@ -674,8 +675,8 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertNil(model.draftPhoto)
         XCTAssertNotEqual(model.phase, .ready)
         XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
-        let leftover = murmurTemporaryFiles()
-        XCTAssertTrue(leftover.isEmpty, "leftover photo files: \(leftover)")
+        let leftover = Set(murmurTemporaryFiles()).subtracting(before)
+        XCTAssertTrue(leftover.isEmpty, "leftover photo files: \(leftover.sorted())")
     }
 
     func testPreparingPhotoPhaseIsEnteredWithinOneHundredMilliseconds() async {
@@ -703,6 +704,11 @@ final class MurmurSessionModelTests: XCTestCase {
     }
 
     func testThirtyCompletedMomentsLeaveNoHistoryOrTemporaryFiles() async throws {
+        // Whatever another suite left in the shared temporary directory is not
+        // this test's business — and which suite ran first is decided by class
+        // order in the binary, so adding a test class elsewhere could turn this
+        // red.  Only files this test's own thirty moments leave behind count.
+        let before = Set(murmurTemporaryFiles())
         let api = FakeMurmurAPIClient()
         let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
@@ -717,8 +723,8 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertEqual(model.bubbles.count, 1)
         XCTAssertEqual(model.currentNote, "第30刻")
         XCTAssertFalse(FileManager.default.fileExists(atPath: model.currentPhoto?.originalURL.path ?? ""))
-        let leftover = murmurTemporaryFiles()
-        XCTAssertTrue(leftover.isEmpty, "leftover photo files: \(leftover)")
+        let leftover = Set(murmurTemporaryFiles()).subtracting(before)
+        XCTAssertTrue(leftover.isEmpty, "leftover photo files: \(leftover.sorted())")
     }
 
     func testPushSyncSkipsAllowedTokenUntilItArrives() {
