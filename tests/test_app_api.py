@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import threading
@@ -142,6 +143,59 @@ class AppAPITests(unittest.TestCase):
             response.json()["moment_id"], self.identity["user_id"]
         )
         self.assertIsNone(row["intent"])
+        self.assertIsNone(row["context_moment_ids"])
+
+    def test_archive_context_is_normalized_persisted_and_part_of_idempotency(self):
+        context = ["older-moment", "latest-moment", "older-moment"]
+        response = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={
+                "note": "接着那天说",
+                "idempotency_key": "api-archive-context-0001",
+                "context_moment_ids": json.dumps(context),
+            },
+            files={"_multipart": (None, "1")},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        row = self.store.moment_for_user(
+            response.json()["moment_id"], self.identity["user_id"]
+        )
+        self.assertEqual(
+            json.loads(row["context_moment_ids"]),
+            ["older-moment", "latest-moment"],
+        )
+
+        changed = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={
+                "note": "接着那天说",
+                "idempotency_key": "api-archive-context-0001",
+                "context_moment_ids": json.dumps(["another-moment"]),
+            },
+            files={"_multipart": (None, "1")},
+        )
+        self.assertEqual(changed.status_code, 409, changed.text)
+
+    def test_malformed_or_oversized_archive_context_is_refused(self):
+        invalid_values = [
+            "not-json",
+            json.dumps({"moment": "not-an-array"}),
+            json.dumps(["moment", 7]),
+            json.dumps([f"moment-{index}" for index in range(9)]),
+        ]
+        for index, context in enumerate(invalid_values):
+            with self.subTest(context=context):
+                response = self.client.post(
+                    "/v1/moments",
+                    headers=self.authenticated_headers(),
+                    data={
+                        "note": "接着那天说",
+                        "idempotency_key": f"api-invalid-context-{index}",
+                        "context_moment_ids": context,
+                    },
+                    files={"_multipart": (None, "1")},
+                )
+                self.assertEqual(response.status_code, 400, response.text)
 
     def test_unknown_intent_is_refused(self):
         response = self.client.post(

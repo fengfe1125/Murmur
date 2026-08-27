@@ -30,7 +30,7 @@ from .config import Config
 from .continuity import refresh_open_loops
 from .dossier import Dossier, refresh
 from .engine import Reply, read_photo, respond
-from .memory import Memory, thread_key
+from .memory import Entry, Memory, thread_key
 from .moment import Moment
 from .photo import Photo, PhotoTooLarge, save_preview
 from .photo import load as load_photo
@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS app_memory_links (
     created_at TEXT NOT NULL
 )
 """
+
+
+def _ensure_memory_links(memory: Memory) -> None:
+    memory.conn.execute(_MEMORY_LINK_SCHEMA)
+    memory.conn.commit()
 
 
 class InvalidAppImage(ValueError):
@@ -138,8 +143,38 @@ class EngineMomentProcessor:
             moment, memory, self.cfg, photo=photo, note=job.note, chat_id=chat_id,
             on_bubble=on_bubble,
             dossier=prompt_dossier,
+            history_entries=self._archive_context(memory, job),
         )
         return ProcessedMoment(reply, moment, photo)
+
+    @staticmethod
+    def _archive_context(memory: Memory, job: Job) -> list[Entry] | None:
+        """Resolve only this user's durable moment links, preserving App order."""
+        context_moment_ids = tuple(getattr(job, "context_moment_ids", ()))
+        if not context_moment_ids:
+            return None
+        _ensure_memory_links(memory)
+        placeholders = ",".join("?" for _ in context_moment_ids)
+        rows = memory.conn.execute(
+            "SELECT moment_id,entry_id FROM app_memory_links "
+            f"WHERE user_id=? AND moment_id IN ({placeholders})",
+            (job.user_id, *context_moment_ids),
+        ).fetchall()
+        entry_for_moment = {
+            str(row["moment_id"]): int(row["entry_id"]) for row in rows
+        }
+        entry_ids = [
+            entry_for_moment[moment_id]
+            for moment_id in context_moment_ids
+            if moment_id in entry_for_moment
+        ]
+        entries = memory.entries_by_ids(entry_ids)
+        log.info(
+            "App archive context requested_count=%d resolved_count=%d",
+            len(context_moment_ids),
+            len(entries),
+        )
+        return entries or None
 
     def _read(
         self, job: Job, moment: Moment, photo: Photo, dossier: str | None
@@ -213,8 +248,7 @@ class AppWorker:
 
     @staticmethod
     def _ensure_memory_links(memory: Memory) -> None:
-        memory.conn.execute(_MEMORY_LINK_SCHEMA)
-        memory.conn.commit()
+        _ensure_memory_links(memory)
 
     def _linked_memory_entry(self, memory: Memory, job: Job):
         """Find a response already durably recorded before an earlier crash."""

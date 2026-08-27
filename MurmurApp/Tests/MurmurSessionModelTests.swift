@@ -794,7 +794,7 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
         .init(userID: "test-user", deviceID: "test-device", keyID: "test-key")
     }
 
-    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?) async throws -> MomentReceipt {
+    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?, contextMomentIDs: [String]) async throws -> MomentReceipt {
         idempotencyKeys.append(idempotencyKey)
         createCount += 1
         if mode == .idempotencyConflict {
@@ -920,4 +920,90 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
 
 private extension UIColor {
     static let systemCoralForTest = UIColor(red: 0.95, green: 0.35, blue: 0.30, alpha: 1)
+}
+
+final class MurmurKeyboardLayoutTests: XCTestCase {
+    func testBottomClearanceStaysStableUntilKeyboardPassesTheTabBar() {
+        let overlaps: [CGFloat] = [0, 40, 72, 73, 300, 73, 72, 40, 0]
+
+        XCTAssertEqual(
+            overlaps.map { MurmurKeyboardClearance.total(overlap: $0, resting: 72) },
+            [72, 72, 72, 73, 300, 73, 72, 72, 72]
+        )
+        XCTAssertEqual(
+            overlaps.map { MurmurKeyboardClearance.supplemental(overlap: $0, resting: 72) },
+            [0, 0, 0, 1, 228, 1, 0, 0, 0]
+        )
+    }
+
+    func testBottomClearanceTreatsMissingOrInvalidKeyboardGeometryAsHidden() {
+        let overlaps: [CGFloat] = [-30, 0, .nan, .infinity]
+
+        XCTAssertEqual(
+            overlaps.map { MurmurKeyboardClearance.total(overlap: $0, resting: 72) },
+            [72, 72, 72, 72]
+        )
+        XCTAssertEqual(
+            overlaps.map { MurmurKeyboardClearance.supplemental(overlap: $0, resting: 72) },
+            [0, 0, 0, 0]
+        )
+    }
+
+    func testLayoutGuideOverlapExcludesTheRestingHomeIndicator() {
+        XCTAssertEqual(
+            MurmurKeyboardClearance.overlap(
+                containerBottom: 874,
+                keyboardTop: 539,
+                restingBottomInset: 34
+            ),
+            301
+        )
+        XCTAssertEqual(
+            MurmurKeyboardClearance.overlap(
+                containerBottom: 874,
+                keyboardTop: 874,
+                restingBottomInset: 34
+            ),
+            0
+        )
+    }
+
+    func testRotatedLayoutGuideGeometryUsesTheLandscapeWindowSpace() {
+        XCTAssertEqual(
+            MurmurKeyboardClearance.overlap(
+                containerBottom: 402,
+                keyboardTop: 174,
+                restingBottomInset: 21
+            ),
+            207
+        )
+    }
+
+    @MainActor
+    func testFocusWithoutASoftwareKeyboardDoesNotCreateOverlap() {
+        let keyboard = MurmurKeyboardState()
+        keyboard.focusDidChange(true)
+        XCTAssertEqual(keyboard.overlap, 0)
+    }
+
+    @MainActor
+    func testALateHideNotificationCannotOverwriteLayoutGuideGeometry() {
+        let keyboard = MurmurKeyboardState()
+        keyboard.updateFromLayoutGuide(overlap: 301)
+        NotificationCenter.default.post(
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil,
+            userInfo: [
+                UIResponder.keyboardFrameEndUserInfoKey: NSValue(
+                    cgRect: CGRect(x: 0, y: 874, width: 402, height: 335)
+                ),
+                UIResponder.keyboardAnimationDurationUserInfoKey: 0,
+            ]
+        )
+        NotificationCenter.default.post(name: UIResponder.keyboardDidHideNotification, object: nil)
+        XCTAssertEqual(keyboard.overlap, 301)
+
+        keyboard.updateFromLayoutGuide(overlap: 0)
+        XCTAssertEqual(keyboard.overlap, 0)
+    }
 }

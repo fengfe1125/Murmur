@@ -24,6 +24,10 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
     /// container path changes between installs, so storing one would rot.
     var imageFile: String?
     let sentAt: Date
+    /// The calendar day this row belongs to when it resumes an older room.
+    /// `sentAt` remains the real send time; older transcripts omit this field
+    /// and continue to group by `sentAt`.
+    let archiveDay: Date?
     var delivery: MurmurDeliveryState
     var momentID: String?
     /// The key this row's send went up under.  Kept so that a row still marked
@@ -40,6 +44,7 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
         text: String,
         imageFile: String? = nil,
         sentAt: Date = Date(),
+        archiveDay: Date? = nil,
         delivery: MurmurDeliveryState = .sent,
         momentID: String? = nil,
         idempotencyKey: String? = nil
@@ -49,6 +54,7 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
         self.text = text
         self.imageFile = imageFile
         self.sentAt = sentAt
+        self.archiveDay = archiveDay
         self.delivery = delivery
         self.momentID = momentID
         self.idempotencyKey = idempotencyKey
@@ -68,6 +74,7 @@ protocol MurmurRoomRecorder: AnyObject {
     /// the row lands, so a row never names a file that is about to be deleted.
     func record(_ message: MurmurMessage, photoURL: URL?) async
     func setDelivery(_ delivery: MurmurDeliveryState, for messageID: String)
+    func setMomentID(_ momentID: String, for messageID: String)
     /// Takes a row back out.  For a line that never left: the room puts those
     /// words back in the field, and the history must not claim they were sent.
     func withdraw(_ messageID: String)

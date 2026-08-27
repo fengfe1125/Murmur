@@ -1,55 +1,35 @@
 import SwiftUI
 import UIKit
 
-/// How far the keyboard reaches into the screen, published on the keyboard's
-/// own clock.
+/// The keyboard geometry shared by every screen inside one app shell.
 ///
-/// SwiftUI will do this by itself, and for one plain field it does it well.  It
-/// does not survive this screen.  The composer sits in a `safeAreaInset` under a
-/// scroll view that re-anchors itself whenever it is resized, so a keyboard
-/// produces two motions — the inset SwiftUI applies, and the scroll correction
-/// the anchor makes — and SwiftUI times them against its own idea of the
-/// transition rather than the keyboard's.  Recorded at ten times slow motion,
-/// the composer reached its resting place while the keyboard was still halfway
-/// down the screen, and what showed between them was a band of bare paper the
-/// height of the keyboard that had not left yet.  That band is the gap.
-///
-/// So the inset is taken away from SwiftUI (`ignoresSafeArea(.keyboard)`) and
-/// driven from `keyboardWillChangeFrame` instead, with the duration and curve
-/// the notification carries.  One clock, and nothing can outrun the keyboard.
+/// This is deliberately owned by `MurmurShell`, not a process-wide singleton:
+/// keyboard layout guides belong to a particular window, and a late event from
+/// another scene must never move this scene's composer.
 @MainActor
-final class MurmurKeyboardInset: ObservableObject {
-    static let shared = MurmurKeyboardInset()
-
-    /// What the keyboard takes from the bottom of the window, over and above
-    /// the home indicator the composer already clears at rest.
+final class MurmurKeyboardState: ObservableObject {
+    /// How far the software keyboard reaches above the resting home-indicator
+    /// inset. Hardware keyboards and an absent software keyboard both report 0.
     @Published private(set) var overlap: CGFloat = 0
+    private let injectedOverlap: CGFloat?
 
-    /// The window's resting bottom inset — the home indicator.  Sampled while
-    /// the keyboard is away, because iOS drops it to zero while the keyboard is
-    /// up, and reading it then would subtract nothing and leave the composer a
-    /// home indicator too high.
-    private var restingBottomInset: CGFloat = 0
+    init() {
+        #if DEBUG
+        injectedOverlap = ProcessInfo.processInfo.arguments.contains(
+            "--murmur-stub-keyboard-overlap"
+        ) ? 301 : nil
+        #else
+        injectedOverlap = nil
+        #endif
+    }
 
-    private init() {
-        let center = NotificationCenter.default
-        for name in [
-            UIResponder.keyboardWillChangeFrameNotification,
-            UIResponder.keyboardWillHideNotification
-        ] {
-            let hiding = name == UIResponder.keyboardWillHideNotification
-            center.addObserver(forName: name, object: nil, queue: .main) { note in
-                // The parts that matter are read here, on the posting thread,
-                // so nothing non-Sendable crosses into the actor.
-                let info = note.userInfo
-                let end = (info?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue
-                let duration = info?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double
-                let curve = info?[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int
-                MainActor.assumeIsolated {
-                    Self.shared.apply(end: end, duration: duration, curve: curve, hiding: hiding)
-                }
-            }
-        }
+    func updateFromLayoutGuide(overlap newValue: CGFloat) {
+        guard injectedOverlap == nil else { return }
+        // The probe only reports changes, so a value dropped here would never
+        // be offered again and the layout would sit at a stale overlap for as
+        // long as the keyboard stayed put.  Hold it instead of losing it.
+        guard !warming else { deferredOverlap = newValue; return }
+        setOverlap(newValue)
     }
 
     /// Ask for the keyboard once, before anyone reaches for the field.
@@ -64,13 +44,14 @@ final class MurmurKeyboardInset: ObservableObject {
     ///
     /// A field that takes first responder and gives it straight back inside
     /// one runloop turn asks for all of that without a keyboard ever being
-    /// shown.
+    /// shown — so the layout guide should not move at all.  `warming` is there
+    /// for the case where it twitches anyway: a keyboard nobody asked to see
+    /// must not move the composer on an idle screen.
     func warm() {
         // Never while the keyboard is up: taking first responder from the
         // composer would put the keyboard away mid-sentence.
         guard overlap == 0, !warming, let window = Self.keyWindow else { return }
         warming = true
-        defer { warming = false }
         // A field has to be in a window to become first responder at all, and
         // at zero size it is invisible for the one turn it spends there.
         let field = UITextField(frame: .zero)
@@ -78,145 +59,241 @@ final class MurmurKeyboardInset: ObservableObject {
         field.becomeFirstResponder()
         field.resignFirstResponder()
         field.removeFromSuperview()
+        // Layout runs after this turn, so the guard outlives the borrowed
+        // responder by one hop rather than ending with it.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.warming = false
+            guard let deferred = self.deferredOverlap else { return }
+            self.deferredOverlap = nil
+            self.setOverlap(deferred)
+        }
     }
 
-    /// Set while the warm-up holds first responder.  Anything the keyboard
-    /// says in that turn is about a keyboard nobody asked to see, and moving
-    /// the composer for it would be a twitch on an idle screen.
+    /// Set while the warm-up holds first responder, and for the layout pass
+    /// that follows it.
     private var warming = false
-
-    private func apply(end: CGRect?, duration: Double?, curve: Int?, hiding: Bool) {
-        guard !warming, let end, let window = Self.keyWindow else { return }
-
-        if overlap == 0 {
-            restingBottomInset = window.safeAreaInsets.bottom
-        }
-
-        // The end frame arrives in screen coordinates, and the keyboard is not
-        // always a slab across the bottom: floating and split keyboards, and a
-        // second window on iPad, all reach less far or not at all.  What the
-        // layout needs is the overlap with this window, never `end.height`.
-        let inWindow = window.convert(end, from: nil)
-        let reach = hiding ? 0 : max(0, window.bounds.maxY - inWindow.minY)
-        // The composer already sits above the home indicator, so only the part
-        // of the keyboard beyond it is new room to make.
-        let target = max(0, reach - restingBottomInset)
-        guard target != overlap else { return }
-
-        // Not `withAnimation`.  SwiftUI's clock runs late here — the scroll
-        // view it resizes is only handed the new frame seconds later, and
-        // sometimes never (the keyboard log shows the composer held 43ms
-        // behind a keyboard that arrived 6ms after the notification).  A
-        // `CADisplayLink` is the display's own clock, the same one the
-        // keyboard slides on, so the inset lands in the same frame the
-        // keyboard does — and the `onScrollGeometryChange` pass it triggers
-        // is what carries the transcript along, in the same frame too.
-        animate(to: target, duration: duration ?? 0.25, curve: curve ?? 7)
-    }
-
-    // MARK: - Display-linked driver
-
-    private var driver: CADisplayLink?
-    private var driverStart = CACurrentMediaTime()
-    private var driverDuration = 0.25
-    private var driverFrom: CGFloat = 0
-    private var driverTo: CGFloat = 0
-    private var driverCP = (0.17, 0.17, 0.0, 1.0)
-
-    private func animate(to target: CGFloat, duration: Double, curve: Int) {
-        // A notification that lands mid-flight starts from wherever the last
-        // one had got to, not from its own beginning.
-        driver?.invalidate()
-        driverStart = CACurrentMediaTime()
-        driverDuration = max(duration, 0.01)
-        driverFrom = overlap
-        driverTo = target
-        driverCP = Self.controlPoints(curve: curve)
-
-        let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
-        link.add(to: .main, forMode: .common)
-        driver = link
-        // The display has already drawn this frame by the time the link arms,
-        // so the first callback is a frame away; land the first step now or
-        // the inset visibly sits out the opening frame.
-        setOverlap(at: 0)
-    }
-
-    @objc private func tick(_ link: CADisplayLink) {
-        let elapsed = CACurrentMediaTime() - driverStart
-        let progress = min(max(elapsed / driverDuration, 0), 1)
-        setOverlap(at: progress)
-        if progress >= 1 { stopDriver() }
-    }
-
-    private func setOverlap(at progress: Double) {
-        let solved = Self.solveUnitBezier(
-            x: progress,
-            x1: driverCP.0, y1: driverCP.1, x2: driverCP.2, y2: driverCP.3
-        )
-        overlap = driverFrom + (driverTo - driverFrom) * solved
-    }
-
-    private func stopDriver() {
-        driver?.invalidate()
-        driver = nil
-        overlap = driverTo
-    }
-
-    /// The keyboard animates on curve 7, which is private and is not any of
-    /// the four `UIView.AnimationCurve` cases.  UIKit's own shape for it is a
-    /// hard ease-out — ninety percent of the way in half the time — and the
-    /// composer visibly sprinting ahead of the keyboard and then crawling is
-    /// what that reads as.  The default here is much closer to even: linear
-    /// through the first two thirds with a short settle at the end.  The
-    /// public curves are spelled out for the rare notification that carries
-    /// one.
-    private static func controlPoints(curve: Int) -> (Double, Double, Double, Double) {
-        switch curve {
-        case 0: (0.42, 0, 0.58, 1)      // easeInOut
-        case 1: (0.42, 0, 1, 1)         // easeIn
-        case 2: (0, 0, 0.58, 1)         // easeOut
-        case 3: (0, 0, 1, 1)            // linear
-        default: (0.35, 0.35, 0.6, 1)   // the keyboard's slot, nearly even
-        }
-    }
-
-    /// Evaluate a cubic-bezier easing curve: given x, solve the curve for the
-    /// parameter and return y.  Newton's method with a bisection fallback,
-    /// the way every browser does it.
-    private static func solveUnitBezier(x: Double, x1: Double, y1: Double, x2: Double, y2: Double) -> Double {
-        guard x > 0, x < 1 else { return x }
-        var t = x
-        for _ in 0..<8 {
-            let err = bezier(t, x1, x2) - x
-            if abs(err) < 1e-6 { return bezier(t, y1, y2) }
-            let slope = bezierDerivative(t, x1, x2)
-            if abs(slope) < 1e-6 { break }
-            t = min(max(t - err / slope, 0), 1)
-        }
-        var lo = 0.0, hi = 1.0
-        t = x
-        while hi - lo > 1e-6 {
-            if bezier(t, x1, x2) < x { lo = t } else { hi = t }
-            t = (lo + hi) / 2
-        }
-        return bezier(t, y1, y2)
-    }
-
-    private static func bezier(_ t: Double, _ a1: Double, _ a2: Double) -> Double {
-        let u = 1 - t
-        return 3 * u * u * t * a1 + 3 * u * t * t * a2 + t * t * t
-    }
-
-    private static func bezierDerivative(_ t: Double, _ a1: Double, _ a2: Double) -> Double {
-        let u = 1 - t
-        return 3 * u * u * a1 + 6 * u * t * (a2 - a1) + 3 * t * t * (1 - a2)
-    }
+    private var deferredOverlap: CGFloat?
 
     private static var keyWindow: UIWindow? {
         UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)
             .first(where: \.isKeyWindow)
+    }
+
+    /// Deterministic geometry for UI layout tests. Production builds never
+    /// carry an injected value, so focus alone cannot manufacture an overlap.
+    func focusDidChange(_ focused: Bool) {
+        guard let injectedOverlap else { return }
+        setOverlap(focused ? injectedOverlap : 0)
+    }
+
+    private func setOverlap(_ newValue: CGFloat) {
+        let sanitized = newValue.isFinite ? max(0, newValue) : 0
+        guard abs(sanitized - overlap) > 0.25 else { return }
+        overlap = sanitized
+        #if DEBUG
+        MurmurDiagnostics.recordKeyboardLayoutGuide(overlap: sanitized)
+        #endif
+    }
+}
+
+/// One source of truth for the clearance beneath a composer.
+enum MurmurKeyboardClearance {
+    /// The total clearance required by a screen that is outside the shell's
+    /// own content inset, such as an archive day pushed on a NavigationStack.
+    static func total(overlap: CGFloat, resting: CGFloat) -> CGFloat {
+        max(sanitized(overlap), max(0, resting))
+    }
+
+    /// Extra clearance for the ordinary chat, whose shell already reserves
+    /// `resting` points for the tab bar.
+    static func supplemental(overlap: CGFloat, resting: CGFloat) -> CGFloat {
+        max(0, sanitized(overlap) - max(0, resting))
+    }
+
+    /// Converts a full-screen keyboard-layout-guide position into the overlap
+    /// that remains after the resting home-indicator inset is removed.
+    static func overlap(
+        containerBottom: CGFloat,
+        keyboardTop: CGFloat,
+        restingBottomInset: CGFloat
+    ) -> CGFloat {
+        guard containerBottom.isFinite, keyboardTop.isFinite else { return 0 }
+        let reach = max(0, containerBottom - keyboardTop)
+        return max(0, reach - max(0, restingBottomInset))
+    }
+
+    private static func sanitized(_ value: CGFloat) -> CGFloat {
+        value.isFinite ? max(0, value) : 0
+    }
+}
+
+/// A full-screen UIKit probe whose top marker is constrained to the system's
+/// `UIKeyboardLayoutGuide`. UIKit moves that guide on the keyboard's own
+/// animation clock, so SwiftUI receives the geometry that is actually on
+/// screen instead of predicting it from notifications.
+struct MurmurKeyboardLayoutGuideProbe: UIViewRepresentable {
+    let onOverlapChange: @MainActor (CGFloat) -> Void
+
+    func makeUIView(context: Context) -> MurmurKeyboardProbeHostView {
+        let view = MurmurKeyboardProbeHostView()
+        view.onOverlapChange = onOverlapChange
+        return view
+    }
+
+    func updateUIView(_ uiView: MurmurKeyboardProbeHostView, context: Context) {
+        uiView.onOverlapChange = onOverlapChange
+    }
+
+    static func dismantleUIView(_ uiView: MurmurKeyboardProbeHostView, coordinator: ()) {
+        uiView.detachProbe()
+    }
+}
+
+/// The representable only supplies window membership. The actual probe is a
+/// sibling of the hosting view, constrained to the window itself: observing a
+/// guide inside the SwiftUI overlay feeds the composer's lift back into the
+/// next keyboard measurement when that overlay is reframed.
+final class MurmurKeyboardProbeHostView: UIView {
+    private let probe = MurmurKeyboardProbeView()
+
+    var onOverlapChange: (@MainActor (CGFloat) -> Void)? {
+        didSet { probe.onOverlapChange = onOverlapChange }
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard probe.superview !== window else { return }
+        detachProbe()
+        guard let window else { return }
+        probe.translatesAutoresizingMaskIntoConstraints = false
+        window.addSubview(probe)
+        NSLayoutConstraint.activate([
+            probe.topAnchor.constraint(equalTo: window.topAnchor),
+            probe.bottomAnchor.constraint(equalTo: window.bottomAnchor),
+            probe.leadingAnchor.constraint(equalTo: window.leadingAnchor),
+            probe.trailingAnchor.constraint(equalTo: window.trailingAnchor),
+        ])
+    }
+
+    func detachProbe() {
+        probe.removeFromSuperview()
+    }
+}
+
+final class MurmurKeyboardProbeView: UIView {
+    var onOverlapChange: (@MainActor (CGFloat) -> Void)?
+
+    private let guideMarker = UIView(frame: .zero)
+    private var lastOverlap: CGFloat = -.infinity
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        accessibilityElementsHidden = true
+        backgroundColor = .clear
+
+        keyboardLayoutGuide.followsUndockedKeyboard = false
+        guideMarker.translatesAutoresizingMaskIntoConstraints = false
+        guideMarker.isUserInteractionEnabled = false
+        guideMarker.alpha = 0
+        addSubview(guideMarker)
+        NSLayoutConstraint.activate([
+            guideMarker.topAnchor.constraint(equalTo: keyboardLayoutGuide.topAnchor),
+            guideMarker.leadingAnchor.constraint(equalTo: leadingAnchor),
+            guideMarker.widthAnchor.constraint(equalToConstant: 1),
+            guideMarker.heightAnchor.constraint(equalToConstant: 0),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        setNeedsLayout()
+    }
+
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let window, !window.bounds.isEmpty else { return }
+
+        // Both ends are measured in window coordinates. UIWindow's safe area
+        // remains the home-indicator inset even while the keyboard is visible.
+        let keyboardTop = guideMarker.convert(.zero, to: window).y
+        let overlap = MurmurKeyboardClearance.overlap(
+            containerBottom: window.bounds.maxY,
+            keyboardTop: keyboardTop,
+            restingBottomInset: window.safeAreaInsets.bottom
+        )
+
+        guard abs(overlap - lastOverlap) > 0.25 else { return }
+        lastOverlap = overlap
+        onOverlapChange?(overlap)
+    }
+}
+
+/// Shared transcript behavior: native scroll dismissal stays disabled so an
+/// automatic scroll-to-bottom cannot cancel a keyboard that is still rising.
+/// A deliberate tap or a vertical, downward drag of 18 points releases focus;
+/// the drag is simultaneous, leaving the scroll view's own gesture intact.
+private struct MurmurKeyboardDismissSurface: ViewModifier {
+    let isFocused: Bool
+    let dismiss: () -> Void
+    @State private var dismissedDuringDrag = false
+
+    func body(content: Content) -> some View {
+        content
+            .scrollDismissesKeyboard(.never)
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                TapGesture()
+                    .onEnded {
+                        guard isFocused else { return }
+                        dismiss()
+                    }
+            )
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 4)
+                    .onChanged { value in
+                        guard isFocused, !dismissedDuringDrag else { return }
+                        let vertical = value.translation.height
+                        guard vertical >= 18, vertical > abs(value.translation.width) else { return }
+                        dismissedDuringDrag = true
+                        dismiss()
+                    }
+                    .onEnded { _ in
+                        dismissedDuringDrag = false
+                    }
+            )
+    }
+}
+
+extension View {
+    func murmurKeyboardDismissSurface(
+        isFocused: Bool,
+        dismiss: @escaping () -> Void
+    ) -> some View {
+        modifier(MurmurKeyboardDismissSurface(isFocused: isFocused, dismiss: dismiss))
     }
 }

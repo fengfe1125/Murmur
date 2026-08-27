@@ -254,7 +254,8 @@ protocol MurmurAPIClient: Sendable {
         note: String?,
         photo: PhotoAttachment?,
         idempotencyKey: String,
-        intent: MurmurMomentIntent?
+        intent: MurmurMomentIntent?,
+        contextMomentIDs: [String]
     ) async throws -> MomentReceipt
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error>
     func currentProactive() async throws -> ProactiveMoment?
@@ -266,4 +267,23 @@ protocol MurmurAPIClient: Sendable {
     func updatePreferences(_ preferences: MurmurPreferences) async throws
     func resetLocalIdentity() async throws
     func deleteAccount() async throws
+}
+
+extension MurmurAPIClient {
+    /// Ordinary chat and older call sites keep producing the exact same
+    /// multipart body.  Only an archived-day continuation opts into context.
+    func createMoment(
+        note: String?,
+        photo: PhotoAttachment?,
+        idempotencyKey: String,
+        intent: MurmurMomentIntent?
+    ) async throws -> MomentReceipt {
+        try await createMoment(
+            note: note,
+            photo: photo,
+            idempotencyKey: idempotencyKey,
+            intent: intent,
+            contextMomentIDs: []
+        )
+    }
 }

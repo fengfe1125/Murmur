@@ -288,6 +288,19 @@ final class MurmurSessionModel: ObservableObject {
         )
     }
 
+    /// Today and older archive dates use one continuation model.  Building it
+    /// here keeps the authenticated client, timeout and bubble rhythm aligned
+    /// with the photo room and ordinary conversation.
+    func makeArchiveDay(day: Date) -> ArchiveDayModel {
+        ArchiveDayModel(
+            day: day,
+            archive: archive,
+            api: api,
+            requestTimeoutSeconds: requestTimeoutSeconds,
+            bubblePacing: bubblePacing
+        )
+    }
+
     private func prepareImage(
         _ image: UIImage,
         using load: @escaping @Sendable (PhotoLoader) async throws -> PhotoAttachment

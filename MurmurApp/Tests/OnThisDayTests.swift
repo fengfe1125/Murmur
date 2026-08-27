@@ -226,6 +226,88 @@ final class MurmurArchiveTests: XCTestCase {
         XCTAssertEqual(archive.photoCount(on: day("2026-08-20 12:00")), 1)
     }
 
+    func testAContinuedTurnKeepsItsRealSendTimeButStaysOnTheSelectedDay() async {
+        let (archive, directory) = makeArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let selectedDay = day("2024-03-12 09:00")
+        let actualSendTime = day("2026-08-26 21:17")
+
+        await archive.record(
+            .init(
+                author: .you,
+                text: "后来我又去了",
+                sentAt: actualSendTime,
+                archiveDay: selectedDay,
+                momentID: "continued-moment"
+            ),
+            photoURL: nil
+        )
+
+        XCTAssertEqual(archive.rows(on: selectedDay).map(\.text), ["后来我又去了"])
+        XCTAssertTrue(archive.rows(on: actualSendTime).isEmpty)
+        XCTAssertEqual(archive.rows.first?.sentAt, actualSendTime)
+
+        let reloaded = MurmurArchive(store: MurmurTranscriptStore(directory: directory))
+        await reloaded.load()
+        XCTAssertEqual(reloaded.rows(on: selectedDay).map(\.text), ["后来我又去了"])
+        XCTAssertEqual(reloaded.rows.first?.sentAt, actualSendTime)
+    }
+
+    func testMessagesWrittenBeforeArchiveDayStillDecodeAndGroupBySentAt() throws {
+        let data = Data("""
+        [{"id":"legacy","author":"murmur","text":"旧回答","sentAt":"2026-08-20T09:00:00Z","delivery":"sent"}]
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let rows = try decoder.decode([MurmurMessage].self, from: data)
+
+        XCTAssertNil(rows[0].archiveDay)
+        XCTAssertEqual(rows[0].text, "旧回答")
+    }
+
+    func testContextComesOnlyFromTheLatestPhotoRoomAndKeepsTheNewestEightMoments() async throws {
+        let (archive, directory) = makeArchive()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try writeTestJPEG(size: CGSize(width: 40, height: 40), name: "context")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let selectedDay = day("2026-08-20 12:00")
+
+        await archive.record(
+            .init(author: .you, text: "", sentAt: day("2026-08-20 08:00"), momentID: "older-room"),
+            photoURL: source
+        )
+        await archive.record(
+            .init(author: .murmur, text: "旧房间", sentAt: day("2026-08-20 08:01"), momentID: "older-room"),
+            photoURL: nil
+        )
+        await archive.record(
+            .init(author: .you, text: "", sentAt: day("2026-08-20 20:00"), momentID: "moment-0"),
+            photoURL: source
+        )
+        for index in 1...10 {
+            await archive.record(
+                .init(
+                    author: index.isMultiple(of: 2) ? .murmur : .you,
+                    text: "第 \(index) 轮",
+                    sentAt: day("2026-08-20 20:\(String(format: "%02d", index))"),
+                    momentID: "moment-\(index)"
+                ),
+                photoURL: nil
+            )
+        }
+        // Duplicates do not consume the bounded context budget.
+        await archive.record(
+            .init(author: .murmur, text: "补一句", sentAt: day("2026-08-20 20:20"), momentID: "moment-10"),
+            photoURL: nil
+        )
+
+        XCTAssertEqual(
+            archive.contextMomentIDs(on: selectedDay),
+            (3...10).map { "moment-\($0)" }
+        )
+    }
+
     /// A row with neither words nor a picture would be an empty bubble on the
     /// day screen; the copy failing is not a reason to put one there.
     func testAnEmptyRowIsNotFiled() async {

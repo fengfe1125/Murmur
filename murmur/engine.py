@@ -863,6 +863,7 @@ def respond(
     chat_id: int = 0,
     on_bubble=None,
     dossier: str | None = None,
+    history_entries: list[Entry] | None = None,
 ) -> Reply:
     """photo 为 None 时是纯文字消息——照样要回。
 
@@ -880,7 +881,10 @@ def respond(
         note,
         has_photo=photo is not None,
     )
-    history = history_turns(mem.recent(chat_id, limit=8))
+    history = history_turns(
+        history_entries if history_entries is not None
+        else mem.recent(chat_id, limit=8)
+    )
 
     image_block: dict | None = None
     if photo is not None:

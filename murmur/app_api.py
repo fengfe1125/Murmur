@@ -661,6 +661,34 @@ def create_app(
                 intent = str(form.get("intent") or "").strip() or None
                 if intent is not None and intent not in MOMENT_INTENTS:
                     raise APIError(400, "validation_error", "intent 无效。")
+                context_value = form.get("context_moment_ids")
+                context_moment_ids: list[str] | None = None
+                if context_value not in (None, ""):
+                    try:
+                        decoded_context = json.loads(str(context_value))
+                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                        raise APIError(
+                            400, "validation_error", "context_moment_ids 无效。"
+                        ) from exc
+                    if not isinstance(decoded_context, list) or len(decoded_context) > 8:
+                        raise APIError(
+                            400, "validation_error", "context_moment_ids 无效。"
+                        )
+                    context_moment_ids = []
+                    seen_context: set[str] = set()
+                    for value in decoded_context:
+                        if not isinstance(value, str):
+                            raise APIError(
+                                400, "validation_error", "context_moment_ids 无效。"
+                            )
+                        moment = value.strip()
+                        if not 1 <= len(moment) <= 200:
+                            raise APIError(
+                                400, "validation_error", "context_moment_ids 无效。"
+                            )
+                        if moment not in seen_context:
+                            seen_context.add(moment)
+                            context_moment_ids.append(moment)
                 upload = form.get("image")
                 image_hash = hashlib.sha256()
                 image_size = 0
@@ -709,10 +737,17 @@ def create_app(
                 await asyncio.to_thread(
                     apply_stop_preference, store, auth.user_id, note
                 )
-                digest = hashlib.sha256(
+                digest_input = (
                     note.encode("utf-8") + b"\x00" + image_hash.digest()
                     + b"\x00" + (intent or "").encode("utf-8")
-                ).hexdigest()
+                )
+                if context_moment_ids is not None:
+                    digest_input += b"\x00" + json.dumps(
+                        context_moment_ids,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                digest = hashlib.sha256(digest_input).hexdigest()
                 result = await asyncio.to_thread(
                     store.create_moment,
                     user_id=auth.user_id,
@@ -721,6 +756,7 @@ def create_app(
                     idempotency_key=idempotency_key,
                     request_digest=digest,
                     intent=intent,
+                    context_moment_ids=context_moment_ids,
                 )
                 if not result.created and temp_path:
                     temp_path.unlink(missing_ok=True)

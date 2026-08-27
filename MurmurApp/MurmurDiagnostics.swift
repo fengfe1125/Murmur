@@ -4,12 +4,9 @@ import UIKit
 
 /// A flight recorder for the keyboard, for debug builds only.
 ///
-/// The gap between the field and the conversation reproduces on a phone and
-/// never in the Simulator, and guessing at the difference from here has not
-/// worked.  This writes the numbers that matter — what the keyboard said it was
-/// doing, and what the layout actually did afterwards — to a file inside the
-/// app container, where `devicectl device copy from` can fetch them without the
-/// person having to read anything off the screen or reproduce on cue.
+/// Records layout-guide overlap, focus and composer clearance without message
+/// contents. A file inside the app container lets device-only transitions be
+/// inspected with `devicectl device copy from`, alongside simulator regressions.
 @MainActor
 enum MurmurDiagnostics {
     /// Caches, so it is the system's to reclaim and never counts as user data.
@@ -22,6 +19,31 @@ enum MurmurDiagnostics {
     static func record(_ line: String) {
         let stamp = Self.formatter.string(from: Date())
         append("\(stamp)  \(line)\n")
+    }
+
+    /// Geometry read from the window's UIKeyboardLayoutGuide. Notifications
+    /// below remain useful forensic context, but never drive layout anymore.
+    static func recordKeyboardLayoutGuide(overlap: CGFloat) {
+        record(
+            "layoutGuide overlap=\(String(format: "%.1f", overlap)) "
+                + "composerTop=\(String(format: "%.0f", composerTop))"
+        )
+        trackComposer()
+    }
+
+    static func recordKeyboardFocus(source: String, focused: Bool) {
+        record("\(source) focus=\(focused)")
+    }
+
+    static func recordKeyboardClearance(
+        source: String,
+        overlap: CGFloat,
+        clearance: CGFloat
+    ) {
+        record(
+            "\(source) overlap=\(String(format: "%.1f", overlap)) "
+                + "clearance=\(String(format: "%.1f", clearance))"
+        )
     }
 
     /// Called once the transcript is on screen; logs every keyboard transition

@@ -29,6 +29,17 @@ enum MurmurTab: String, CaseIterable, Identifiable {
     }
 }
 
+private struct MurmurTabBarClearanceKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+extension EnvironmentValues {
+    var murmurTabBarClearance: CGFloat {
+        get { self[MurmurTabBarClearanceKey.self] }
+        set { self[MurmurTabBarClearanceKey.self] = newValue }
+    }
+}
+
 /// The shell: the gates that must own the whole screen, and otherwise the three
 /// tabs with one glass bar under them.
 ///
@@ -38,11 +49,9 @@ struct MurmurShell: View {
     @ObservedObject var model: MurmurSessionModel
     @EnvironmentObject private var notifications: MurmurNotificationBridge
     @State private var tab: MurmurTab = .chat
-    /// The keyboard folds the bar away.  Without that the composer would come
-    /// to rest a bar's height above the keyboard: the composer lifts by exactly
-    /// what the keyboard takes, measured from wherever it was resting, and the
-    /// bar is part of where it was resting.  See `MurmurKeyboardInset`.
-    @ObservedObject private var keyboard = MurmurKeyboardInset.shared
+    /// Window-local keyboard geometry. A second scene owns a second state, so
+    /// neither can move the other's composer with a late transition.
+    @StateObject private var keyboard = MurmurKeyboardState()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Measured rather than assumed: the bar grows with Dynamic Type, and the
     /// content has to be inset by whatever it actually became.
@@ -65,10 +74,19 @@ struct MurmurShell: View {
             }
         }
         .background(MurmurTheme.paper.ignoresSafeArea())
+        .overlay {
+            MurmurKeyboardLayoutGuideProbe { overlap in
+                keyboard.updateFromLayoutGuide(overlap: overlap)
+            }
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+        .environmentObject(keyboard)
         .tint(MurmurTheme.accentInk)
     }
 
-    private var barIsFolded: Bool { keyboard.overlap > 0 }
+    private var barIsFolded: Bool { keyboard.overlap > 0.5 }
 
     private var tabs: some View {
         // One tab on screen at a time, and only that one in the tree.
@@ -94,6 +112,7 @@ struct MurmurShell: View {
                 MurmurSettingsView(model: model).environmentObject(notifications)
             }
         }
+        .environment(\.murmurTabBarClearance, barHeight)
         // The tap that moves the pill runs inside `withAnimation`, and a
         // conditional swap caught by one of those gets SwiftUI's default
         // opacity transition for free — the whole screen would cross-fade
@@ -104,7 +123,7 @@ struct MurmurShell: View {
         // height.  A `safeAreaInset` on the TabView itself does not reach the
         // pages inside it — the chat's own composer inset simply stopped being
         // laid out — so the two halves are stated separately here.
-        .safeAreaPadding(.bottom, barIsFolded ? 0 : barHeight)
+        .safeAreaPadding(.bottom, barHeight)
         // SwiftUI's own keyboard avoidance would be a second, differently
         // timed motion on top of the composer's own lift.  Stated here rather
         // than inside the workbench: inside a TabView page that modifier let

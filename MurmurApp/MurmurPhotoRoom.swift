@@ -1,6 +1,82 @@
 import SwiftUI
 import UIKit
 
+// MARK: - Shared room stream
+
+/// One SSE bubble after its per-moment event identity has been scoped for a
+/// room that can span several moments.  Both the live photo room and an
+/// archived-day continuation consume the wire through this path, so pacing,
+/// duplicate suppression, terminal handling and SwiftUI identity cannot drift.
+struct MurmurRoomBubble: Equatable, Sendable {
+    let id: String
+    let text: String
+}
+
+@MainActor
+struct MurmurRoomEventConsumer {
+    let api: any MurmurAPIClient
+    let pacing: MurmurBubblePacing
+
+    func consume(
+        momentID: String,
+        onBubble: (MurmurRoomBubble) async -> Void,
+        onAngles: ([String]) -> Void = { _ in }
+    ) async throws {
+        var terminal = false
+        var lastBubbleAt = Date()
+        var seenEventIDs = Set<String>()
+        for try await event in await api.events(momentID: momentID, lastEventID: nil) {
+            try Task.checkCancellation()
+            let eventID = Self.eventID(of: event)
+            if let eventID, !seenEventIDs.insert(eventID).inserted { continue }
+            switch event {
+            case .accepted:
+                lastBubbleAt = Date()
+            case let .bubble(id, text):
+                guard !text.isEmpty else { continue }
+                try await pace(for: text, since: lastBubbleAt)
+                await onBubble(.init(
+                    id: Self.bubbleID(momentID: momentID, eventID: id),
+                    text: text
+                ))
+                lastBubbleAt = Date()
+            case let .angles(_, texts):
+                onAngles(Array(texts.prefix(3)))
+            case .quiet:
+                break
+            case .done:
+                terminal = true
+            case let .failure(_, failure):
+                throw failure
+            }
+            if terminal { break }
+        }
+        guard terminal else {
+            throw MurmurFailure(code: "stream_ended", message: "回应中断了。", retryable: true)
+        }
+    }
+
+    static func bubbleID(momentID: String, eventID: String?) -> String {
+        "\(momentID)-\(eventID ?? UUID().uuidString)"
+    }
+
+    private func pace(for text: String, since: Date) async throws {
+        let target = pacing.delay(for: text)
+        guard target > 0 else { return }
+        let remaining = target - Date().timeIntervalSince(since)
+        guard remaining > 0 else { return }
+        try await Task.sleep(for: .seconds(remaining))
+    }
+
+    private static func eventID(of event: MurmurStreamEvent) -> String? {
+        switch event {
+        case let .accepted(id), let .bubble(id, _), let .angles(id, _),
+             let .quiet(id), let .done(id, _, _), let .failure(id, _):
+            id
+        }
+    }
+}
+
 // MARK: - The room's own bubble
 
 /// The transcript's bubble shape, again.  The original is `private` to
@@ -219,6 +295,7 @@ final class PhotoRoomModel: ObservableObject {
                     )
                 }
                 self.unsentRows.remove(row.id)
+                self.transcript?.setMomentID(receipt.momentID, for: row.id)
                 self.transcript?.setDelivery(.sent, for: row.id)
                 try await self.consume(momentID: receipt.momentID)
                 self.transcript?.setDelivery(.answered, for: row.id)
@@ -255,7 +332,7 @@ final class PhotoRoomModel: ObservableObject {
     private func recordBubble(_ line: Line, momentID: String) async {
         await transcript?.record(
             MurmurMessage(
-                id: "\(momentID)-\(line.id)",
+                id: line.id,
                 author: .murmur,
                 text: line.text,
                 momentID: momentID
@@ -291,50 +368,21 @@ final class PhotoRoomModel: ObservableObject {
     // ---- The stream ---------------------------------------------------------
 
     private func consume(momentID: String) async throws {
-        var terminal = false
-        var lastBubbleAt = Date()
-        for try await event in await api.events(momentID: momentID, lastEventID: nil) {
-            try Task.checkCancellation()
-            switch event {
-            case .accepted:
-                lastBubbleAt = Date()
-            case let .bubble(id, text):
-                guard !text.isEmpty else { continue }
-                try await pace(for: text, since: lastBubbleAt)
+        try await MurmurRoomEventConsumer(api: api, pacing: bubblePacing).consume(
+            momentID: momentID,
+            onBubble: { bubble in
                 let line = Line(
-                    id: id ?? UUID().uuidString, author: .murmur, text: text
+                    id: bubble.id,
+                    author: .murmur,
+                    text: bubble.text
                 )
                 lines.append(line)
                 await recordBubble(line, momentID: momentID)
-                lastBubbleAt = Date()
-            case let .angles(_, texts):
-                openers = Array(texts.prefix(3))
-            case .quiet:
-                // Murmur chose not to speak.  `quiet` is always followed by
-                // `done`, so this is not the end of the stream — and the room
-                // says nothing rather than inventing a line to fill the gap.
-                break
-            case .done:
-                terminal = true
-            case let .failure(_, streamFailure):
-                throw streamFailure
+            },
+            onAngles: { texts in
+                openers = texts
             }
-            if terminal { break }
-        }
-        guard terminal else {
-            throw MurmurFailure(code: "stream_ended", message: "回应中断了。", retryable: true)
-        }
-    }
-
-    /// The same human pacing the conversation uses, so a room that answers in
-    /// two lines does not fire both into the screen in the same frame.  Real
-    /// server latency counts towards the wait rather than adding to it.
-    private func pace(for text: String, since: Date) async throws {
-        let target = bubblePacing.delay(for: text)
-        guard target > 0 else { return }
-        let remaining = target - Date().timeIntervalSince(since)
-        guard remaining > 0 else { return }
-        try await Task.sleep(for: .seconds(remaining))
+        )
     }
 
     /// The reading did not land.  The room stays shut, with one offer on it.
@@ -354,15 +402,18 @@ final class PhotoRoomModel: ObservableObject {
     /// them retype a sentence they already wrote is the worse failure.
     private func failLine(_ line: Line, with error: Error) {
         guard !closed else { return }
-        lines.removeAll { $0.id == line.id }
-        // The words are going back into the field, so the archive must stop
-        // saying they were sent — the send button is the only retry there is.
         if let rowID = rowForLine.removeValue(forKey: line.id) {
-            unsentRows.remove(rowID)
-            transcript?.withdraw(rowID)
-        }
-        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            draft = line.text
+            let wasUnsent = unsentRows.remove(rowID) != nil
+            if wasUnsent {
+                lines.removeAll { $0.id == line.id }
+                // Only a line with no receipt comes back to the field.  Once
+                // the server accepted it, a later stream failure must not
+                // rewrite history and claim those words never left.
+                transcript?.withdraw(rowID)
+                if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    draft = line.text
+                }
+            }
         }
         failure = MurmurFailure.from(error)
         phase = .listening

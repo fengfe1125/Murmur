@@ -383,6 +383,7 @@ struct MurmurTranscriptView: View {
     @ObservedObject var model: MurmurSessionModel
     /// Changes each time the composer takes focus.
     var focusPulse: Int = 0
+    var keyboardIsFocused = false
     let onOpenImage: (MurmurPhotoPreview) -> Void
     var onDismissKeyboard: () -> Void = {}
 
@@ -485,25 +486,14 @@ struct MurmurTranscriptView: View {
             // what carries the keyboard now; this stays because rotation and
             // smaller content changes still land on it for free.
             .defaultScrollAnchor(.bottom, for: .sizeChanges)
-            // `.never`, and it has to be.  Both other modes hand the keyboard
-            // to the scroll view, and this transcript scrolls itself: focusing
-            // the field triggers a scroll to the bottom, the scroll view reads
-            // that as the reader pushing the keyboard away, and it dismisses
-            // the keyboard that was still on its way up.  The device log caught
-            // it — the keyboard was alive for as little as 0.05s, and what was
-            // left behind was a layout half-way between two states.
-            //
-            // Dismissing is not lost: tapping the conversation still does it,
-            // through the composer's own focus, which is the one path that
-            // cannot race the scrolling.
-            .scrollDismissesKeyboard(.never)
-            // Tapping the conversation puts the keyboard away, the way every
-            // chat does.  This has to travel back to the composer's own
-            // `FocusState` rather than resign the first responder directly:
-            // dismissing behind SwiftUI's back leaves its keyboard avoidance
-            // still applied, and the composer stays hoisted over a blank strip
-            // the height of the keyboard that just left.
-            .onTapGesture { onDismissKeyboard() }
+            // Automatic scroll-to-bottom must not be interpreted as an
+            // interactive keyboard dismissal. The shared surface releases the
+            // composer's FocusState only for a tap or an intentional downward
+            // drag, while leaving this ScrollView's own gesture active.
+            .murmurKeyboardDismissSurface(
+                isFocused: keyboardIsFocused,
+                dismiss: onDismissKeyboard
+            )
             .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.messages.count)
             .animation(.easeInOut(duration: 0.22), value: showsTyping)
             // The draft-photo reserve arrives and leaves on the same spring as
