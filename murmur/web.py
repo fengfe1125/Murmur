@@ -5,7 +5,7 @@
 uvicorn + fastapi 两个包不划算，而且 Murmur 的依赖表是刻意维持得很短的。
 
 **只读**是设计上的硬约束：这个进程不发消息、不改记忆、不碰 .env。
-唯一的写操作是把 OpenCode 的额度快照记进 quota_snapshots
+唯一的写操作是把 DeepSeek 的余额快照记进 balance_snapshots
 （额度只有一个"此刻的百分比"接口，不自己攒就永远看不到"变化"）。
 
 默认只绑 127.0.0.1。面板上有聊天原文和记忆文件，那是很私人的东西，
@@ -32,12 +32,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import counters, vps_panel
+from .balance import BALANCE_EVERY, BALANCE_SCHEMA, poller
 from .config import Config
 from .dossier import BLOCKS, REFRESH_EVERY, Dossier, _safe
-from .quota import QUOTA_EVERY, QUOTA_SCHEMA, poller
-
-# 再导出给 tests/test_web.py 用，本文件内不直接调用
-from .quota import snapshot as _snapshot  # noqa: F401
 
 log = logging.getLogger("murmur.web")
 
@@ -54,7 +51,7 @@ PLATFORMS = {
     "qq": {"label": "QQ", "platform": "qq", "short": "QQ"},
 }
 
-# 额度快照间隔与表结构都收在 murmur/quota.py——采集现在有两个入口：
+# 余额快照间隔与表结构都收在 murmur/balance.py——采集现在有两个入口：
 # 这里的 poller（本机单跑看板的场景）和 app-worker 里的常驻 poller
 #（生产 VPS 上看板几乎不开，不挪过去曲线全是大段空白）。
 
@@ -766,13 +763,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(vps_panel.list_invites(self.vps))
         if path == "/api/overview":
             return self._json(self.overview())
-        if path == "/api/quota":
+        if path == "/api/balance":
             try:
                 hours = int(q.get("hours", ["168"])[0])
             except ValueError:
                 return self._json({"error": "hours 得是整数"}, 400)
             # 没上限的话一个 hours=99999999 就是一次全表扫
-            return self._json(self.quota(min(max(hours, 1), 24 * 90)))
+            return self._json(self.balance(min(max(hours, 1), 24 * 90)))
         if path == "/api/people":
             with closing(self.db()) as c:
                 return self._json({"people": _people(c, self.cfg)})
@@ -842,7 +839,7 @@ class Handler(BaseHTTPRequestHandler):
             })
 
         with closing(self.db()) as c:
-            c.executescript(QUOTA_SCHEMA)
+            c.executescript(BALANCE_SCHEMA)
             today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
             # logged_at 存的是 UTC，按本地日期筛要先转过去
             stats = {}
@@ -879,9 +876,9 @@ class Handler(BaseHTTPRequestHandler):
                 stats["by_platform"][p["platform"]] = \
                     stats["by_platform"].get(p["platform"], 0) + 1
             last = c.execute(
-                "SELECT * FROM quota_snapshots ORDER BY id DESC LIMIT 1"
+                "SELECT * FROM balance_snapshots ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            quota = dict(last) if last else None
+            balance = dict(last) if last else None
             # 回复质量的无正文计数（counters.py）：只有分类名和次数，
             # 给 P0 生产验收用，不碰任何聊天内容。
             counter_rows = counters.recent(c, days=14, tz=cfg.tz)
@@ -912,7 +909,7 @@ class Handler(BaseHTTPRequestHandler):
             },
             "platforms": plats,
             "stats": stats,
-            "quota": quota,
+            "balance": balance,
         }
 
     def _local_midnight_utc(self) -> str:
@@ -920,22 +917,22 @@ class Handler(BaseHTTPRequestHandler):
             hour=0, minute=0, second=0, microsecond=0)
         return mid.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
-    def quota(self, hours: int) -> dict:
+    def balance(self, hours: int) -> dict:
         since = (datetime.now(UTC)
                  - timedelta(hours=hours)).isoformat(timespec="seconds")
         with closing(self.db()) as c:
-            c.executescript(QUOTA_SCHEMA)
+            c.executescript(BALANCE_SCHEMA)
             rows = c.execute(
-                "SELECT * FROM quota_snapshots WHERE at >= ? ORDER BY at",
+                "SELECT * FROM balance_snapshots WHERE at >= ? ORDER BY at",
                 (since,),
             ).fetchall()
             latest = c.execute(
-                "SELECT * FROM quota_snapshots ORDER BY id DESC LIMIT 1"
+                "SELECT * FROM balance_snapshots ORDER BY id DESC LIMIT 1"
             ).fetchone()
         return {
             "points": [dict(r) for r in rows],
             "latest": dict(latest) if latest else None,
-            "poll_every_s": QUOTA_EVERY,
+            "poll_every_s": BALANCE_EVERY,
         }
 
     def logs(self, name: str, n: int) -> dict:
@@ -958,7 +955,7 @@ def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
     )
     stop = threading.Event()
     threading.Thread(target=poller, args=(cfg, stop),
-                     name="murmur-quota", daemon=True).start()
+                     name="murmur-balance", daemon=True).start()
 
     httpd = ThreadingHTTPServer((host, port), partial(Handler, cfg, vps))
     url = f"http://{host}:{port}"

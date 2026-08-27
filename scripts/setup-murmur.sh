@@ -225,16 +225,19 @@ fi
 
 stage "Model gateway API"
 say "所有平台共用一个支持图片输入的 OpenAI 兼容模型网关。"
-open_url "https://opencode.ai/zen"
-ask MODEL_GATEWAY "输入 1 使用 OpenCode Zen（默认），2 使用自定义 OpenAI 兼容网关："
+open_url "https://platform.deepseek.com"
+ask MODEL_GATEWAY "输入 1 使用 DeepSeek 直连（默认），2 使用自定义 OpenAI 兼容网关："
 MODEL_GATEWAY=${MODEL_GATEWAY:-1}
 case "$MODEL_GATEWAY" in
   1)
-    ask_secret OPENCODE_API_KEY "粘贴 OpenCode Zen API Key："
-    require_value "$OPENCODE_API_KEY" "OPENCODE_API_KEY"
-    write_env OPENCODE_API_KEY "$OPENCODE_API_KEY"
+    ask_secret DEEPSEEK_API_KEY "粘贴 DeepSeek API Key："
+    require_value "$DEEPSEEK_API_KEY" "DEEPSEEK_API_KEY"
+    write_env DEEPSEEK_API_KEY "$DEEPSEEK_API_KEY"
     write_env MURMUR_API_KEY ""
-    write_env MURMUR_BASE_URL "https://opencode.ai/zen/go/v1"
+    # /beta 不是 /v1：assistant prefix 只在 beta 上有，JSON_PREFIX 靠它。
+    write_env MURMUR_BASE_URL "https://api.deepseek.com/beta"
+    write_env MURMUR_JSON_SCHEMA "0"
+    write_env MURMUR_JSON_PREFIX "1"
     ;;
   2)
     ask MURMUR_BASE_URL "粘贴兼容网关的 Base URL（例如 https://api.example.com/v1）："
@@ -243,13 +246,13 @@ case "$MODEL_GATEWAY" in
     require_value "$MURMUR_API_KEY" "MURMUR_API_KEY"
     write_env MURMUR_BASE_URL "$MURMUR_BASE_URL"
     write_env MURMUR_API_KEY "$MURMUR_API_KEY"
-    write_env OPENCODE_API_KEY ""
+    write_env DEEPSEEK_API_KEY ""
     ;;
   *) warn "只支持 1 或 2。"; exit 2 ;;
 esac
-ask MURMUR_MODEL "模型名（默认 qwen3.7-plus）："
-write_env MURMUR_MODEL "${MURMUR_MODEL:-qwen3.7-plus}"
-ask MURMUR_MEMORY_MODEL "记忆整理模型（留空则跟随主模型；建议 mimo-v2.5）："
+ask MURMUR_MODEL "模型名（默认 deepseek-v4-flash）："
+write_env MURMUR_MODEL "${MURMUR_MODEL:-deepseek-v4-flash}"
+ask MURMUR_MEMORY_MODEL "记忆整理模型（留空则跟随主模型）："
 write_env MURMUR_MEMORY_MODEL "$MURMUR_MEMORY_MODEL"
 
 # .env is the official App environment. Platform credentials alone must never
@@ -320,7 +323,7 @@ if [[ -n "$SELECTED_PLATFORMS" ]]; then
   write_env MURMUR_DB "./test/murmur.db"
   write_env MURMUR_LOGDIR "./test/logs"
   write_env MURMUR_TZ "Asia/Shanghai"
-  for key in OPENCODE_API_KEY MURMUR_API_KEY MURMUR_BASE_URL MURMUR_MODEL MURMUR_MEMORY_MODEL; do
+  for key in DEEPSEEK_API_KEY MURMUR_API_KEY MURMUR_BASE_URL MURMUR_MODEL MURMUR_MEMORY_MODEL; do
     write_env "$key" "$(_existing_from "$PRODUCTION_ENV_FILE" "$key" || true)"
   done
   chmod 600 "$TEST_BOT_ENV_FILE"

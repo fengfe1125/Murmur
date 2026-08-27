@@ -1,6 +1,6 @@
 """组装上下文 → 调模型 → 拿回一句话。
 
-走 OpenAI 兼容接口（OpenCode Zen 网关），不是 Anthropic SDK。
+走 OpenAI 兼容接口（默认 DeepSeek 直连），不是 Anthropic SDK。
 """
 
 from __future__ import annotations
@@ -686,7 +686,7 @@ def _fallback_attempts(
     """(模型, 是否带 json_schema, base_url, api_key) 的尝试序列。
 
     降级模型一律不带 json_schema——deepseek-v4-flash / mimo-v2.5 在
-    OpenCode 网关上不支持 response_format，靠 SYSTEM 提示词里的
+    不支持 response_format，靠 SYSTEM 提示词里的
     「只返回 JSON」约束输出，_extract_json 负责剥代码块。主模型是否
     带由 MURMUR_JSON_SCHEMA 决定（glm / deepseek 系都不支持）。
 
@@ -846,12 +846,20 @@ _client_lock = threading.Lock()
 def _client(
     cfg: Config, base_url: str | None = None, api_key: str | None = None
 ) -> OpenAI:
-    # base_url / api_key 为空时用主网关；降级到第二家网关时才显式传。
+    # 两个都为空 = 主网关；降级到第二家网关时两个一起显式传。**端点和
+    # key 必须成对**：只换端点不换 key，就是拿主网关的凭据去打另一家的
+    # 域名。Config 已经在启动时挡了配一半的情况（_parse_fallback_gateway），
+    # 这里再挡一次，是因为这个函数也被 dossier / continuity 直接调用。
+    if bool(base_url) != bool(api_key):
+        raise RuntimeError(
+            "_client 的 base_url 和 api_key 必须成对传：只传一个会把"
+            "另一家的 API key 发给不该收到它的那一方。"
+        )
     api_key = api_key or cfg.api_key
     base_url = base_url or cfg.base_url
     if not api_key:
         raise RuntimeError(
-            "没有 OPENCODE_API_KEY。把 .env.example 复制成 .env 填进去，"
+            "没有 DEEPSEEK_API_KEY。把 .env.example 复制成 .env 填进去，"
             "或者先用 --dry-run 看拼出来的 prompt。"
         )
     # 每次回复都新建 client 的话，底层 httpx 连接池也一起重建，

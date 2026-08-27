@@ -659,7 +659,7 @@ def run() -> None:
     except OSError:
         pass
     with AppStore(settings.db_path) as store:
-        _start_quota_poller(cfg)
+        _start_balance_poller(cfg)
         apns_configured = all((
             settings.apns_key_path, settings.apns_key_id,
             settings.apns_team_id, settings.apns_topic,
@@ -704,19 +704,19 @@ def run() -> None:
         AppWorker(store, cfg, settings, scheduler=scheduler).serve_forever()
 
 
-def _start_quota_poller(cfg: Config) -> None:
-    """额度采集挂在常驻的 worker 上，而不是只活在看板里。
+def _start_balance_poller(cfg: Config) -> None:
+    """余额采集挂在常驻的 worker 上，而不是只活在看板里。
 
     历史原因：采集最早写在看板进程里，但生产 VPS 上没人天天开面板，
     曲线全是大段空白。worker 是 Always-On 的那个进程，放这里。
     daemon 线程随进程退出；看板自己单跑时还会再起一个同样的 poller，
-    quota.snapshot 的同值去重保证两边同时跑也不会写重复行。
+    balance.snapshot 的同值去重保证两边同时跑也不会写重复行。
     """
-    from .quota import poller
+    from .balance import poller
 
     threading.Thread(
         target=poller, args=(cfg, threading.Event()),
-        name="murmur-quota", daemon=True,
+        name="murmur-balance", daemon=True,
     ).start()
 
 

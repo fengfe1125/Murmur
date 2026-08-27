@@ -55,7 +55,7 @@ cp .env.example .env      # 填模型与 App API 配置；不要在这里开启�
 ```
 
 向导会检查 Python 3.11+ / `venv`、创建 `.venv` 并安装依赖，然后用隐藏输入配置
-OpenCode（或其他 OpenAI 兼容网关）的 API Key。正式配置写入 `.env`；如果选择旧平台，
+DeepSeek（或其他 OpenAI 兼容网关）的 API Key。正式配置写入 `.env`；如果选择旧平台，
 它们的测试凭据会单独写入被 Git 忽略的 `.env.test-bots`，数据库和日志写入 `./test/`。
 向导不会启动服务或开放端口。
 
@@ -215,11 +215,13 @@ murmur web            # 打开 http://127.0.0.1:8765
   是错误，都会标成「需要留意」。
   端口那一栏通常是空的——三个 bot 都是主动连出去的（长轮询 / websocket），
   谁都不监听端口，所以顺带把出站连接也列出来，免得看起来像挂了。
-- **OpenCode 额度**：滚动窗口 / 本周 / 本月各用了多少、什么时候重置。
-  官方接口只给"此刻的百分比"，所以每 5 分钟采一个点存进
-  `quota_snapshots` 表，「额度变化」那一页画的就是这些点。
-  采集挂在常驻的 app-worker 上（`murmur/quota.py`），看板单跑时也会自己采一份，
-  同值去重保证两边同时跑不写重复行——面板开不开都有数据。
+- **DeepSeek 余额**：账上还剩多少、其中赠送和充值各多少。
+  官方接口只给"此刻还剩多少"，所以每 5 分钟采一个点存进
+  `balance_snapshots` 表，「余额变化」那一页画的就是这些点。
+  **方向和从前的额度百分比是反的**：曲线往下走是在花钱，跌到 0 才是要出事，
+  所以看板上是少了才红。采集挂在常驻的 app-worker 上（`murmur/balance.py`），
+  看板单跑时也会自己采一份，同值去重保证两边同时跑不写重复行——
+  面板开不开都有数据。
 - **每个人一个聊天窗口**：左边**按人**排，不是按会话。
   Murmur 内部的划分单位是 `(平台, 会话, 发送人)`——同一个人的单聊、
   每个群、换了组织的钉钉 id 各算一条，实测一个人能散成 4 条。
@@ -264,33 +266,37 @@ URL 里的 token 也会自动带到页面后续 API 和照片请求。没设就�
 
 ## 模型
 
-走 [OpenCode Zen](https://opencode.ai/zen) 网关（OpenAI 兼容）。
-你的 **Go 订阅** 对应 `https://opencode.ai/zen/go/v1`。
+[DeepSeek](https://platform.deepseek.com) 直连（OpenAI 兼容），
+默认 `https://api.deepseek.com/beta`。
 
-> 实测：Go 的 key 调完整 Zen 目录（`/zen/v1`，含 Claude / Gemini）会返回
-> `CreditsError`，那些是按量计费的。下面这些在 Go 目录里可直接用。
+> **注意是 `/beta` 不是 `/v1`。** 把回复首字符钉成 `{` 的 assistant prefix
+> 只在 beta 端点上有，而这是让 deepseek 老实吐 JSON 的唯一可靠办法——
+> 它不吃提示词里的「只返回 JSON」（实测十次有九次直接回聊天正文）。
+> `MURMUR_BASE_URL` / `MURMUR_JSON_PREFIX` 是配套的，别只改一个。
+> 余额接口不在这个路径下，在 API 根上（`/user/balance`）。
 
-四个候选实跑同一张图 + 同一份人格的结果：
+| 配置项 | 默认值 | 为什么 |
+|---|---|---|
+| `MURMUR_MODEL` | `deepseek-v4-flash` | 中文自然、便宜、不把思考过程写进正文 |
+| `MURMUR_IMAGE_MODEL` | `deepseek-v4-flash-vision-exp` | 读图 2 秒级，JSON 纪律好 |
+| `MURMUR_JSON_SCHEMA` | `0` | 传 `response_format` 要么 400，要么把 token 全烧进思考 |
+| `MURMUR_JSON_PREFIX` | `1` | 配套 `/beta`，靠 prefix 而不是提示词约束 JSON |
 
-| 模型 | 说的话 | 价格 /M token | 备注 |
-|---|---|---|---|
-| **`qwen3.7-plus`**（默认） | 「12楼，还在公司呢？今天怎么样」 | $0.4 / $1.6 | 中文自然、接话完整、不泄漏思考 |
-| `mimo-v2.5` | 「12楼，快了。」 | $0.14 / $0.28 | 最便宜，输出偏短 |
-| `kimi-k2.6` | 「又这个点」 | $0.95 / $4 | 语气最像人，但输出 token 多，贵约 20 倍 |
-| `qwen3.8-max` | 「又是这个点等电梯」 | $2 / $6 | 更强但慢，输出 token 很多 |
+换模型改 `.env` 的 `MURMUR_MODEL`，或者 `murmur reply xx.jpg --model xxx`
+临时试。换成别家网关（qwen / kimi 系吃 json_schema）时，记得连
+`MURMUR_JSON_SCHEMA` / `MURMUR_JSON_PREFIX` 一起调回去。
 
-默认 `qwen3.7-plus`，约 **¥0.01 一张图**。换模型改 `.env` 的 `MURMUR_MODEL`，
-或者 `murmur reply xx.jpg --model kimi-k2.6` 临时试。
+**模型降级备案**（2026-08-16 网关上游整体 503 之后加的）：
 
-**模型降级备案**（2026-08-16 OpenCode 网关 Qwen 上游整体 503 之后加的）：
-
-- 主模型抛网关错误或吐不出 JSON → 自动换 `MURMUR_FALLBACK_MODEL`
-  （默认 `deepseek-v4-flash`）重试一次，降级调用不带 json_schema。
-  默认降级仍走同一家网关；配了 `MURMUR_FALLBACK_BASE_URL` /
-  `MURMUR_FALLBACK_API_KEY` 后第二次尝试会打到第二家——网关整体挂掉时
-  「同一家换个模型」不算降级，建议配上。
-- 带图消息走 `MURMUR_IMAGE_MODEL`（默认 `mimo-v2.5`，多模态）；
-  mimo 也挂掉时退回降级模型、**不带图**纯文本重试，消息不会断。
+- 主模型抛网关错误或吐不出 JSON → 自动换 `MURMUR_FALLBACK_MODEL` 重试一次，
+  降级调用不带 json_schema。**默认空 = 就一家，同一个模型再来一次**——
+  线上失败几乎全是一次性的（网关 5xx，或者这一次没按 JSON 写）。
+  配了 `MURMUR_FALLBACK_BASE_URL` / `MURMUR_FALLBACK_API_KEY` 后第二次尝试
+  会打到第二家——网关整体挂掉时「同一家换个模型」不算降级，建议配上。
+  这两个**要么都配、要么都留空**：只配 URL 会拿主网关的 key 去打第二家的
+  域名，只配 key 会把第二家的 key 发给主网关，所以配了一半会直接拒绝启动。
+- 带图消息走 `MURMUR_IMAGE_MODEL`（多模态）；它也挂掉时退回降级模型、
+  **不带图**纯文本重试，消息不会断。
 - 每次降级都会在日志打 `模型 <name> 失败（<错误类型>），尝试降级`。
 
 `minimax-m3` 实测会把 `<think>` 标签写进正文，不建议用（解析器能剥掉，但浪费 token）。
@@ -323,9 +329,9 @@ murmur/
   dingtalk.py  钉钉测试通道
   wechat.py    微信测试通道
   qq.py        QQ 测试通道
-  web.py       只读看板：进程 / 端口 / 额度曲线 / 每人的聊天窗口和记忆
+  web.py       只读看板：进程 / 端口 / 余额曲线 / 每人的聊天窗口和记忆
                （配 MURMUR_WEB_TOKEN 后支持开放访问）
-  quota.py     OpenCode 额度采样与快照（app-worker 与看板共用一个 poller）
+  balance.py   DeepSeek 余额采样与快照（app-worker 与看板共用一个 poller）
   counters.py  无正文的回复质量分类计数（daily_counters 表）
   vps_panel.py VPS 面板后端：经 gcloud/ssh 查服务状态、建邀请码
   webui/       看板的前端，单个 HTML，没有构建步骤
@@ -417,6 +423,6 @@ CI 按三摊代码分开：`.github/workflows/server.yml` 在 Python 3.11（pypr
 ## 隐私
 
 照片和记录都在本地（`./murmur.db`，已 gitignore）。
-每次调用发给 OpenCode 网关的是**压缩后的图 + 一段文字上下文**——
+每次调用发给模型网关的是**压缩后的图 + 一段文字上下文**——
 不含 GPS 坐标、不含地名，只有时间和"在同一个地方来过 N 次"这种计数。
 原图不上传、不留存。

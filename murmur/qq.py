@@ -592,7 +592,7 @@ def run() -> None:
             "去 q.qq.com 创建一个机器人，把 AppID 和 AppSecret 填进 .env.test-bots。"
         )
     if not cfg.api_key:
-        raise RuntimeError("没有 OPENCODE_API_KEY。")
+        raise RuntimeError("没有 DEEPSEEK_API_KEY。")
 
     http = QqHttp(cfg.qq_app_id, cfg.qq_client_secret)
     http.token()

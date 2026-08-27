@@ -31,6 +31,18 @@ ROOT = Path(__file__).resolve().parent.parent
 PER_TEST_TIMEOUT = 300
 
 
+def _display(test: Path) -> str:
+    """尽量打相对路径；传进来的是仓库外的绝对路径就原样打。
+
+    relative_to 对仓库外的路径会抛 ValueError——手动指定文件时不该因为
+    一句显示用的路径处理把整个 runner 带挂。
+    """
+    try:
+        return str(test.relative_to(ROOT))
+    except ValueError:
+        return str(test)
+
+
 def main() -> int:
     args = [a for a in sys.argv[1:] if a != "--fail-fast"]
     fail_fast = "--fail-fast" in sys.argv[1:]
@@ -46,34 +58,48 @@ def main() -> int:
         print("tests/ 下没有 test_*.py", file=sys.stderr)
         return 2
 
-    failures: list[str] = []
+    # (文件名, 怎么挂的)。原因要带到最后的名单里：超时的提示打在 300 秒
+    # 之前，等跑完早滚出屏幕了，只写一个 FAILED 等于让人重跑一遍才知道。
+    failures: list[tuple[str, str]] = []
+    ran = 0
     started = time.monotonic()
     for test in tests:
-        rel = test.relative_to(ROOT)
+        rel = _display(test)
+        ran += 1
         print(f"── {rel} ", flush=True)
+        why = ""
         try:
             result = subprocess.run(
                 [sys.executable, str(test)], cwd=ROOT, timeout=PER_TEST_TIMEOUT
             )
-            ok = result.returncode == 0
+            if result.returncode != 0:
+                why = f"退出码 {result.returncode}"
         except subprocess.TimeoutExpired:
-            ok = False
-            print(f"   超时（>{PER_TEST_TIMEOUT}s），按失败算", flush=True)
-        if not ok:
-            failures.append(str(rel))
+            why = f"超时 >{PER_TEST_TIMEOUT}s"
+            print(f"   {why}，按失败算", flush=True)
+        if why:
+            failures.append((rel, why))
             if fail_fast:
                 break
 
     elapsed = time.monotonic() - started
     print()
-    if failures:
-        print(f"通过 {len(tests) - len(failures)} 个文件，失败 {len(failures)} 个"
-              f"（{elapsed:.1f}s）：")
-        for name in failures:
-            print(f"  FAILED: {name}")
-        return 1
-    print(f"全部通过：{len(tests)} 个文件（{elapsed:.1f}s）")
-    return 0
+    print("─" * 60)
+    if not failures:
+        print(f"全部通过：{len(tests)} 个文件（{elapsed:.1f}s）")
+        return 0
+
+    # 只报真的跑过的。--fail-fast 会在中途 break，把没跑的算进"通过"的话，
+    # 发布闸门就会在人正盯着它判断坏了多少的那一刻给个假数。
+    skipped = len(tests) - ran
+    print(f"{len(tests)} 个文件：跑了 {ran}，通过 {ran - len(failures)}，"
+          f"失败 {len(failures)}，未跑 {skipped}（{elapsed:.1f}s）")
+    for name, why in failures:
+        print(f"  FAILED  {name}  （{why}）")
+    if skipped:
+        print(f"  ⚠ --fail-fast 在第一个失败处停下，剩下 {skipped} 个"
+              f"没跑过，状态未知")
+    return 1
 
 
 if __name__ == "__main__":
