@@ -80,7 +80,8 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         note: String?,
         photo: PhotoAttachment?,
         idempotencyKey: String,
-        intent: MurmurMomentIntent?
+        intent: MurmurMomentIntent?,
+        contextMomentIDs: [String]
     ) async throws -> MomentReceipt {
         let boundary = "Murmur-\(UUID().uuidString)"
         let bodyURL = try makeMultipartBody(
@@ -88,7 +89,8 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             note: note,
             photo: photo,
             idempotencyKey: idempotencyKey,
-            intent: intent
+            intent: intent,
+            contextMomentIDs: contextMomentIDs
         )
         defer { try? FileManager.default.removeItem(at: bodyURL) }
         let digest = try sha256(fileURL: bodyURL)
@@ -489,7 +491,8 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         note: String?,
         photo: PhotoAttachment?,
         idempotencyKey: String,
-        intent: MurmurMomentIntent?
+        intent: MurmurMomentIntent?,
+        contextMomentIDs: [String]
     ) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("murmur-multipart-\(UUID().uuidString)")
@@ -511,6 +514,17 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         }
         try field("idempotency_key", idempotencyKey)
         if let intent { try field("intent", intent.rawValue) }
+        if !contextMomentIDs.isEmpty {
+            let encoded = try JSONEncoder().encode(contextMomentIDs)
+            guard let value = String(data: encoded, encoding: .utf8) else {
+                throw MurmurFailure(
+                    code: "upload_prepare_failed",
+                    message: "无法准备历史上下文。",
+                    retryable: false
+                )
+            }
+            try field("context_moment_ids", value)
+        }
         if let note, !note.isEmpty { try field("note", note) }
         if let photo {
             try write("--\(boundary)\r\n")

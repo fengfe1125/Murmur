@@ -596,8 +596,8 @@ class SchemaMigrationTests(unittest.TestCase):
 
 
 class MomentIntentMigrationTests(unittest.TestCase):
-    """A database written before 当年今日's photo room must open and gain the
-    column, with every row that predates it reading as an ordinary moment."""
+    """A database written before 当年今日's room metadata must gain the new
+    columns, while rows that predate both features keep their old meaning."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -617,6 +617,7 @@ class MomentIntentMigrationTests(unittest.TestCase):
         # written by the previous release actually looks.
         conn = sqlite3.connect(self.path)
         conn.execute("ALTER TABLE app_moments DROP COLUMN intent")
+        conn.execute("ALTER TABLE app_moments DROP COLUMN context_moment_ids")
         conn.commit()
         conn.close()
 
@@ -629,7 +630,10 @@ class MomentIntentMigrationTests(unittest.TestCase):
                 row["name"] for row in store.conn.execute("PRAGMA table_info(app_moments)")
             }
             self.assertIn("intent", columns)
-            self.assertIsNone(store.moment_for_user("m1", "u1")["intent"])
+            self.assertIn("context_moment_ids", columns)
+            row = store.moment_for_user("m1", "u1")
+            self.assertIsNone(row["intent"])
+            self.assertIsNone(row["context_moment_ids"])
 
     def test_a_reading_can_be_queued_against_the_migrated_database(self):
         with AppStore(self.path) as store:

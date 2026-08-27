@@ -106,6 +106,29 @@ enum MurmurEnvironment {
             if arguments.contains("--murmur-reset-transcript") {
                 try? FileManager.default.removeItem(at: directory)
             }
+            let seedDaysAgo: Int?
+            if arguments.contains("--murmur-seed-historical-archive") {
+                seedDaysAgo = 2
+            } else if arguments.contains("--murmur-seed-today-archive") {
+                seedDaysAgo = 0
+            } else {
+                seedDaysAgo = nil
+            }
+            if let seedDaysAgo {
+                let calendar = Calendar.murmur
+                let day = calendar.date(byAdding: .day, value: -seedDaysAgo, to: Date()) ?? Date()
+                return MurmurArchive(
+                    store: MurmurTranscriptStore(directory: directory),
+                    initialRows: [
+                        MurmurMessage(
+                            author: .murmur,
+                            text: "这是一条旧日期里的回答",
+                            sentAt: day,
+                            momentID: "ui-historical-seed"
+                        )
+                    ]
+                )
+            }
             return MurmurArchive(store: MurmurTranscriptStore(directory: directory))
         }
 #endif
@@ -130,7 +153,7 @@ private actor UnavailableMurmurAPIClient: MurmurAPIClient {
 
     func storedIdentity() async throws -> MurmurIdentity? { nil }
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity { throw unavailable }
-    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?) async throws -> MomentReceipt { throw unavailable }
+    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?, contextMomentIDs: [String]) async throws -> MomentReceipt { throw unavailable }
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> {
         AsyncThrowingStream { $0.finish(throwing: unavailable) }
     }
@@ -165,6 +188,7 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
     /// Which moments came in as 当年今日 readings, so their event stream can
     /// answer with a guess and three openers instead of an ordinary reply.
     private var readings: Set<String> = []
+    private var notesByMoment: [String: String] = [:]
     /// Under `--murmur-stub-reading-fails` the room's opening upload never
     /// lands.  That is what makes the room's own failure state reachable.
     private let failsReading = ProcessInfo.processInfo.arguments.contains("--murmur-stub-reading-fails")
@@ -173,7 +197,7 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity { identity }
     func createMoment(
         note: String?, photo: PhotoAttachment?, idempotencyKey: String,
-        intent: MurmurMomentIntent?
+        intent: MurmurMomentIntent?, contextMomentIDs: [String]
     ) async throws -> MomentReceipt {
         sends += 1
         if failsFirstSend, sends == 1 {
@@ -185,22 +209,32 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
         moments += 1
         let momentID = "ui-moment-\(moments)"
         if intent == .photoReading { readings.insert(momentID) }
+        if let note { notesByMoment[momentID] = note }
         return .init(momentID: momentID, status: "queued")
     }
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> {
         let isReading = readings.contains(momentID)
+        let note = notesByMoment[momentID]
         return AsyncThrowingStream { continuation in
-            continuation.yield(.accepted(id: "\(momentID)-1"))
+            // Production sequence numbers restart for every moment.  Keeping
+            // that wire shape in UI tests guards the room-wide SwiftUI IDs.
+            continuation.yield(.accepted(id: "1"))
             if isReading {
-                continuation.yield(.bubble(id: "\(momentID)-2", text: "这是……刚下过雨？"))
+                continuation.yield(.bubble(id: "2", text: "这是……刚下过雨？"))
                 continuation.yield(.angles(
-                    id: "\(momentID)-angles",
+                    id: "3",
                     texts: ["那天的天气", "右边那个人", "上次说要再来"]
                 ))
             } else {
-                continuation.yield(.bubble(id: "\(momentID)-2", text: "这一刻，我收到了。"))
+                let answer: String
+                switch note {
+                case "日期续聊第一句": answer = "接住第一句"
+                case "日期续聊第二句": answer = "接住第二句"
+                default: answer = "这一刻，我收到了。"
+                }
+                continuation.yield(.bubble(id: "2", text: answer))
             }
-            continuation.yield(.done(id: "\(momentID)-3", move: nil, scene: nil))
+            continuation.yield(.done(id: "4", move: nil, scene: nil))
             continuation.finish()
         }
     }

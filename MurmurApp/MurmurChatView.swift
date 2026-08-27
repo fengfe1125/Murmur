@@ -505,12 +505,17 @@ private struct MomentWorkbench: View {
     /// the composer never leaving its resting position.  One piece of shared
     /// focus state has no such gap.
     @FocusState private var composerFocused: Bool
-    /// The keyboard, on its own clock.  See `MurmurKeyboardInset`.
-    @ObservedObject private var keyboard = MurmurKeyboardInset.shared
-    /// Only to know when we have come back from the background, which is the
-    /// other moment the keyboard has to be loaded from scratch.
+    @EnvironmentObject private var keyboard: MurmurKeyboardState
+    @Environment(\.murmurTabBarClearance) private var tabBarClearance
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var keyboardSupplement: CGFloat {
+        MurmurKeyboardClearance.supplemental(
+            overlap: keyboard.overlap,
+            resting: tabBarClearance
+        )
+    }
 
     private func closePhotoSource() {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
@@ -522,6 +527,7 @@ private struct MomentWorkbench: View {
         MurmurTranscriptView(
             model: model,
             focusPulse: focusPulse,
+            keyboardIsFocused: composerFocused,
             onOpenImage: { openPhoto = $0 },
             onDismissKeyboard: {
 #if DEBUG
@@ -590,11 +596,10 @@ private struct MomentWorkbench: View {
                         focused: $composerFocused
                     )
                 }
-                // The one thing that moves for the keyboard.  Growing the inset
-                // rather than sliding the composer means the scroll view's
-                // bottom anchor carries the conversation with it, in step,
-                // instead of correcting itself afterwards.
-                .padding(.bottom, keyboard.overlap)
+                // The shell always reserves the measured tab-bar height. Only
+                // the part of the keyboard beyond that stable base is added,
+                // so crossing the show/hide boundary cannot jump the field.
+                .padding(.bottom, keyboardSupplement)
                 .animation(
                     reduceMotion ? nil : .easeInOut(duration: 0.18),
                     value: model.draftFailure
@@ -636,6 +641,25 @@ private struct MomentWorkbench: View {
             warmKeyboard()
             Task { await model.checkProactive() }
         }
+        .onChange(of: composerFocused, initial: true) { _, focused in
+            keyboard.focusDidChange(focused)
+        }
+        .onDisappear {
+            composerFocused = false
+            keyboard.focusDidChange(false)
+        }
+#if DEBUG
+        .onChange(of: composerFocused, initial: true) { _, focused in
+            MurmurDiagnostics.recordKeyboardFocus(source: "chat", focused: focused)
+        }
+        .onChange(of: keyboardSupplement, initial: true) { _, clearance in
+            MurmurDiagnostics.recordKeyboardClearance(
+                source: "chat",
+                overlap: keyboard.overlap,
+                clearance: clearance
+            )
+        }
+#endif
     }
 
     /// Warming borrows first responder for a turn, which is fine on an idle
@@ -1381,12 +1405,14 @@ private struct CameraPicker: UIViewControllerRepresentable {
 #Preview {
     MurmurChatView(model: MurmurSessionModel(api: PreviewMurmurAPIClient()))
         .environmentObject(MurmurNotificationBridge.shared)
+        .environmentObject(MurmurKeyboardState())
+        .environment(\.murmurTabBarClearance, 72)
 }
 
 private actor PreviewMurmurAPIClient: MurmurAPIClient {
     func storedIdentity() async throws -> MurmurIdentity? { .init(userID: "preview", deviceID: "preview", keyID: "preview") }
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity { .init(userID: "preview", deviceID: "preview", keyID: "preview") }
-    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?) async throws -> MomentReceipt { .init(momentID: "preview", status: "queued") }
+    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?, contextMomentIDs: [String]) async throws -> MomentReceipt { .init(momentID: "preview", status: "queued") }
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> { AsyncThrowingStream { $0.finish() } }
     func currentProactive() async throws -> ProactiveMoment? { nil }
     func acknowledge(momentID: String, reply: String?) async throws {}

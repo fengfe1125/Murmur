@@ -15,7 +15,7 @@ final class MurmurUITests: XCTestCase {
         // The transcript lives on this device on purpose, so quitting the app
         // must not be a way of losing the conversation.
         app.terminate()
-        app.launchArguments = ["--murmur-ui-testing"]
+        app.launchArguments = ["--murmur-ui-testing", "--murmur-stub-keyboard-overlap"]
         app.launch()
         XCTAssertTrue(line("今天的风", in: app).waitForExistence(timeout: 10))
     }
@@ -24,14 +24,20 @@ final class MurmurUITests: XCTestCase {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .landscapeLeft
         defer { XCUIDevice.shared.orientation = .portrait }
-        let app = launchApp()
+        // The deterministic 301pt geometry models a portrait software
+        // keyboard. This compatibility test deliberately rotates the device,
+        // so let UIKeyboardLayoutGuide provide the real landscape height.
+        let app = launchApp(stubKeyboard: false)
         let composer = app.textFields["moment-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.label, "这一刻的文字")
         enterMoment(composer, "横屏这一刻")
         let send = app.buttons["send-moment"]
         XCTAssertTrue(send.waitForExistence(timeout: 2))
-        XCTAssertTrue(send.isHittable)
+        XCTAssertTrue(
+            send.isHittable,
+            "send=\(send.frame) composer=\(composer.frame) window=\(app.windows.firstMatch.frame)"
+        )
         assertMinimumHitArea(send)
         send.tap()
         XCTAssertTrue(bubble(in: app).waitForExistence(timeout: 5))
@@ -40,7 +46,11 @@ final class MurmurUITests: XCTestCase {
     func testDarkAccessibilityXXXLKeepsPrimaryControlsReachable() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["--murmur-ui-testing", "--murmur-reset-transcript"]
+        app.launchArguments = [
+            "--murmur-ui-testing",
+            "--murmur-reset-transcript",
+            "--murmur-stub-keyboard-overlap",
+        ]
         app.launchEnvironment["AppleInterfaceStyle"] = "Dark"
         app.launchEnvironment["UIPreferredContentSizeCategoryName"] = "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge"
         app.launch()
@@ -113,8 +123,9 @@ final class MurmurUITests: XCTestCase {
         let app = launchApp()
         let composer = app.textFields["moment-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        let restingComposerY = composer.frame.minY
         composer.tap()
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
 
         // Typing without tapping the field again is the whole point: `typeText`
         // on an element that lost keyboard focus fails, so these two sends in a
@@ -123,7 +134,10 @@ final class MurmurUITests: XCTestCase {
             composer.typeText(line)
             app.buttons["send-moment"].tap()
             XCTAssertTrue(self.line(line, in: app).waitForExistence(timeout: 10))
-            XCTAssertTrue(app.keyboards.firstMatch.exists, "sending 「\(line)」 put the keyboard away")
+            XCTAssertTrue(
+                waitForComposerToRise(composer, from: restingComposerY, timeout: 3),
+                "sending 「\(line)」 put the keyboard away"
+            )
         }
     }
 
@@ -162,6 +176,7 @@ final class MurmurUITests: XCTestCase {
         let app = launchApp()
         let composer = app.textFields["moment-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        let initialRestingComposerY = composer.frame.minY
         for line in ["一句", "两句"] {
             composer.tap()
             composer.typeText(line)
@@ -173,7 +188,7 @@ final class MurmurUITests: XCTestCase {
 
         let chat = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
         chat.tap()
-        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertTrue(waitForComposerToRest(composer, at: initialRestingComposerY, timeout: 5))
         let restingComposer = composer.frame.minY
         let restingNewest = newest.frame.maxY
 
@@ -182,14 +197,15 @@ final class MurmurUITests: XCTestCase {
         // is not this test's business.  Waiting for it — instead of assuming a
         // budget — is what keeps the measurement below about the layout.
         composer.tap()
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 8),
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposer, timeout: 5),
                       "the keyboard did not come back when the field was reached for")
-        Thread.sleep(forTimeInterval: 1)
         XCTAssertLessThan(composer.frame.minY, restingComposer, "the keyboard did not raise the field")
 
         chat.tap()
-        Thread.sleep(forTimeInterval: 1.5)
-        XCTAssertFalse(app.keyboards.firstMatch.exists, "tapping the conversation did not dismiss the keyboard")
+        XCTAssertTrue(
+            waitForComposerToRest(composer, at: restingComposer, timeout: 5),
+            "tapping the conversation did not dismiss the keyboard"
+        )
         // Dismissing through the responder chain instead of the composer's own
         // focus left SwiftUI's keyboard inset applied: the field stayed hoisted
         // over a blank strip the height of the keyboard that had just left.
@@ -202,11 +218,66 @@ final class MurmurUITests: XCTestCase {
                        "the conversation did not settle back against the composer")
     }
 
+    func testDownwardDragDismissesTheChatKeyboardAndItCanReturn() throws {
+        continueAfterFailure = false
+        let app = launchApp()
+        let composer = app.textFields["moment-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        let restingComposerY = composer.frame.minY
+        composer.tap()
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
+
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.38))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        XCTAssertTrue(
+            waitForComposerToRest(composer, at: restingComposerY, timeout: 5),
+            "a deliberate downward transcript drag did not dismiss the keyboard"
+        )
+
+        composer.tap()
+        XCTAssertTrue(
+            waitForComposerToRise(composer, from: restingComposerY, timeout: 5),
+            "the keyboard did not return after drag dismissal"
+        )
+    }
+
+    func testSystemKeyboardGeometryTracksDismissAndRefocusWithoutABlankBand() throws {
+        continueAfterFailure = false
+        // This integration test needs an attached Simulator window with its
+        // software keyboard enabled. Headless XCTest can focus an off-screen
+        // virtual keyboard; the frame assertions intentionally reject that.
+        let app = launchApp(stubKeyboard: false)
+        let composer = app.textFields["moment-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        let restingComposerY = composer.frame.minY
+
+        composer.tap()
+        composer.typeText("系统键盘")
+        XCTAssertTrue(waitForSoftwareKeyboard(in: app, visible: true, timeout: 5))
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
+        let gap = app.keyboards.firstMatch.frame.minY - composer.frame.maxY
+        XCTAssertGreaterThanOrEqual(gap, 0)
+        // XCTest's Keyboard frame starts below the 44pt prediction strip.
+        // Together with the field's inner padding the normal distance is
+        // about 70pt; the screenshot's actual pill-to-keyboard gap is 10pt.
+        XCTAssertLessThan(gap, 90, "the composer left a blank band above the system keyboard")
+
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
+        XCTAssertTrue(waitForSoftwareKeyboard(in: app, visible: false, timeout: 5))
+        XCTAssertTrue(waitForComposerToRest(composer, at: restingComposerY, timeout: 5))
+
+        composer.tap()
+        XCTAssertTrue(waitForSoftwareKeyboard(in: app, visible: true, timeout: 5))
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
+    }
+
     func testDismissingTheKeyboardBringsALongConversationBackDown() throws {
         continueAfterFailure = false
         let app = launchApp()
         let composer = app.textFields["moment-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        let initialRestingComposerY = composer.frame.minY
         // Enough rows that the transcript actually scrolls: with a short one
         // the keyboard never moves the content offset, so the gap this guards
         // against has nowhere to hide.
@@ -223,17 +294,18 @@ final class MurmurUITests: XCTestCase {
         // loop above leaves it up.  Put it away before reading the gap this
         // whole test is measured against.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
-        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertTrue(waitForComposerToRest(composer, at: initialRestingComposerY, timeout: 5))
         let restGap = composer.frame.minY - newest.frame.maxY
 
         composer.tap()
-        Thread.sleep(forTimeInterval: 1.5)
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForComposerToRise(composer, from: initialRestingComposerY, timeout: 5))
         XCTAssertLessThanOrEqual(newest.frame.maxY, composer.frame.minY + 1)
 
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
-        Thread.sleep(forTimeInterval: 2)
-        XCTAssertFalse(app.keyboards.firstMatch.exists, "tapping the conversation did not dismiss the keyboard")
+        XCTAssertTrue(
+            waitForComposerToRest(composer, at: initialRestingComposerY, timeout: 5),
+            "tapping the conversation did not dismiss the keyboard"
+        )
         // The keyboard took roughly 300pt with it; if the conversation does
         // not follow back down, the newest line is left floating above the
         // composer with bare paper between them.
@@ -461,12 +533,76 @@ final class MurmurUITests: XCTestCase {
         composer.typeText(text)
     }
 
+    /// Layout tests inject a known software-keyboard overlap and wait for the
+    /// composer's actual accessibility frame. This cannot pass merely because
+    /// XCTest left an off-screen Keyboard element in its tree.
+    private func waitForComposerToRise(
+        _ composer: XCUIElement,
+        from restingY: CGFloat,
+        timeout: TimeInterval
+    ) -> Bool {
+        waitForComposer(composer, timeout: timeout) {
+            $0 < restingY - 100
+        }
+    }
+
+    private func waitForComposerToRest(
+        _ composer: XCUIElement,
+        at restingY: CGFloat,
+        timeout: TimeInterval
+    ) -> Bool {
+        waitForComposer(composer, timeout: timeout) {
+            abs($0 - restingY) <= 2
+        }
+    }
+
+    private func waitForComposer(
+        _ composer: XCUIElement,
+        timeout: TimeInterval,
+        positionMatches: @escaping (CGFloat) -> Bool
+    ) -> Bool {
+        let predicate = NSPredicate { _, _ in
+            composer.exists && positionMatches(composer.frame.minY)
+        }
+        let result = XCTWaiter.wait(
+            for: [XCTNSPredicateExpectation(predicate: predicate, object: nil)],
+            timeout: timeout
+        )
+        return result == .completed
+    }
+
+    private func waitForSoftwareKeyboard(
+        in app: XCUIApplication,
+        visible: Bool,
+        timeout: TimeInterval
+    ) -> Bool {
+        let predicate = NSPredicate { _, _ in
+            let screen = app.windows.firstMatch.frame
+            let isOnscreen = app.keyboards.allElementsBoundByIndex.contains { keyboard in
+                let frame = keyboard.frame
+                return frame.minY.isFinite && !frame.isEmpty
+                    && frame.intersection(screen).height > 1
+            }
+            return isOnscreen == visible
+        }
+        return XCTWaiter.wait(
+            for: [XCTNSPredicateExpectation(predicate: predicate, object: nil)],
+            timeout: timeout
+        ) == .completed
+    }
+
     /// Every test but the cold-launch one starts from an empty transcript:
     /// the history is persisted now, so without the reset each test would read
     /// whatever the one before it happened to say.
-    private func launchApp(arguments: [String] = []) -> XCUIApplication {
+    private func launchApp(
+        arguments: [String] = [],
+        stubKeyboard: Bool = true
+    ) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["--murmur-ui-testing", "--murmur-reset-transcript"] + arguments
+        app.launchArguments = [
+            "--murmur-ui-testing",
+            "--murmur-reset-transcript",
+        ] + (stubKeyboard ? ["--murmur-stub-keyboard-overlap"] : []) + arguments
         app.launch()
         return app
     }
@@ -489,11 +625,15 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["draft-photo"].waitForExistence(timeout: 10))
 
+        let restingComposerY = composer.frame.minY
         composer.tap()
-        let keyboard = app.keyboards.firstMatch
-        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
-        Thread.sleep(forTimeInterval: 1.0)
-        XCTAssertLessThan(keyboard.frame.minY - composer.frame.maxY, 95)
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
+        XCTAssertEqual(
+            restingComposerY - composer.frame.minY,
+            229,
+            accuracy: 12,
+            "a draft photo added extra keyboard clearance"
+        )
     }
 
     // MARK: - 当年今日
@@ -623,12 +763,114 @@ final class MurmurUITests: XCTestCase {
         )
         wait(for: [roomGone], timeout: 5)
         // Back on 当年今日's calendar, and today now carries a mark.
-        XCTAssertTrue(app.buttons["onthisday-entry"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.buttons[archiveDayIdentifier(daysAgo: 0)].waitForExistence(timeout: 5)
+        )
         // The conversation is untouched: still on its empty state, with no row
         // of the room's anywhere in it.
         app.buttons["tab-chat"].tap()
         XCTAssertTrue(app.staticTexts["发来眼前的一刻。"].waitForExistence(timeout: 5))
         XCTAssertFalse(line("那天的天气", in: app).exists)
+    }
+
+    func testTodaysArchivedRoomCanContinueTwiceWithoutReplacingTheFirstReply() throws {
+        let app = launchApp(arguments: ["--murmur-seed-today-archive"])
+        let tab = app.buttons["tab-onThisDay"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 5))
+        tab.tap()
+        let day = app.buttons[archiveDayIdentifier(daysAgo: 0)]
+        XCTAssertTrue(day.waitForExistence(timeout: 8))
+        day.tap()
+
+        let composer = app.textFields["archive-day-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        let restingComposerY = composer.frame.minY
+        composer.tap()
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
+        composer.typeText("日期续聊第一句")
+        app.buttons["archive-day-send"].tap()
+        XCTAssertTrue(line("接住第一句", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            waitForComposerToRise(composer, from: restingComposerY, timeout: 3),
+            "sending an archived line resigned its composer"
+        )
+
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
+        XCTAssertTrue(waitForComposerToRest(composer, at: restingComposerY, timeout: 5))
+
+        composer.tap()
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
+        composer.typeText("日期续聊第二句")
+        app.buttons["archive-day-send"].tap()
+        XCTAssertTrue(line("接住第二句", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(line("接住第一句", in: app).exists)
+    }
+
+    func testAHistoricalArchivedDayCanContinueAndKeepsItsEarlierAnswer() throws {
+        let app = launchApp(arguments: ["--murmur-seed-historical-archive"])
+        let tab = app.buttons["tab-onThisDay"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 5))
+        tab.tap()
+        let day = app.buttons[archiveDayIdentifier(daysAgo: 2)]
+        XCTAssertTrue(day.waitForExistence(timeout: 8))
+        day.tap()
+
+        XCTAssertTrue(line("这是一条旧日期里的回答", in: app).waitForExistence(timeout: 5))
+        let composer = app.textFields["archive-day-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        let restingComposerY = composer.frame.minY
+        composer.tap()
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
+
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.42))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        XCTAssertTrue(
+            waitForComposerToRest(composer, at: restingComposerY, timeout: 5),
+            "a downward drag did not dismiss the historical-day keyboard"
+        )
+
+        composer.tap()
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
+        composer.typeText("日期续聊第一句")
+        app.buttons["archive-day-send"].tap()
+
+        XCTAssertTrue(line("接住第一句", in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(line("这是一条旧日期里的回答", in: app).exists)
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 3))
+
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 3))
+        back.tap()
+        XCTAssertTrue(app.buttons["onthisday-entry"].waitForExistence(timeout: 5))
+        XCTAssertFalse(composer.exists, "leaving an archive day retained its composer")
+    }
+
+    func testHistoricalContinuationFailureRestoresTheDraft() throws {
+        let app = launchApp(arguments: [
+            "--murmur-seed-historical-archive", "--murmur-fail-first-send"
+        ])
+        let tab = app.buttons["tab-onThisDay"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 5))
+        tab.tap()
+        let day = app.buttons[archiveDayIdentifier(daysAgo: 2)]
+        XCTAssertTrue(day.waitForExistence(timeout: 8))
+        day.tap()
+
+        let composer = app.textFields["archive-day-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        let restingComposerY = composer.frame.minY
+        composer.tap()
+        XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
+        composer.typeText("失败后还在")
+        app.buttons["archive-day-send"].tap()
+
+        XCTAssertTrue(line("暂时没有连上 Murmur。", in: app).waitForExistence(timeout: 10))
+        XCTAssertEqual(composer.value as? String, "失败后还在")
+        XCTAssertTrue(
+            waitForComposerToRise(composer, from: restingComposerY, timeout: 3),
+            "a failed continuation did not preserve focus"
+        )
     }
 
     /// A reading that never lands says why and offers the same upload again,
@@ -741,6 +983,15 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(
             app.descendants(matching: .any)["photo-room-photo"].waitForExistence(timeout: 10)
         )
+    }
+
+    private func archiveDayIdentifier(daysAgo: Int) -> String {
+        let calendar = Calendar(identifier: .gregorian)
+        let date = calendar.date(byAdding: .day, value: -daysAgo, to: Date()) ?? Date()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return "archive-day-\(formatter.string(from: date))"
     }
 
 }

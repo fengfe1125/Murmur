@@ -124,6 +124,9 @@ class Job:
     # that opens a 当年今日 photo room, which the worker answers by reading
     # the image rather than replying to it.
     intent: str | None = None
+    # A bounded, ordered set of earlier App moments whose linked Memory rows
+    # should replace the generic recent-history window for this turn.
+    context_moment_ids: tuple[str, ...] = ()
 
 
 # The non-ordinary things an inbound moment can be asking for.  NULL is the
@@ -218,6 +221,7 @@ CREATE TABLE IF NOT EXISTS app_moments (
     image_path       TEXT,
     preview_path     TEXT,
     intent           TEXT CHECK(intent IS NULL OR intent IN ('photo_reading')),
+    context_moment_ids TEXT,
     request_digest   TEXT NOT NULL,
     idempotency_key  TEXT NOT NULL,
     status           TEXT NOT NULL,
@@ -355,6 +359,12 @@ class AppStore:
             # CHECK in SCHEMA is not reproduced here — SQLite cannot add one
             # to an existing table, and the write path validates the value.
             self.conn.execute("ALTER TABLE app_moments ADD COLUMN intent TEXT")
+        if "context_moment_ids" not in moment_columns:
+            # Old moments did not explicitly resume an archived room.  NULL is
+            # therefore the exact backward-compatible value for every row.
+            self.conn.execute(
+                "ALTER TABLE app_moments ADD COLUMN context_moment_ids TEXT"
+            )
         if "proactive_memory_finalized" not in moment_columns:
             # Rows from before the durable continuity outbox predate this
             # workflow and must not be replayed as unfinished work.
@@ -723,9 +733,17 @@ class AppStore:
         idempotency_key: str,
         request_digest: str,
         intent: str | None = None,
+        context_moment_ids: list[str] | tuple[str, ...] | None = None,
     ) -> MomentResult:
         if intent is not None and intent not in MOMENT_INTENTS:
             raise ValueError("unknown moment intent")
+        context_json = (
+            json.dumps(
+                list(context_moment_ids), ensure_ascii=False, separators=(",", ":")
+            )
+            if context_moment_ids is not None
+            else None
+        )
         now = _iso()
         with self._tx() as db:
             user = db.execute(
@@ -764,10 +782,11 @@ class AppStore:
                     if inflight:
                         raise MomentInFlight("another moment is still being processed")
                     db.execute(
-                        "UPDATE app_moments SET note=?,image_path=?,intent=?,status='queued',"
+                        "UPDATE app_moments SET note=?,image_path=?,intent=?,"
+                        "context_moment_ids=?,status='queued',"
                         "scene=NULL,move=NULL,memory_entry_id=NULL,preview_path=NULL,"
                         "push_preview=NULL,failure_retryable=NULL,updated_at=? WHERE id=?",
-                        (note, image_path, intent, now, existing["id"]),
+                        (note, image_path, intent, context_json, now, existing["id"]),
                     )
                     db.execute("DELETE FROM app_events WHERE moment_id=?", (existing["id"],))
                     db.execute(
@@ -807,10 +826,11 @@ class AppStore:
             moment_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
             db.execute(
                 "INSERT INTO app_moments"
-                "(id,user_id,source,note,image_path,intent,request_digest,idempotency_key,"
-                "status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (moment_id, user_id, "inbound", note, image_path, intent, request_digest,
-                 idempotency_key, "queued", now, now),
+                "(id,user_id,source,note,image_path,intent,context_moment_ids,"
+                "request_digest,idempotency_key,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (moment_id, user_id, "inbound", note, image_path, intent, context_json,
+                 request_digest, idempotency_key, "queued", now, now),
             )
             db.execute(
                 "INSERT INTO app_jobs(id,moment_id,created_at,updated_at) VALUES(?,?,?,?)",
@@ -942,7 +962,8 @@ class AppStore:
         with self._tx() as db:
             while True:
                 row = db.execute(
-                    "SELECT j.id,j.moment_id,j.attempts,m.user_id,m.note,m.image_path,m.intent "
+                    "SELECT j.id,j.moment_id,j.attempts,m.user_id,m.note,m.image_path,m.intent,"
+                    "m.context_moment_ids "
                     "FROM app_jobs j JOIN app_moments m ON m.id=j.moment_id "
                     "JOIN app_users u ON u.id=m.user_id "
                     "WHERE (j.status='queued' OR (j.status='processing' AND j.lease_until<?)) "
@@ -982,8 +1003,20 @@ class AppStore:
                     "UPDATE app_moments SET status='processing',updated_at=? WHERE id=?",
                     (now, row["moment_id"]),
                 )
-                return Job(row["id"], row["moment_id"], row["user_id"], row["note"],
-                           row["image_path"], row["intent"])
+                try:
+                    stored_context = json.loads(row["context_moment_ids"] or "[]")
+                except (TypeError, ValueError):
+                    stored_context = []
+                context_ids = (
+                    tuple(stored_context)
+                    if isinstance(stored_context, list)
+                    and all(isinstance(value, str) for value in stored_context)
+                    else ()
+                )
+                return Job(
+                    row["id"], row["moment_id"], row["user_id"], row["note"],
+                    row["image_path"], row["intent"], context_ids,
+                )
 
     def renew_job(
         self, job: Job, worker_id: str, lease: timedelta = timedelta(minutes=3)

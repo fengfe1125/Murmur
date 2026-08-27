@@ -162,6 +162,79 @@ class AppWorkerTests(unittest.TestCase):
         self.assertIn("语气底色", context)
         self.assertNotIn("0.7", context)
 
+    def test_engine_processor_restores_owned_archive_context_in_client_order(self):
+        def finish(user_id: str, key: str, note: str, answer: str):
+            result = self.store.create_moment(
+                user_id=user_id,
+                note=note,
+                image_path=None,
+                idempotency_key=key,
+                request_digest=key,
+            )
+
+            def processor(_job, _memory, _on_bubble):
+                return ProcessedMoment(
+                    Reply("desk", "speak", [answer]),
+                    Moment.text_only(self.cfg.tz),
+                    None,
+                )
+
+            AppWorker(
+                self.store, self.cfg, self.settings, processor=processor
+            ).process_one()
+            return result.moment_id
+
+        first = finish(self.enrollment.user_id, "context-first", "第一轮", "第一答")
+        second = finish(self.enrollment.user_id, "context-second", "第二轮", "第二答")
+
+        other_code = self.store.create_invite()
+        other = self.store.redeem_invite(
+            code=other_code,
+            key_id="dev-other-context",
+            public_key=None,
+            receipt=None,
+            counter=0,
+            environment="development",
+        )
+        foreign = finish(other.user_id, "context-foreign", "别人的轮次", "别人的回答")
+
+        self.store.create_moment(
+            user_id=self.enrollment.user_id,
+            note="接着说",
+            image_path=None,
+            idempotency_key="context-current",
+            request_digest="context-current",
+            context_moment_ids=[second, foreign, "missing-moment", first],
+        )
+        job = self.store.claim_job("context-worker")
+        captured: dict = {}
+
+        def fake_respond(*_args, **kwargs):
+            captured.update(kwargs)
+            return Reply("desk", "speak", ["接住了"])
+
+        with Memory(self.settings.memory_db_path) as memory:
+            with patch("murmur.app_worker.respond", side_effect=fake_respond):
+                EngineMomentProcessor(self.cfg, self.root)(
+                    job, memory, lambda _text: None
+                )
+
+        self.assertEqual(
+            [entry.note for entry in captured["history_entries"]],
+            ["第二轮", "第一轮"],
+        )
+
+        captured.clear()
+        no_owned_context = replace(
+            job, context_moment_ids=(foreign, "missing-moment")
+        )
+        with Memory(self.settings.memory_db_path) as memory:
+            with patch("murmur.app_worker.respond", side_effect=fake_respond):
+                EngineMomentProcessor(self.cfg, self.root)(
+                    no_owned_context, memory, lambda _text: None
+                )
+        self.assertIsNone(captured["history_entries"])
+
     def test_post_delivery_continuity_failure_does_not_reopen_the_moment(self):
         result, _ = self.queue()
         cfg = replace(self.cfg, open_loops=True, affect=True)

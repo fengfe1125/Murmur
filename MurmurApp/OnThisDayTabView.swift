@@ -11,13 +11,21 @@ struct OnThisDayTabView: View {
     /// Owned by `MurmurShell`, so leaving the tab does not throw away the
     /// album read that filled it.
     @ObservedObject var onThisDay: OnThisDayModel
+    /// The calendar's marks change while a photo room cover is open.  Watching
+    /// only the session leaves the calendar stale until another redraw.
+    @ObservedObject private var archive: MurmurArchive
     @State private var month = Date()
     @State private var openDay: Date?
     @State private var showBrowser = false
     @Environment(\.scenePhase) private var scenePhase
 
-    private var archive: MurmurArchive { model.archive }
     private let calendar = Calendar.murmur
+
+    init(model: MurmurSessionModel, onThisDay: OnThisDayModel) {
+        _model = ObservedObject(wrappedValue: model)
+        _onThisDay = ObservedObject(wrappedValue: onThisDay)
+        _archive = ObservedObject(wrappedValue: model.archive)
+    }
 
     var body: some View {
         NavigationStack {
@@ -61,7 +69,7 @@ struct OnThisDayTabView: View {
                 }
             }
             .navigationDestination(item: $openDay) { day in
-                ArchiveDayView(archive: archive, day: day)
+                ArchiveDayView(model: model.makeArchiveDay(day: day))
             }
         }
         .task {

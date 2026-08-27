@@ -663,6 +663,7 @@ final class MurmurSessionModelTests: XCTestCase {
     }
 
     func testCancelDuringPhotoPrepareDiscardsFileAndIgnoresLateResult() async throws {
+        let before = Set(murmurTemporaryFiles())
         let source = try writeTestJPEG(size: CGSize(width: 1_200, height: 900), name: "cancel-prepare")
         let api = FakeMurmurAPIClient()
         let model = MurmurSessionModel(api: api, bubblePacing: .instant)
@@ -674,8 +675,8 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertNil(model.draftPhoto)
         XCTAssertNotEqual(model.phase, .ready)
         XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
-        let leftover = murmurTemporaryFiles()
-        XCTAssertTrue(leftover.isEmpty, "leftover photo files: \(leftover)")
+        let leftover = Set(murmurTemporaryFiles()).subtracting(before)
+        XCTAssertTrue(leftover.isEmpty, "leftover photo files: \(leftover.sorted())")
     }
 
     func testPreparingPhotoPhaseIsEnteredWithinOneHundredMilliseconds() async {
@@ -703,6 +704,11 @@ final class MurmurSessionModelTests: XCTestCase {
     }
 
     func testThirtyCompletedMomentsLeaveNoHistoryOrTemporaryFiles() async throws {
+        // Whatever another suite left in the shared temporary directory is not
+        // this test's business — and which suite ran first is decided by class
+        // order in the binary, so adding a test class elsewhere could turn this
+        // red.  Only files this test's own thirty moments leave behind count.
+        let before = Set(murmurTemporaryFiles())
         let api = FakeMurmurAPIClient()
         let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
@@ -717,8 +723,8 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertEqual(model.bubbles.count, 1)
         XCTAssertEqual(model.currentNote, "第30刻")
         XCTAssertFalse(FileManager.default.fileExists(atPath: model.currentPhoto?.originalURL.path ?? ""))
-        let leftover = murmurTemporaryFiles()
-        XCTAssertTrue(leftover.isEmpty, "leftover photo files: \(leftover)")
+        let leftover = Set(murmurTemporaryFiles()).subtracting(before)
+        XCTAssertTrue(leftover.isEmpty, "leftover photo files: \(leftover.sorted())")
     }
 
     func testPushSyncSkipsAllowedTokenUntilItArrives() {
@@ -794,7 +800,7 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
         .init(userID: "test-user", deviceID: "test-device", keyID: "test-key")
     }
 
-    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?) async throws -> MomentReceipt {
+    func createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String, intent: MurmurMomentIntent?, contextMomentIDs: [String]) async throws -> MomentReceipt {
         idempotencyKeys.append(idempotencyKey)
         createCount += 1
         if mode == .idempotencyConflict {
@@ -920,4 +926,90 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
 
 private extension UIColor {
     static let systemCoralForTest = UIColor(red: 0.95, green: 0.35, blue: 0.30, alpha: 1)
+}
+
+final class MurmurKeyboardLayoutTests: XCTestCase {
+    func testBottomClearanceStaysStableUntilKeyboardPassesTheTabBar() {
+        let overlaps: [CGFloat] = [0, 40, 72, 73, 300, 73, 72, 40, 0]
+
+        XCTAssertEqual(
+            overlaps.map { MurmurKeyboardClearance.total(overlap: $0, resting: 72) },
+            [72, 72, 72, 73, 300, 73, 72, 72, 72]
+        )
+        XCTAssertEqual(
+            overlaps.map { MurmurKeyboardClearance.supplemental(overlap: $0, resting: 72) },
+            [0, 0, 0, 1, 228, 1, 0, 0, 0]
+        )
+    }
+
+    func testBottomClearanceTreatsMissingOrInvalidKeyboardGeometryAsHidden() {
+        let overlaps: [CGFloat] = [-30, 0, .nan, .infinity]
+
+        XCTAssertEqual(
+            overlaps.map { MurmurKeyboardClearance.total(overlap: $0, resting: 72) },
+            [72, 72, 72, 72]
+        )
+        XCTAssertEqual(
+            overlaps.map { MurmurKeyboardClearance.supplemental(overlap: $0, resting: 72) },
+            [0, 0, 0, 0]
+        )
+    }
+
+    func testLayoutGuideOverlapExcludesTheRestingHomeIndicator() {
+        XCTAssertEqual(
+            MurmurKeyboardClearance.overlap(
+                containerBottom: 874,
+                keyboardTop: 539,
+                restingBottomInset: 34
+            ),
+            301
+        )
+        XCTAssertEqual(
+            MurmurKeyboardClearance.overlap(
+                containerBottom: 874,
+                keyboardTop: 874,
+                restingBottomInset: 34
+            ),
+            0
+        )
+    }
+
+    func testRotatedLayoutGuideGeometryUsesTheLandscapeWindowSpace() {
+        XCTAssertEqual(
+            MurmurKeyboardClearance.overlap(
+                containerBottom: 402,
+                keyboardTop: 174,
+                restingBottomInset: 21
+            ),
+            207
+        )
+    }
+
+    @MainActor
+    func testFocusWithoutASoftwareKeyboardDoesNotCreateOverlap() {
+        let keyboard = MurmurKeyboardState()
+        keyboard.focusDidChange(true)
+        XCTAssertEqual(keyboard.overlap, 0)
+    }
+
+    @MainActor
+    func testALateHideNotificationCannotOverwriteLayoutGuideGeometry() {
+        let keyboard = MurmurKeyboardState()
+        keyboard.updateFromLayoutGuide(overlap: 301)
+        NotificationCenter.default.post(
+            name: UIResponder.keyboardWillHideNotification,
+            object: nil,
+            userInfo: [
+                UIResponder.keyboardFrameEndUserInfoKey: NSValue(
+                    cgRect: CGRect(x: 0, y: 874, width: 402, height: 335)
+                ),
+                UIResponder.keyboardAnimationDurationUserInfoKey: 0,
+            ]
+        )
+        NotificationCenter.default.post(name: UIResponder.keyboardDidHideNotification, object: nil)
+        XCTAssertEqual(keyboard.overlap, 301)
+
+        keyboard.updateFromLayoutGuide(overlap: 0)
+        XCTAssertEqual(keyboard.overlap, 0)
+    }
 }

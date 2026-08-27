@@ -68,6 +68,62 @@ final class MurmurNotificationPolicyTests: XCTestCase {
     }
 }
 
+final class MurmurMomentMultipartTests: XCTestCase {
+    func testArchiveContextIsEncodedWhileOrdinaryMomentsKeepTheOldBody() async throws {
+        let recorder = RecoveryRequestRecorder()
+        RecoveryURLProtocol.handler = { request in
+            recorder.record(request)
+            let url = try XCTUnwrap(request.url)
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: url,
+                statusCode: url.path == "/v1/moments" ? 202 : 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            ))
+            if url.path == "/v1/auth/challenges" {
+                return (response, Data(#"{"challenge_id":"moment-challenge","challenge":"Y2hhbGxlbmdl","expires_at":null}"#.utf8))
+            }
+            return (response, Data(#"{"moment_id":"moment-response","status":"queued"}"#.utf8))
+        }
+        defer { RecoveryURLProtocol.handler = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RecoveryURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let client = URLSessionMurmurAPIClient(
+            baseURL: try XCTUnwrap(URL(string: "https://murmur.test")),
+            authenticator: MomentAuthenticator(),
+            session: session
+        )
+
+        _ = try await client.createMoment(
+            note: "接着说",
+            photo: nil,
+            idempotencyKey: "context-key",
+            intent: nil,
+            contextMomentIDs: ["older", "latest"]
+        )
+        _ = try await client.createMoment(
+            note: "普通聊天",
+            photo: nil,
+            idempotencyKey: "ordinary-key",
+            intent: nil
+        )
+
+        let momentRequests = recorder.requests.filter { $0.url.path == "/v1/moments" }
+        XCTAssertEqual(momentRequests.count, 2)
+        let contextBody = String(
+            data: try XCTUnwrap(momentRequests[0].body), encoding: .utf8
+        ) ?? ""
+        let ordinaryBody = String(
+            data: try XCTUnwrap(momentRequests[1].body), encoding: .utf8
+        ) ?? ""
+        XCTAssertTrue(contextBody.contains("name=\"context_moment_ids\""))
+        XCTAssertTrue(contextBody.contains("[\"older\",\"latest\"]"))
+        XCTAssertFalse(ordinaryBody.contains("context_moment_ids"))
+    }
+}
+
 final class MurmurEnrollmentRecoveryTests: XCTestCase {
     func testLostEnrollmentResponseRecoversPendingIdentityWithoutAttestingAgain() async throws {
         let recorder = RecoveryRequestRecorder()
@@ -260,6 +316,32 @@ private actor RecoveryAuthenticator: MurmurAuthenticator {
     func completeEnrollment(_ identity: MurmurIdentity) { self.identity = identity }
     func discardPendingEnrollmentKey() { discardCalls += 1; pendingKeyID = nil }
     func clearIdentity() { identity = nil; pendingKeyID = nil }
+}
+
+private actor MomentAuthenticator: MurmurAuthenticator {
+    nonisolated let environment = "development"
+
+    func publicHeaders() -> [String: String] { [:] }
+    func storedIdentity() -> MurmurIdentity? {
+        .init(userID: "moment-user", deviceID: "moment-device", keyID: "moment-key")
+    }
+    func pendingEnrollmentKeyID() -> String? { nil }
+    func enrollmentKeyID() throws -> String { "moment-key" }
+    func enrollmentAttestation(for challenge: AppAttestChallenge, keyID: String) -> String {
+        "moment-attestation"
+    }
+    func assertion(
+        for challenge: AppAttestChallenge,
+        method: String,
+        path: String,
+        bodyDigest: Data,
+        keyID: String
+    ) -> String {
+        "moment-assertion"
+    }
+    func completeEnrollment(_ identity: MurmurIdentity) {}
+    func discardPendingEnrollmentKey() {}
+    func clearIdentity() {}
 }
 
 private final class RecoveryRequestRecorder: @unchecked Sendable {

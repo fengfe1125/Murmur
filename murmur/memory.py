@@ -369,6 +369,19 @@ class Memory:
         ).fetchall()
         return [_row_to_entry(r) for r in reversed(rows)]
 
+    def entries_by_ids(self, entry_ids: list[int]) -> list[Entry]:
+        """Return committed Memory entries in the caller's requested order."""
+        if not entry_ids:
+            return []
+        placeholders = ",".join("?" for _ in entry_ids)
+        rows = self.conn.execute(
+            f"SELECT * FROM entries WHERE id IN ({placeholders}) "
+            "AND delivery_state='committed'",
+            entry_ids,
+        ).fetchall()
+        by_id = {int(row["id"]): _row_to_entry(row) for row in rows}
+        return [by_id[entry_id] for entry_id in entry_ids if entry_id in by_id]
+
     def spot_visits(self, chat_id: int, spot: str | None, bucket: str | None) -> int:
         """同一个匿名地点、同一个时段，以前来过几次。
         没有定位就返回 0——光凭时段说"你又是这个点"太廉价，容易翻车。"""
