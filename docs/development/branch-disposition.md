@@ -8,7 +8,7 @@
 |---|---|
 | `main` | 唯一长期分支；本地已同步到 1205a27。已合并 #14、#15、#16，不代表已部署。 |
 | `codex/chore/repo/organize-source-layout` | [PR #17](https://github.com/fengfe1125/Murmur/pull/17)，待桥接更新器线上安装确认后才能合并。 |
-| `codex/chore/repo/record-merged-work-cleanup` | 本清理记录独立 PR，基于 #17；不绕过迁移门禁，随后按顺序合入 main。 |
+| `codex/chore/repo/record-merged-work-cleanup` | [PR #18](https://github.com/fengfe1125/Murmur/pull/18)，基于 #17；不绕过迁移门禁，随后按顺序合入 main。 |
 | 本地 `docs/repo/name-branches-by-what-changed`（d6b6cdc） | 命名原则已吸收到现行协作规范；原提交仍独有，保留，不用旧 README 覆盖新定位。 |
 | 本地 `fix/reliability-and-metrics`（9e694a9） | 原本地可靠性工作保留；其修复已通过保留远端历史的 #14 合入，原提交不强制删掉。 |
 | `stash@{0}`（9d1318eef3927947f84eecb220b61c4f429bb1fc） | 原样保留，没有 apply、pop 或 drop。 |
