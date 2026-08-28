@@ -1,12 +1,12 @@
 # 分支、worktree 与未提交资料处置清单
 
-> 状态：现状记录｜适用：2026-08-28 仓库整理｜核验：2026-08-28｜依据：main 1205a27；迁移提交 6e46f5a；Git refs、PR 与 worktree 实查
+> 状态：现状记录｜适用：2026-08-28 仓库整理及后续 PR 同步｜核验：2026-08-28｜依据：清理基线 main 1205a27；后续 #19 合并 135e57f；Git refs、PR 与 worktree 实查
 
 ## 当前保留
 
 | 引用 | 去向与理由 |
 |---|---|
-| `main` | 唯一长期分支；本地已同步到 1205a27。已合并 #14、#15、#16，不代表已部署。 |
+| `main` | 唯一长期分支；本地已同步到 135e57f。已合并 #14、#15、#16 及独立 UI 修复 #19，不代表已部署。 |
 | `codex/chore/repo/organize-source-layout` | [PR #17](https://github.com/fengfe1125/Murmur/pull/17)，待桥接更新器线上安装确认后才能合并。 |
 | `codex/chore/repo/record-merged-work-cleanup` | [PR #18](https://github.com/fengfe1125/Murmur/pull/18)，基于 #17；不绕过迁移门禁，随后按顺序合入 main。 |
 | 本地 `docs/repo/name-branches-by-what-changed`（d6b6cdc） | 命名原则已吸收到现行协作规范；原提交仍独有，保留，不用旧 README 覆盖新定位。 |

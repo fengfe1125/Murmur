@@ -16,6 +16,8 @@
 [GitHub 全部检查](https://github.com/fengfe1125/Murmur/actions/runs/33138224775)：Python 3.11／3.14、iOS 构建与单元测试、Android Debug、仓库检查和 Repository gate。
 PR 仍为草稿，未合并、未部署。
 
+以下是初始迁移提交 `6e46f5a` 的核验记录；之后独立合入的 UI 修复见下节。
+
 - 174 个原有受跟踪文件有逐文件 [旧新路径映射](path-mapping.tsv)；端内组织未重构。
 - [原始 34 个测试文件](test-baseline.txt) 全部保留，现共 38 个测试文件。迁移后本机 Python 3.11／3.14 lint 与全量测试分别通过（129.4s／133.8s）。
 - 全部有效文档的状态字段和本地链接检查通过；脚本 Bash 语法通过；忽略规则覆盖移动端本地配置、构建输出、密钥和根目录运行数据。
@@ -26,6 +28,23 @@ PR 仍为草稿，未合并、未部署。
 - 根目录 `.env`、iOS 本地 xcconfig、Android local.properties 哈希与迁移前一致；根目录 `.venv` 与数据位置不变，仅重装本地 editable 入口到 `./server`。
 
 若迁移 PR 后续更新提交，须重新验收；上述绿色结果只对应明确记录的 SHA，不能外推到未来版本。
+
+## 后续独立修复 #19
+
+[PR #19](https://github.com/fengfe1125/Murmur/pull/19) 的标签栏胶囊横移动画修复已独立合入 main，合并提交为 `135e57f44cd7d4957b91297cb79a8a39bfdfe5e2`。
+审阅提交 `8062a0d` 时，代码与需求未发现阻断问题；分支名缺少 `codex/` 前缀属于非阻断规范偏差，没有为此重写提交或重建 PR。
+CI 构建、单元测试与统一门禁通过；另在独立 iPhone 17／iOS 26.5 模拟器上验证了以下三项 UI 回归，均通过：
+
+- `testPressingAStopMovesTheSelectionToIt`
+- `testTheTabsNotOnScreenAreOutOfReach`
+- `testDarkAccessibilityXXXLKeepsPrimaryControlsReachable`
+
+这些自动测试验证选中状态、隐藏页面隔离和大字体可达性，不构成逐帧流畅度测量。
+专用模拟器在测试结束后已移除；没有重置原有模拟器或访问生产数据。
+
+修复已通过普通 merge 同步到 #17（`4838dac6e030e0db698a0d9a08f7f360e0874aed`）和 #18，旧、新路径的 Swift 文件哈希一致，未丢失修复。
+[同步后的 #17 检查](https://github.com/fengfe1125/Murmur/actions/runs/33152259471) 独立验收新 SHA，不能沿用初始迁移的绿色记录。
+#17／#18 仍保持草稿；合入客户端修复不解除下面的线上桥接安装门禁。
 
 ## 待部署，不越过生产门禁
 
