@@ -146,23 +146,36 @@ struct MurmurShell: View {
 /// One pane of glass with three stops on it, and one pill that travels between
 /// them rather than blinking out on one and in on the next.
 ///
-/// The pill is a single view that is never inserted or removed — only its frame
-/// changes, published by whichever stop is selected through
-/// `matchedGeometryEffect`.  That is the whole trick, and it was arrived at the
-/// hard way: giving each stop its own conditional pill and matching them by
-/// `glassEffectID` looks right in principle and, recorded frame by frame, is a
-/// cross-fade — the old pill fading out where it stood while the new one faded
-/// in where it stood.  A view that is never removed has no fade available to it
-/// and has to move.
+/// The pill's place is arithmetic: three stops divide the row equally, so the
+/// selected one begins at `stopWidth * index` and is `stopWidth` across.
+/// Animating that offset is the travel.
+///
+/// It was `matchedGeometryEffect` before — each stop publishing its frame to
+/// one follower pill — and both faults came from there.  A follower has no
+/// frame of its own, so on the tick where the outgoing source has gone and the
+/// incoming one has not been measured yet it takes the size it is offered,
+/// which is the whole bar; the next frame contracts it onto the new stop.
+/// Tapping the middle therefore read as both ends flowing inward rather than
+/// as the pill crossing over from where it stood.  The rest of the travel then
+/// cost a layout round trip per frame, which is the stutter.  Arithmetic has
+/// neither problem: the pill has a definite frame on every frame, the first
+/// one included.
+///
+/// An earlier attempt gave each stop its own conditional pill matched by
+/// `glassEffectID`; recorded frame by frame that is a cross-fade — the old
+/// pill fading out where it stood while the new one faded in where it stood.
+/// That lesson still holds and is why there is exactly one pill here: a view
+/// that is never inserted or removed has no fade available to it and has to
+/// move.
 ///
 /// On iOS 26 that one travelling shape is real glass, so it refracts and
 /// wobbles as it goes; before that it is a plain tinted capsule that slides.
 struct MurmurTabBar: View {
     @Binding var selection: MurmurTab
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Namespace private var pill
-
-    private static let pillID = "murmur-tab-pill"
+    /// One stop's width, measured from the row rather than assumed: the bar is
+    /// as wide as the window less its margins, and it grows with Dynamic Type.
+    @State private var stopWidth: CGFloat = 0
 
     var body: some View {
         stops
@@ -174,31 +187,36 @@ struct MurmurTabBar: View {
             .padding(.bottom, 6)
     }
 
-    /// The one pill.  `isSource: false` makes it a follower: it takes the frame
-    /// the selected stop publishes, and animating that frame is the travel.
-    @ViewBuilder
+    private var selectedIndex: Int {
+        MurmurTab.allCases.firstIndex(of: selection) ?? 0
+    }
+
+    /// The one pill: never inserted, never removed, only moved.
     private var travellingPill: some View {
+        pillShape
+            .frame(width: stopWidth)
+            .offset(x: stopWidth * CGFloat(selectedIndex))
+            // Nothing to draw before the row has been measured.  A full-width
+            // capsule for a single frame at launch is the very artefact this
+            // is here to remove.
+            .opacity(stopWidth > 0 ? 1 : 0)
+    }
+
+    @ViewBuilder
+    private var pillShape: some View {
         if #available(iOS 26.0, *) {
             Capsule()
                 .fill(.clear)
                 .glassEffect(.regular.tint(MurmurTheme.accent), in: Capsule())
-                .matchedGeometryEffect(id: Self.pillID, in: pill, isSource: false)
         } else {
-            Capsule()
-                .fill(MurmurTheme.accent)
-                .matchedGeometryEffect(id: Self.pillID, in: pill, isSource: false)
+            Capsule().fill(MurmurTheme.accent)
         }
     }
 
     private var stops: some View {
         HStack(spacing: 0) {
             ForEach(MurmurTab.allCases) { tab in
-                MurmurTabButton(
-                    tab: tab,
-                    isSelected: selection == tab,
-                    pill: pill,
-                    pillID: Self.pillID
-                ) {
+                MurmurTabButton(tab: tab, isSelected: selection == tab) {
                     guard selection != tab else { return }
                     // A spring rather than a curve, and an underdamped one: the
                     // pill arrives, overshoots a hair and settles, which is what
@@ -212,6 +230,16 @@ struct MurmurTabBar: View {
                 }
             }
         }
+        // The width is measured out of any animation on purpose.  It changes on
+        // rotation and on Dynamic Type, never on a tap, and one caught by the
+        // tap's spring would stretch the pill on its way across.
+        .onGeometryChange(for: CGFloat.self) {
+            $0.size.width / CGFloat(MurmurTab.allCases.count)
+        } action: { width in
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { stopWidth = width }
+        }
         // Deliberately no identifier on the bar itself: one here overrides
         // every child's, and all three stops came back as "murmur-tab-bar".
     }
@@ -220,8 +248,6 @@ struct MurmurTabBar: View {
 private struct MurmurTabButton: View {
     let tab: MurmurTab
     let isSelected: Bool
-    let pill: Namespace.ID
-    let pillID: String
     let action: () -> Void
 
     var body: some View {
@@ -239,12 +265,6 @@ private struct MurmurTabButton: View {
             // signal the colour cannot carry on its own.
             .foregroundStyle(isSelected ? MurmurTheme.onAccent : MurmurTheme.secondaryInk)
             .frame(maxWidth: .infinity, minHeight: 44)
-            // The selected stop publishes the frame; it draws nothing itself.
-            .background {
-                if isSelected {
-                    Color.clear.matchedGeometryEffect(id: pillID, in: pill, isSource: true)
-                }
-            }
             .contentShape(Rectangle())
         }
         .buttonStyle(MurmurPressStyle())
