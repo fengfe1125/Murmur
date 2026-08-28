@@ -1,7 +1,7 @@
 [project]
 name = "murmur"
 version = "0.2.0"
-description = "发一张图，它回你一句戳中的话。"
+description = "以照片和讲述为入口的私人回忆与日记应用。"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.60",              # DeepSeek 是 OpenAI 兼容接口
@@ -43,3 +43,7 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B"]
 # 注释里大量中文说明，行长限制意义不大
 ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# Root-invoked lint must still recognize the package after moving pyproject.toml.
+known-first-party = ["murmur"]

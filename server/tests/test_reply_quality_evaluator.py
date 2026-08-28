@@ -8,8 +8,8 @@ from pathlib import Path
 
 from _helpers import run_unittest
 
-ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "evaluate_reply_quality.py"
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts/check" / "evaluate_reply_quality.py"
 spec = importlib.util.spec_from_file_location("reply_quality_evaluator", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module

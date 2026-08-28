@@ -32,8 +32,8 @@ sudo chown -R murmur:murmur /opt/murmur
 sudo -u murmur -H bash -c '
   cd /opt/murmur
   python3 -m venv .venv
-  .venv/bin/pip install -e .
-  ./scripts/setup-murmur.sh
+  .venv/bin/pip install -e ./server
+  scripts/dev/setup-murmur.sh
 '
 sudo chmod 600 /opt/murmur/.env
 ```
@@ -75,15 +75,15 @@ sudo install -o murmur -g murmur -m 0600 AuthKey_KEYID.p8 \
 安装并启动正式服务：
 
 ```bash
-sudo cp /opt/murmur/deploy/*.service /etc/systemd/system/
-sudo cp /opt/murmur/deploy/murmur-logrotate /etc/logrotate.d/murmur
+sudo cp /opt/murmur/infra/deploy/*.service /etc/systemd/system/
+sudo cp /opt/murmur/infra/deploy/murmur-logrotate /etc/logrotate.d/murmur
 sudo systemctl daemon-reload
 sudo systemctl enable --now murmur-app-worker murmur-app-api murmur-web
 sudo systemctl --no-pager --full status \
   murmur-app-worker murmur-app-api murmur-web
 ```
 
-把 [`Caddyfile.example`](../../deploy/Caddyfile.example) 中的 `app.example.com` 替换成正式域名，
+把 [`Caddyfile.example`](../../infra/deploy/Caddyfile.example) 中的 `app.example.com` 替换成正式域名，
 将站点块合并进 `/etc/caddy/Caddyfile`，再验证并重载：
 
 ```bash
@@ -129,7 +129,7 @@ sudo -u murmur -H bash -c \
 ```bash
 sudo install -d -o murmur -g murmur -m 0750 /opt/murmur/test/logs
 sudo install -o murmur -g murmur -m 0600 \
-  /opt/murmur/deploy/test-bots.env.example \
+  /opt/murmur/infra/deploy/test-bots.env.example \
   /opt/murmur/.env.test-bots
 sudoedit /opt/murmur/.env.test-bots
 ```
@@ -182,7 +182,7 @@ sudo systemctl disable --now \
 
 ## 更新与迁移
 
-目录重组使用分阶段桥接流程，见 [布局切换](layout-transition.md)。下面旧布局命令仅适用于目录迁移前版本；目录迁移 PR 会同步更新。
+目录重组使用分阶段桥接流程，见 [布局切换](layout-transition.md)。本文命令针对新布局；代码合并、桥接安装和生产更新分别记录，不能相互代替。
 
 `murmur-update` 只接受 `main` 的快进提交。更新前使用 Python 的 SQLite 在线备份 API，
 分别对 `MURMUR_DB`、`MURMUR_APP_DB`、`MURMUR_APP_MEMORY_DB` 解析出的唯一数据库做快照。
@@ -192,7 +192,7 @@ sudo systemctl disable --now \
 随后按实际布局选择安装目标与统一测试 runner。成功后只重启管理员已 enable 的服务；
 若已知服务正在运行但未 enable，预检直接拒绝，由管理员先处理其状态。不会自动启用服务或 Bot。
 
-仓库里的 App 代码（`MurmurApp/`、`android/` 等）不会保留在 VPS：桥接更新器在切换 HEAD 前展开
+仓库里的 App 代码（`apps/ios/MurmurApp/`、`apps/android/` 等）不会保留在 VPS：桥接更新器在切换 HEAD 前展开
 旧、新服务端路径；旧布局成功后保留 `murmur deploy tests scripts`，新布局保留 `server infra scripts`，
 均保留 cone 模式所需根目录文件。`scripts/` 不能少——`test_channel_gate` 和 `test_env_sanitizer`
 会读它，缺了更新流程的测试阶段会失败回滚。若某台 VPS 早年是全量检出，第一次跑到这
@@ -225,13 +225,17 @@ sudo systemctl status murmur-update --no-pager
 首次关联私有 GitHub 仓库可使用：
 
 ```bash
-./scripts/link-vps-to-github.sh --repo OWNER/REPO \
+scripts/ops/link-vps-to-github.sh --repo OWNER/REPO \
   --gcloud INSTANCE --zone ZONE --project PROJECT
 ```
 
-`scripts/migrate-to-vps.sh` 只有在输入 `CUTOVER` 后才替换远端目录和传输生产状态；它只
+`scripts/ops/migrate-to-vps.sh` 只有在输入 `CUTOVER` 后才替换远端目录和传输生产状态；它只
 自动启用 App API、Worker 和看板，并显式保持四个平台 Bot 为 disabled。测试 Bot 的
 `.env.test-bots` 不随生产迁移传输。
+
+源码包只来自干净的当前 Git 提交，允许 `server/`、`infra/`、`scripts/` 和指定仓库级文件，
+不包含移动端、品牌素材、文档目录或未跟踪内容。打包前拒绝被跟踪的私钥、运行数据、符号链接和隐藏索引改动；
+验收打包必须在提交后进行，不使用目录拷贝或排除列表猜测哪些文件可上传。
 
 迁移脚本是严格的单机切换工具，会在停机前后都失败关闭：
 

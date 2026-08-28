@@ -12,9 +12,9 @@ Android 与 iOS 共用 App API，当前是 Debug 开发骨架，不是已验收�
 从仓库根目录执行：
 
 ```sh
-cd android
+cd apps/android
 ./gradlew assembleDebug --no-daemon
 ```
 
 CI 只证明 Debug APK 可编译。体验对齐、正式认证/推送、真机验收是后续任务。
-历史技术拆解见 [Android 适配归档](../docs/archive/android-adaptation-plan.md)，其中进度与旧路径不代表当前状态。
+历史技术拆解见 [Android 适配归档](../../docs/archive/android-adaptation-plan.md)，其中进度与旧路径不代表当前状态。

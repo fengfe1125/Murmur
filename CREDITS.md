@@ -8,11 +8,11 @@
 
 | 项目 | 许可 | 这里参考了什么 |
 |---|---|---|
-| [memex-lab/memex](https://github.com/memex-lab/memex) | 见仓库 | 整体形态：本地优先、自带 LLM key、把照片/文字/语音收进一条时间线。Murmur 拿掉了它的"整理归档"目标，换成"即时回应"，但"数据留在本地 + BYO LLM"这条是从它那儿来的。 |
-| [smixs/iva](https://github.com/smixs/iva) | 见仓库 | 分层记忆的思路——把每条消息落成一条带元数据的记录，之后能按维度检索。iva 落成 Obsidian markdown，[`murmur/memory.py`](murmur/memory.py) 为了能按「地点 × 时段」聚合改用 SQLite。 |
-| [Romancha/photo-moments-telegram-bot](https://github.com/Romancha/photo-moments-telegram-bot) | 见仓库 | 它的 `/info` 命令展示了一张照片该读哪些 EXIF 字段（时间、机型、GPS）。[`murmur/photo.py`](murmur/photo.py) 是同一组字段，用 Pillow 重写。 |
-| [TokenMixAi/tg-ai-bot](https://github.com/TokenMixAi/tg-ai-bot) | 见仓库 | 两处：图片 → base64 data URL → vision 输入的处理方式；以及"可配置上下文深度"这个参数化思路（这里对应 `Memory.recent(limit)`）。[`murmur/bot.py`](murmur/bot.py) 的 photo/document 双通道处理也是照着它的形状搭的。 |
-| [hanamorix/companion-emergence](https://github.com/hanamorix/companion-emergence) | 见仓库 | 陪伴型 agent 的持久人格 + 情绪状态设计。Murmur 没有采用它的情绪状态机（对这个场景太重），但"人格是一等公民、单独成文件"这点照搬了 —— 见 [`murmur/persona.py`](murmur/persona.py)。 |
+| [memex-lab/memex](https://github.com/memex-lab/memex) | 见仓库 | 早期曾参考本地优先、自带模型 key 与照片/文字时间线，随后探索即时回应；这是历史设计来源，不代表当前 App 仅本地处理或要求用户提供模型 key。 |
+| [smixs/iva](https://github.com/smixs/iva) | 见仓库 | 分层记忆的思路——把每条消息落成一条带元数据的记录，之后能按维度检索。iva 落成 Obsidian markdown，[`server/murmur/memory.py`](server/murmur/memory.py) 为了能按「地点 × 时段」聚合改用 SQLite。 |
+| [Romancha/photo-moments-telegram-bot](https://github.com/Romancha/photo-moments-telegram-bot) | 见仓库 | 它的 `/info` 命令展示了一张照片该读哪些 EXIF 字段（时间、机型、GPS）。[`server/murmur/photo.py`](server/murmur/photo.py) 是同一组字段，用 Pillow 重写。 |
+| [TokenMixAi/tg-ai-bot](https://github.com/TokenMixAi/tg-ai-bot) | 见仓库 | 两处：图片 → base64 data URL → vision 输入的处理方式；以及"可配置上下文深度"这个参数化思路（这里对应 `Memory.recent(limit)`）。[`server/murmur/bot.py`](server/murmur/bot.py) 的 photo/document 双通道处理也是照着它的形状搭的。 |
+| [hanamorix/companion-emergence](https://github.com/hanamorix/companion-emergence) | 见仓库 | 早期参考持久人格与状态设计，将人格提示词独立为 [`persona.py`](server/murmur/persona.py)。现有固定人格与 affect 实现是当前代码事实，可选风格仍是后续方向。 |
 | [mem0ai/mem0](https://mem0.ai/) | Apache-2.0 | 没有直接依赖。曾作为语义记忆方向的参考，不是已决定的替换方案。 |
 
 **没有直接复制任何项目的代码**，参考的是设计决策。`persona.py` 里的提示词是原创的。
@@ -21,7 +21,7 @@
 
 | 依赖 / 服务 | 许可 | 用途 |
 |---|---|---|
-| [DeepSeek](https://platform.deepseek.com) | 商业服务 | 模型与余额接口，OpenAI 兼容。对话走 `/beta`（assistant prefix 只在 beta 上有） |
+| [DeepSeek](https://platform.deepseek.com) | 商业服务 | 当前默认模型与余额接口；具体地址由配置决定，不由本来源清单规定，也不能据此推断线上正在使用的网关。 |
 | [models.dev](https://models.dev/api.json) | 见站点 | 模型目录（模态/上下文/价格）的数据源，选型时查的就是它 |
 | [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) | LGPL-3.0 | Telegram 层 |
 | [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin) | 见仓库 | 微信官方 ClawBot 通道。**没有依赖这个 npm 包**：`wechat.py` 照着它 README 的 "Backend API Protocol" 一节和随包发布的 TS 源码，用 Python 重实现了收发那几个接口（`ilink/bot/getupdates`、`sendmessage`、`sendtyping`、`getconfig`）。扫码登录仍然交给它的 CLI 做——那部分涉及设备绑定和配对码，反解不值当 |

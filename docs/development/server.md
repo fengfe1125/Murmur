@@ -6,9 +6,9 @@
 
 ```sh
 uv venv
-uv pip install -e '.[dev]'
-.venv/bin/python scripts/run_tests.py
-.venv/bin/ruff check murmur tests scripts
+uv pip install -e './server[dev]'
+.venv/bin/python scripts/check/run_tests.py
+.venv/bin/ruff check --config server/pyproject.toml server/murmur server/tests scripts
 ```
 
 测试是独立脚本与 unittest 混合，统一 runner 逐个执行；不要以 unittest discover 的结果替代全量验收。
@@ -19,4 +19,4 @@ Python 最低 3.11，CI 同时覆盖 3.14；任一失败都不能合并。
 配置以根目录 `.env.example` 为准，Debug 与生产配置显式隔离。
 模型默认值是仓库配方，不代表当前提供商永远支持，也不证明部署主机用了相同值。
 
-测试 Bot 见 [部署文档](../operations/deployment.md) 的隔离流程；根目录 `run.sh` 仅是本机测试通道监督器。
+测试 Bot 见 [部署文档](../operations/deployment.md) 的隔离流程；`scripts/ops/run-test-bots.sh` 仅是本机测试通道监督器。

@@ -9,7 +9,7 @@
 set -euo pipefail
 umask 077
 
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 MODE=""
 SSH_TARGET=""
@@ -21,8 +21,8 @@ LOCAL_ALREADY_STOPPED=0
 usage() {
   cat <<'EOF'
 Usage:
-  ./scripts/migrate-to-vps.sh --ssh user@host
-  ./scripts/migrate-to-vps.sh --gcloud INSTANCE --zone ZONE --project PROJECT
+  ./scripts/ops/migrate-to-vps.sh --ssh user@host
+  ./scripts/ops/migrate-to-vps.sh --gcloud INSTANCE --zone ZONE --project PROJECT
 
 Options:
   --local-stopped  The Murmur processes on this computer are already stopped.
@@ -171,44 +171,19 @@ REMOTE_PREPARE="/tmp/murmur-prepare-$STAMP.sh"
 REMOTE_ACTIVATE="/tmp/murmur-activate-$STAMP.sh"
 RELEASE_DIR="/opt/murmur.release-$STAMP"
 
+echo "==> Packaging committed server source (private data excluded)"
+"$PYTHON_BIN" "$ROOT_DIR/scripts/check/package_source.py" \
+  --root "$ROOT_DIR" --output "$SOURCE_ARCHIVE"
+
 echo "==> Checking remote connection"
 remote_run "true"
-
-echo "==> Packaging source code (secrets and personal data excluded)"
-COPYFILE_DISABLE=1 tar -czf "$SOURCE_ARCHIVE" \
-  --exclude='Murmur/.git' \
-  --exclude='Murmur/.venv' \
-  --exclude='Murmur/.env' \
-  --exclude='Murmur/.env.test-bots' \
-  --exclude='Murmur/*.local.xcconfig' \
-  --exclude='Murmur/*.p8' \
-  --exclude='Murmur/*.p12' \
-  --exclude='Murmur/*.mobileprovision' \
-  --exclude='*.local.xcconfig' \
-  --exclude='*.p8' \
-  --exclude='*.p12' \
-  --exclude='*.mobileprovision' \
-  --exclude='Murmur/*.db' \
-  --exclude='Murmur/*.db-*' \
-  --exclude='Murmur/logs' \
-  --exclude='Murmur/dossiers' \
-  --exclude='Murmur/photos' \
-  --exclude='Murmur/app-uploads' \
-  --exclude='Murmur/app-locks' \
-  --exclude='Murmur/openclaw' \
-  --exclude='Murmur/wechat' \
-  --exclude='Murmur/test' \
-  --exclude='Murmur/**/__pycache__' \
-  --exclude='Murmur/**/.DS_Store' \
-  --exclude='Murmur/**/._*' \
-  -C "$(dirname "$ROOT_DIR")" "$(basename "$ROOT_DIR")"
 
 cat > "$PREPARE_SCRIPT" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 id -u murmur >/dev/null 2>&1 || useradd -r -m -d /opt/murmur -s /bin/bash murmur
 apt-get update
-apt-get install -y python3-venv curl
+apt-get install -y git python3-venv curl
 install -d -o murmur -g murmur -m 0750 "$RELEASE_DIR"
 tar -xzf "$REMOTE_SOURCE" -C "$RELEASE_DIR" --strip-components=1 --no-same-owner
 chown -R murmur:murmur "$RELEASE_DIR"
@@ -216,12 +191,12 @@ install -d -o murmur -g murmur -m 0750 "$RELEASE_DIR/logs"
 sudo -u murmur -H bash -c '
   cd "'$RELEASE_DIR'"
   python3 -m venv .venv
-  .venv/bin/pip install -e .
-  .venv/bin/python -m compileall -q murmur
-  for test in tests/test_*.py; do .venv/bin/python "\$test"; done
+  .venv/bin/pip install -e ./server
+  .venv/bin/python -m compileall -q server/murmur
+  .venv/bin/python scripts/check/run_tests.py --fail-fast
 '
-cp "$RELEASE_DIR/deploy/"*.service /etc/systemd/system/
-cp "$RELEASE_DIR/deploy/murmur-logrotate" /etc/logrotate.d/murmur
+cp "$RELEASE_DIR/infra/deploy/"*.service /etc/systemd/system/
+cp "$RELEASE_DIR/infra/deploy/murmur-logrotate" /etc/logrotate.d/murmur
 systemctl daemon-reload
 rm -f "$REMOTE_SOURCE" "$REMOTE_PREPARE"
 EOF
@@ -247,7 +222,7 @@ if [[ "$APP_MODE" == "production" ]]; then
   remote_run "sudo test -f $APNS_KEY_QUOTED && test \"\$(sudo stat -c %a $APNS_KEY_QUOTED)\" = 600 && sudo -u murmur test -r $APNS_KEY_QUOTED"
 fi
 
-MURMUR_PROCESS_PATTERN='murmur (bot|dingtalk|wechat|qq|poke|reply|app-invite|app-device-code|app-api|app-worker|web)( |$)|(^|/)run\.sh( |$)'
+MURMUR_PROCESS_PATTERN='murmur (bot|dingtalk|wechat|qq|poke|reply|app-invite|app-device-code|app-api|app-worker|web)( |$)|(^|/)(run|run-test-bots)\.sh( |$)'
 if (( ! LOCAL_ALREADY_STOPPED )); then
   command -v pgrep >/dev/null 2>&1 || { echo "pgrep is required to stop local bots safely." >&2; exit 2; }
   LOCAL_PIDS=$(pgrep -f "$MURMUR_PROCESS_PATTERN" || true)
@@ -299,7 +274,7 @@ for directory in dossiers photos; do
   fi
 done
 cp "$ROOT_DIR/.env" "$STATE_DIR/.env"
-"$PYTHON_BIN" "$ROOT_DIR/scripts/sanitize_production_env.py" \
+"$PYTHON_BIN" "$ROOT_DIR/scripts/ops/sanitize_production_env.py" \
   "$STATE_DIR/.env" --remote-paths
 chmod 600 "$STATE_DIR/.env" "$STATE_DIR/murmur.db"
 for directory in dossiers photos; do
@@ -355,10 +330,10 @@ sudo -u murmur -H bash -c '
   cd /opt/murmur
   rm -rf .venv
   python3 -m venv .venv
-  .venv/bin/pip install -e .
+  .venv/bin/pip install -e ./server
 '
-cp "\$OLD_DIR/deploy/"*.service /etc/systemd/system/
-cp "\$OLD_DIR/deploy/murmur-logrotate" /etc/logrotate.d/murmur
+cp "\$OLD_DIR/infra/deploy/"*.service /etc/systemd/system/
+cp "\$OLD_DIR/infra/deploy/murmur-logrotate" /etc/logrotate.d/murmur
 systemctl daemon-reload
 caddy validate --config /etc/caddy/Caddyfile >/dev/null
 systemctl reload caddy

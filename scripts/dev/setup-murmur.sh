@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Murmur interactive setup.  It never starts a bot or exposes a port.
-# Run from the repository root: ./scripts/setup-murmur.sh
+# Run from the repository root: ./scripts/dev/setup-murmur.sh
 #
 
 set -euo pipefail
@@ -165,7 +165,7 @@ finish() {
 # STAGES — Murmur setup.
 # ──────────────────────────────────────────────────────────────────────────
 
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT_DIR"
 ENV_FILE="$ROOT_DIR/.env"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -218,7 +218,7 @@ if confirm "创建或更新 $ROOT_DIR/.venv 并安装项目依赖吗？"; then
     $PYTHON_BIN -m venv .venv
   fi
   .venv/bin/python -m pip install --upgrade pip
-  .venv/bin/python -m pip install -e .
+  .venv/bin/python -m pip install -e ./server
 else
   SKIPPED+=("Python 依赖安装")
 fi
@@ -313,7 +313,7 @@ ENV_FILE="$PRODUCTION_ENV_FILE"
 # out: the wizard advertises Ctrl-C resumability, and exiting before the
 # final stages must not leave live credentials in production.  Idempotent,
 # so a rerun on an already-clean file is a no-op.
-"$PYTHON_BIN" "$ROOT_DIR/scripts/sanitize_production_env.py" "$PRODUCTION_ENV_FILE"
+"$PYTHON_BIN" "$ROOT_DIR/scripts/ops/sanitize_production_env.py" "$PRODUCTION_ENV_FILE"
 note "生产 .env 已移除 Telegram / 钉钉 / 微信 / QQ 凭据。"
 if [[ -n "$SELECTED_PLATFORMS" ]]; then
   ENV_FILE="$TEST_BOT_ENV_FILE"
@@ -554,5 +554,5 @@ if [[ "$ROOT_DIR" == "/opt/murmur" ]]; then
 else
   say "Next: run the official App API/worker; old platforms stay disabled by default."
 fi
-say "Test bots require .env.test-bots plus explicit enablement; see deploy/README.md."
+say "Test bots require .env.test-bots plus explicit enablement; see infra/deploy/README.md."
 say "The dashboard should stay behind an SSH tunnel."

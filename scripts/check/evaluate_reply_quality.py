@@ -13,8 +13,8 @@ import json
 import re
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CORPUS = ROOT / "tests" / "fixtures" / "reply_quality_cases.json"
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CORPUS = ROOT / "server/tests" / "fixtures" / "reply_quality_cases.json"
 _EMOJI = re.compile(
     "["
     "\U0001F000-\U0001FAFF"

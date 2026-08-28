@@ -42,9 +42,9 @@ manifest.txt
 .env.bak-*
 # 安卓开发工具链（JDK / Android SDK / AVD），不入库
 tools/
-android/.gradle/
-android/local.properties
-android/**/build/
+apps/android/.gradle/
+apps/android/local.properties
+apps/android/**/build/
 *.keystore
 
 # 本机工作目录，不属于仓库：.claude/ 是 skills 与 worktrees，

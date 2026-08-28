@@ -10,9 +10,9 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
-    "sanitize_production_env", ROOT / "scripts/sanitize_production_env.py"
+    "sanitize_production_env", ROOT / "scripts/ops/sanitize_production_env.py"
 )
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
