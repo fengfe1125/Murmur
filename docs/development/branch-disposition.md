@@ -11,6 +11,7 @@
 | `codex/chore/repo/record-merged-work-cleanup` | [PR #18](https://github.com/fengfe1125/Murmur/pull/18)，基于 #17；不绕过迁移门禁，随后按顺序合入 main。 |
 | 本地 `docs/repo/name-branches-by-what-changed`（d6b6cdc） | 命名原则已吸收到现行协作规范；原提交仍独有，保留，不用旧 README 覆盖新定位。 |
 | 本地 `fix/reliability-and-metrics`（9e694a9） | 原本地可靠性工作保留；其修复已通过保留远端历史的 #14 合入，原提交不强制删掉。 |
+| 本地 `fix/ios/tab-bar-pill-travel`（8062a0d） | 用户的标签栏动画修复已通过 #19 合入 main，并同步到 #17／#18；原本地引用保留。 |
 | `stash@{0}`（9d1318eef3927947f84eecb220b61c4f429bb1fc） | 原样保留，没有 apply、pop 或 drop。 |
 
 原本地 0f17b99 与远端 322a0ad 的 tree 相同；以远端为基线补入修复得到 58e077b，再合入 main 得到 87c1faa。
