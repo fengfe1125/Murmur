@@ -147,6 +147,20 @@ class UpdaterTests(unittest.TestCase):
         self.git(self.seed, "push", "origin", "main")
         return revision
 
+    def prepare_pre_bridge_checkout(self) -> None:
+        # The real pre-bridge deployment has package/tests but no unified runner.
+        # Recreate it only in the seed so publish() can move it into the target.
+        runner = self.seed / "scripts/run_tests.py"
+        contents = runner.read_text()
+        runner.unlink()
+        self.old_head = self.commit("before unified test runner")
+        self.git(self.seed, "push", "origin", "main")
+        self.git(self.repo, "pull", "--ff-only")
+        self.git(self.repo, "sparse-checkout", "set", "--cone", "murmur", "deploy", "tests", "scripts")
+        self.initial_git_config = self.git_config_snapshot()
+        self.assertFalse((self.repo / "scripts/run_tests.py").exists())
+        self.write(runner, contents)
+
     def install_fakes(self) -> None:
         common = f"""#!{sys.executable}
 import json, os, subprocess, sys
@@ -294,6 +308,42 @@ if operation == 'is-active':
         self.run_update()
         self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), revision)
         self.assertEqual((self.root / "installed-target").read_text(), ".")
+
+    def test_pre_bridge_checkout_upgrades_to_new_layout(self) -> None:
+        self.prepare_pre_bridge_checkout()
+        revision = self.publish()
+        self.run_update()
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), revision)
+        self.assertEqual((self.root / "installed-target").read_text(), "./server")
+        self.assertTrue((self.repo / "scripts/check/run_tests.py").is_file())
+        self.assert_backup()
+
+    def test_pre_bridge_checkout_upgrades_to_legacy_layout(self) -> None:
+        self.prepare_pre_bridge_checkout()
+        revision = self.publish(layout="old")
+        self.run_update()
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), revision)
+        self.assertEqual((self.root / "installed-target").read_text(), ".")
+
+    def test_pre_bridge_checkout_failure_restores_missing_runner(self) -> None:
+        self.prepare_pre_bridge_checkout()
+        self.publish()
+        self.write(self.root / "failure", "checks")
+        self.run_update(success=False)
+        self.assert_rollback()
+        self.assertFalse((self.repo / "scripts/run_tests.py").exists())
+        self.assertFalse((self.repo / "server").exists())
+        self.assertEqual(self.host_mutations(), [])
+
+    def test_target_without_runner_is_rejected(self) -> None:
+        self.publish()
+        (self.seed / "scripts/check/run_tests.py").unlink()
+        self.commit("invalid target without runner")
+        self.git(self.seed, "push", "origin", "main")
+        result = self.run_update(success=False)
+        self.assertIn("Unrecognized or incomplete repository layout", result.stderr)
+        self.assert_rollback()
+        self.assertEqual(self.host_mutations(), [])
 
     def test_install_failure_restores_full_checkout(self) -> None:
         self.publish()

@@ -98,11 +98,15 @@ install_atomic() {
 }
 
 choose_layout() {
+  # A pre-bridge deployment can lack the unified runner. Only its installation
+  # root is needed before switching HEAD or on rollback; targets remain strict.
+  local phase=${1:-target}
   if [[ -f server/pyproject.toml && -d server/murmur && -d server/tests && -f scripts/check/run_tests.py && -f infra/deploy/murmur-update ]]; then
     project=./server
     runner=scripts/check/run_tests.py
     deploy_dir=infra/deploy
-  elif [[ -f pyproject.toml && -d murmur && -d tests && -f scripts/run_tests.py && -f deploy/murmur-update ]]; then
+  elif [[ -f pyproject.toml && -d murmur && -d tests && -f deploy/murmur-update ]] &&
+       [[ -f scripts/run_tests.py || "$phase" == existing ]]; then
     project=.
     runner=scripts/run_tests.py
     deploy_dir=deploy
@@ -173,7 +177,7 @@ locked=1
 [[ -z "$(git_murmur status --porcelain --untracked-files=all)" ]] || die 'Refusing to update: uncommitted source changes.'
 current=$(git_murmur rev-parse HEAD)
 [[ "$(git_murmur symbolic-ref --short HEAD)" == main ]] || die 'Production checkout must be on main.'
-choose_layout
+choose_layout existing
 old_project=$project
 git_murmur fetch --prune origin "$BRANCH"
 target=$(git_murmur rev-parse "origin/$BRANCH")
