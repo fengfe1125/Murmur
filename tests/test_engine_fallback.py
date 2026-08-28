@@ -838,5 +838,40 @@ class ReadPhotoSamplingTests(unittest.TestCase):
         self.assertNotIn("presence_penalty", client.calls[0])
 
 
+    def test_fallback_can_use_a_second_gateway(self):
+        # 网关整体 503 时，"同一家换个模型"不算降级。配了
+        # MURMUR_FALLBACK_BASE_URL / MURMUR_FALLBACK_API_KEY 后，
+        # 第二次尝试必须真的打到第二家。
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(
+                db_path=str(Path(tmp) / "m-gw.db"),
+                model="kimi-k2.6",
+                fallback_model="deepseek-v4-flash",
+                image_model="mimo-v2.5",
+                fallback_base_url="https://second-gateway.test/v1",
+                fallback_api_key="sk-second",
+            )
+            mem = Memory(str(Path(tmp) / "memory.db"))
+            client = FakeClient(
+                {"kimi-k2.6": PRIMARY_JSON, "deepseek-v4-flash": GOOD_JSON},
+                errors={"kimi-k2.6": gateway_error()},
+            )
+            seen: list[tuple] = []
+
+            def fake_client(c, base_url=None, api_key=None):
+                seen.append((base_url, api_key))
+                return client
+
+            with patch("murmur.engine._client", side_effect=fake_client):
+                reply = respond(
+                    Moment.text_only(cfg.tz), mem, cfg, note="测试", chat_id=0)
+            mem.conn.close()
+        self.assertEqual(reply.say, ["这条是降级模型说的"])
+        self.assertEqual(
+            seen,
+            [(None, None), ("https://second-gateway.test/v1", "sk-second")],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

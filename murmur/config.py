@@ -2,27 +2,36 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# OpenCode 的两个目录：Go 订阅走 /zen/go/v1，完整 Zen 目录走 /zen/v1
-# （后者是按量计费，Go 的 key 调它会返回 CreditsError）。
-DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
+log = logging.getLogger("murmur.config")
 
-# 实测下来最合适的：中文自然、不把思考过程写进正文、便宜。
-# 备选见 README 的"换模型"。
-DEFAULT_MODEL = "qwen3.7-plus"
+# DeepSeek 直连。**注意是 /beta 不是 /v1**：assistant prefix（把回复首
+# 字符钉成 "{"）只在 beta 端点上有，而这是 deepseek 肯吐 JSON 的唯一
+# 可靠办法——见下面 DEFAULT_JSON_PREFIX。
+# 余额接口不在这个路径下，在 API 根上（见 murmur/balance.py）。
+DEFAULT_BASE_URL = "https://api.deepseek.com/beta"
 
-# 降级备案：主模型不可用时自动换的模型（OpenCode 网关 2026-08-16 的
-# Qwen 上游中断就是前例）。deepseek-v4-flash 不支持 response_format，
-# 降级调用会自动去掉 json_schema，靠 SYSTEM 提示词约束输出。
-DEFAULT_FALLBACK_MODEL = "deepseek-v4-flash"
+# 中文自然、不把思考过程写进正文、便宜。备选见 README 的"换模型"。
+DEFAULT_MODEL = "deepseek-v4-flash"
 
-# 图片消息的多模态模型。kimi-k2.6 在这套网关上的视觉不可靠，mimo-v2.5
-# 实测能看图、便宜、输出偏短；它同样不支持 json_schema。
-DEFAULT_IMAGE_MODEL = "mimo-v2.5"
+# 降级备案：主模型不可用时自动换的模型。**默认空 = 就一家，不换模型**，
+# 同一个模型再来一次（线上失败几乎全是一次性的：网关 5xx，或者这一次
+# 没按 JSON 写）。真想要降级就配第二家网关的 MURMUR_FALLBACK_BASE_URL /
+# MURMUR_FALLBACK_API_KEY——同一家换个模型挡不住整体 503（2026-08-16）。
+DEFAULT_FALLBACK_MODEL = ""
+
+# 图片消息的多模态模型。读图 2 秒级、JSON 纪律好；同样不支持 json_schema。
+DEFAULT_IMAGE_MODEL = "deepseek-v4-flash-vision-exp"
+
+# deepseek 传 response_format 要么 400、要么把 token 全烧进思考，所以
+# 默认关掉 schema、默认打开 prefix。两个默认值是配套的，别只改一个。
+DEFAULT_JSON_SCHEMA = False
+DEFAULT_JSON_PREFIX = True
 
 CHANNEL_MODES = frozenset({"transition", "app_only"})
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -68,6 +77,49 @@ def _parse_float(name: str, *, low: float, high: float) -> float | None:
     return value
 
 
+def _legacy_opencode_key() -> str | None:
+    """迁移垫片：还在用 OPENCODE_API_KEY 的旧 .env 别直接断服。
+
+    改名成 DEEPSEEK_API_KEY 是对的，但**换 key 的变量名是会停服的改动**：
+    线上 .env 不跟着改，下一次部署整个机器人就没 key 了，而且只在有人
+    发消息时才炸出来。所以旧名字继续认，同时吼一嗓子。
+    等 VPS 和本机的 .env 都改完，这个函数和它的调用可以一起删掉。
+    """
+    value = os.getenv("OPENCODE_API_KEY", "").strip()
+    if not value:
+        return None
+    log.warning(
+        "OPENCODE_API_KEY 已改名为 DEEPSEEK_API_KEY，本次仍按旧名字读取。"
+        "请把 .env 里这一行改掉——这个兼容以后会删。"
+    )
+    return value
+
+
+def _parse_fallback_gateway() -> tuple[str | None, str | None]:
+    """第二家网关的端点和 key：**要么都配，要么都别配**。
+
+    只配 URL 不配 key 的话，`_client` 会拿主网关的 key 去打第二家的域名
+    （`api_key or cfg.api_key`），等于把主网关的凭据静默地发给了
+    另一家——降级路径上才会触发，日志里只看得到「尝试降级」。只配 key
+    不配 URL 同理，是把第二家的 key 发给主网关。两种都是配置写了一半，
+    照 _parse_bool 的规矩：拒绝启动，不猜一个方向。
+    """
+    base_url = os.getenv("MURMUR_FALLBACK_BASE_URL", "").strip() or None
+    api_key = os.getenv("MURMUR_FALLBACK_API_KEY", "").strip() or None
+    if bool(base_url) != bool(api_key):
+        missing, present = (
+            ("MURMUR_FALLBACK_API_KEY", "MURMUR_FALLBACK_BASE_URL")
+            if base_url else
+            ("MURMUR_FALLBACK_BASE_URL", "MURMUR_FALLBACK_API_KEY")
+        )
+        raise ValueError(
+            f"配了 {present} 就必须同时配 {missing}——"
+            f"只配一半会把另一家的 API key 发给不该收到它的那一方。"
+            f"要维持「降级仍走主网关」的旧行为，两个都留空。"
+        )
+    return base_url, api_key
+
+
 def _parse_identities(raw: str) -> list[list[str]]:
     """解析 "a|b, c" → [[a, b], [c]]。| 表示同一个人的多个身份。"""
     out: list[list[str]] = []
@@ -88,16 +140,22 @@ class Config:
     memory_model: str | None
     # 主模型报错时的降级模型（空字符串 = 不降级，直接失败）。
     fallback_model: str
+    # 降级走第二家网关时的端点和 key。默认空 = 和主网关同一家——
+    # 2026-08-16 的教训是网关整体 503 时"同一家换个模型"不算降级，
+    # 整条链一起挂。配上第二家才算真降级。两个必须成对，见
+    # _parse_fallback_gateway。
+    fallback_base_url: str | None
+    fallback_api_key: str | None
     # 带图消息走这个多模态模型；空字符串 = 沿用主模型。
     image_model: str
-    # 主模型是否支持 json_schema 响应格式。OpenCode 网关实测只有
-    # qwen / kimi 系吃这套；glm / deepseek 传 response_format 要么 400
-    # 要么把 token 全烧进思考。关掉后靠 SYSTEM 里的「只返回 JSON」+
-    # _extract_json 兜底，实测 glm-5.3 输出完全合规。
+    # 主模型是否支持 json_schema 响应格式。deepseek 传 response_format
+    # 要么 400 要么把 token 全烧进思考，所以默认关；换成吃这套的模型
+    # （qwen / kimi 系）时再打开。关掉后靠 SYSTEM 里的「只返回 JSON」+
+    # _extract_json 兜底。
     json_schema: bool
-    # 关掉 json_schema 之后模型还是不肯吐 JSON（deepseek-v4 直连实测
-    # 十次有九次直接回聊天正文）时打开：用 DeepSeek beta 端点的
-    # assistant prefix 把回复的第一个字符钉死成 "{"，模型只能续写 JSON。
+    # 关掉 json_schema 之后模型还是不肯吐 JSON（deepseek 直连实测十次有
+    # 九次直接回聊天正文）时打开：用 beta 端点的 assistant prefix 把回复
+    # 的第一个字符钉死成 "{"，模型只能续写 JSON。默认开，配套 /beta。
     json_prefix: bool
     # 对话采样参数（只作用于 respond/initiate，读图和记忆整理不用）。
     # None = 请求里不带，用服务商默认值。复读明显时把 presence_penalty
@@ -188,14 +246,16 @@ class Config:
         }
         # 多家都是 OpenAI 兼容接口，只是 base_url + key 不同。
         # 按顺序找第一个有值的，方便随时切：
+        #   DeepSeek  → DEEPSEEK_API_KEY（默认）
         #   xAI Grok  → MURMUR_API_KEY + MURMUR_BASE_URL=https://api.x.ai/v1
-        #   OpenCode  → OPENCODE_API_KEY（默认）
         key = (
             os.getenv("MURMUR_API_KEY")
-            or os.getenv("OPENCODE_API_KEY")
+            or os.getenv("DEEPSEEK_API_KEY")
             or os.getenv("XAI_API_KEY")
+            or _legacy_opencode_key()
             or None
         )
+        fallback_base_url, fallback_api_key = _parse_fallback_gateway()
         db_path = Path(os.getenv("MURMUR_DB", "./murmur.db")).expanduser()
         raw_log = os.getenv("MURMUR_LOGDIR", "").strip()
         log_dir = Path(raw_log).expanduser() if raw_log else db_path.parent / "logs"
@@ -207,9 +267,15 @@ class Config:
             fallback_model=os.getenv(
                 "MURMUR_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL
             ),
+            fallback_base_url=fallback_base_url,
+            fallback_api_key=fallback_api_key,
             image_model=os.getenv("MURMUR_IMAGE_MODEL", DEFAULT_IMAGE_MODEL),
-            json_schema=_parse_bool("MURMUR_JSON_SCHEMA", default=True),
-            json_prefix=_parse_bool("MURMUR_JSON_PREFIX", default=False),
+            json_schema=_parse_bool(
+                "MURMUR_JSON_SCHEMA", default=DEFAULT_JSON_SCHEMA
+            ),
+            json_prefix=_parse_bool(
+                "MURMUR_JSON_PREFIX", default=DEFAULT_JSON_PREFIX
+            ),
             temperature=_parse_float("MURMUR_TEMPERATURE", low=0.0, high=2.0),
             presence_penalty=_parse_float(
                 "MURMUR_PRESENCE_PENALTY", low=-2.0, high=2.0

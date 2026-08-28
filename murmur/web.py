@@ -5,7 +5,7 @@
 uvicorn + fastapi 两个包不划算，而且 Murmur 的依赖表是刻意维持得很短的。
 
 **只读**是设计上的硬约束：这个进程不发消息、不改记忆、不碰 .env。
-唯一的写操作是把 OpenCode 的额度快照记进 quota_snapshots
+唯一的写操作是把 DeepSeek 的余额快照记进 balance_snapshots
 （额度只有一个"此刻的百分比"接口，不自己攒就永远看不到"变化"）。
 
 默认只绑 127.0.0.1。面板上有聊天原文和记忆文件，那是很私人的东西，
@@ -31,7 +31,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import vps_panel
+from . import counters, vps_panel
+from .balance import BALANCE_EVERY, BALANCE_SCHEMA, poller
 from .config import Config
 from .dossier import BLOCKS, REFRESH_EVERY, Dossier, _safe
 
@@ -50,32 +51,13 @@ PLATFORMS = {
     "qq": {"label": "QQ", "platform": "qq", "short": "QQ"},
 }
 
-# 额度快照间隔。OpenCode 的百分比是整数，5 分钟一采样足够看出趋势，
-# 又不至于把请求打得太密。
-QUOTA_EVERY = 300.0
-# 就算没变化也留一个点：不然停机一整天，图上会是一条直接连过去的直线，
-# 看不出中间其实没有数据。
-QUOTA_HEARTBEAT = timedelta(hours=1)
+# 余额快照间隔与表结构都收在 murmur/balance.py——采集现在有两个入口：
+# 这里的 poller（本机单跑看板的场景）和 app-worker 里的常驻 poller
+#（生产 VPS 上看板几乎不开，不挪过去曲线全是大段空白）。
 
 # /api/vps/status 的结果缓存：前端 30 秒一轮询，直连 ssh 最长要 45 秒，
 # 弱网下不缓存的话请求会叠在一起（ThreadingHTTPServer 没有线程上限）。
 VPS_STATUS_TTL = 20.0
-
-QUOTA_SCHEMA = """
-CREATE TABLE IF NOT EXISTS quota_snapshots (
-    id            INTEGER PRIMARY KEY,
-    at            TEXT NOT NULL,
-    rolling       REAL,
-    weekly        REAL,
-    monthly       REAL,
-    rolling_reset TEXT,
-    weekly_reset  TEXT,
-    monthly_reset TEXT,
-    ok            INTEGER NOT NULL DEFAULT 1,
-    detail        TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_quota_at ON quota_snapshots(at);
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -293,79 +275,8 @@ def _configured(kind: str, cfg: Config) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # 额度
 
-def fetch_quota(cfg: Config) -> dict:
-    """OpenCode Go 订阅的额度：滚动窗口 / 周 / 月，各是一个百分比。
-
-    这个接口只给"此刻"。要看变化就得自己按时间攒——见 _poller()。
-    """
-    if not cfg.api_key:
-        return {"ok": False, "detail": "没有配 API key"}
-    base = cfg.base_url.rstrip("/")
-    try:
-        import requests
-
-        r = requests.get(
-            f"{base}/usage",
-            headers={"Authorization": f"Bearer {cfg.api_key}"},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            return {"ok": False, "detail": f"HTTP {r.status_code}"}
-        data = r.json().get("usage", {})
-    except Exception as e:  # noqa: BLE001 - 网络的锅不该让看板整个 500
-        return {"ok": False, "detail": f"{type(e).__name__}: {e}"}
-
-    out = {"ok": True, "at": _now_iso()}
-    for k in ("rolling", "weekly", "monthly"):
-        blk = data.get(k) or {}
-        out[k] = {
-            "percent": blk.get("percent"),
-            "status": blk.get("status"),
-            "resets_at": blk.get("resetsAt"),
-        }
-    return out
-
-
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def _snapshot(conn: sqlite3.Connection, q: dict) -> None:
-    """只在有变化、或离上一条超过一小时的时候写一行。
-
-    每 5 分钟无脑插一行的话，一个月就是 8600 行几乎相同的数据，
-    图上全是噪点，还得在前端再抽稀一次。
-    """
-    last = conn.execute(
-        "SELECT * FROM quota_snapshots ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    vals = [
-        (q.get(k) or {}).get("percent") if q.get("ok") else None
-        for k in ("rolling", "weekly", "monthly")
-    ]
-    if last is not None:
-        same = (
-            last["ok"] == int(bool(q.get("ok")))
-            and [last["rolling"], last["weekly"], last["monthly"]] == list(vals)
-        )
-        try:
-            age = datetime.now(UTC) - datetime.fromisoformat(last["at"])
-        except ValueError:
-            age = QUOTA_HEARTBEAT
-        if same and age < QUOTA_HEARTBEAT:
-            return
-    conn.execute(
-        "INSERT INTO quota_snapshots"
-        " (at, rolling, weekly, monthly, rolling_reset, weekly_reset,"
-        "  monthly_reset, ok, detail) VALUES (?,?,?,?,?,?,?,?,?)",
-        (
-            _now_iso(), *vals,
-            *[(q.get(k) or {}).get("resets_at") for k in
-              ("rolling", "weekly", "monthly")],
-            int(bool(q.get("ok"))), q.get("detail"),
-        ),
-    )
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -852,13 +763,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(vps_panel.list_invites(self.vps))
         if path == "/api/overview":
             return self._json(self.overview())
-        if path == "/api/quota":
+        if path == "/api/balance":
             try:
                 hours = int(q.get("hours", ["168"])[0])
             except ValueError:
                 return self._json({"error": "hours 得是整数"}, 400)
             # 没上限的话一个 hours=99999999 就是一次全表扫
-            return self._json(self.quota(min(max(hours, 1), 24 * 90)))
+            return self._json(self.balance(min(max(hours, 1), 24 * 90)))
         if path == "/api/people":
             with closing(self.db()) as c:
                 return self._json({"people": _people(c, self.cfg)})
@@ -928,7 +839,7 @@ class Handler(BaseHTTPRequestHandler):
             })
 
         with closing(self.db()) as c:
-            c.executescript(QUOTA_SCHEMA)
+            c.executescript(BALANCE_SCHEMA)
             today = datetime.now(cfg.tz).strftime("%Y-%m-%d")
             # logged_at 存的是 UTC，按本地日期筛要先转过去
             stats = {}
@@ -965,14 +876,18 @@ class Handler(BaseHTTPRequestHandler):
                 stats["by_platform"][p["platform"]] = \
                     stats["by_platform"].get(p["platform"], 0) + 1
             last = c.execute(
-                "SELECT * FROM quota_snapshots ORDER BY id DESC LIMIT 1"
+                "SELECT * FROM balance_snapshots ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            quota = dict(last) if last else None
+            balance = dict(last) if last else None
+            # 回复质量的无正文计数（counters.py）：只有分类名和次数，
+            # 给 P0 生产验收用，不碰任何聊天内容。
+            counter_rows = counters.recent(c, days=14, tz=cfg.tz)
 
         return {
             "now": _now_iso(),
             "today": today,
             "tz": str(cfg.tz),
+            "counters": counter_rows,
             "model": {
                 "name": cfg.model,
                 "base_url": cfg.base_url,
@@ -994,7 +909,7 @@ class Handler(BaseHTTPRequestHandler):
             },
             "platforms": plats,
             "stats": stats,
-            "quota": quota,
+            "balance": balance,
         }
 
     def _local_midnight_utc(self) -> str:
@@ -1002,22 +917,22 @@ class Handler(BaseHTTPRequestHandler):
             hour=0, minute=0, second=0, microsecond=0)
         return mid.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
-    def quota(self, hours: int) -> dict:
+    def balance(self, hours: int) -> dict:
         since = (datetime.now(UTC)
                  - timedelta(hours=hours)).isoformat(timespec="seconds")
         with closing(self.db()) as c:
-            c.executescript(QUOTA_SCHEMA)
+            c.executescript(BALANCE_SCHEMA)
             rows = c.execute(
-                "SELECT * FROM quota_snapshots WHERE at >= ? ORDER BY at",
+                "SELECT * FROM balance_snapshots WHERE at >= ? ORDER BY at",
                 (since,),
             ).fetchall()
             latest = c.execute(
-                "SELECT * FROM quota_snapshots ORDER BY id DESC LIMIT 1"
+                "SELECT * FROM balance_snapshots ORDER BY id DESC LIMIT 1"
             ).fetchone()
         return {
             "points": [dict(r) for r in rows],
             "latest": dict(latest) if latest else None,
-            "poll_every_s": QUOTA_EVERY,
+            "poll_every_s": BALANCE_EVERY,
         }
 
     def logs(self, name: str, n: int) -> dict:
@@ -1030,24 +945,6 @@ class Handler(BaseHTTPRequestHandler):
 
 # ---------------------------------------------------------------------------
 
-def _poller(cfg: Config, stop: threading.Event) -> None:
-    """后台按 QUOTA_EVERY 采一次额度。放独立线程，别拖慢页面。
-
-    每轮重建连接：备份恢复会整个换掉 db 文件，长驻连接感知不到，
-    会一直往已删除的 inode 上写。
-    """
-    while not stop.is_set():
-        try:
-            with closing(sqlite3.connect(cfg.db_path, timeout=10.0)) as conn:
-                conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA busy_timeout=10000")
-                conn.executescript(QUOTA_SCHEMA)
-                _snapshot(conn, fetch_quota(cfg))
-        except Exception as e:  # noqa: BLE001
-            log.warning("采额度失败：%s: %s", type(e).__name__, e)
-        stop.wait(QUOTA_EVERY)
-
-
 def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
         vps: vps_panel.VpsConfig | None = None) -> None:
     cfg = Config.load()
@@ -1057,8 +954,8 @@ def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False,
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
     stop = threading.Event()
-    threading.Thread(target=_poller, args=(cfg, stop),
-                     name="murmur-quota", daemon=True).start()
+    threading.Thread(target=poller, args=(cfg, stop),
+                     name="murmur-balance", daemon=True).start()
 
     httpd = ThreadingHTTPServer((host, port), partial(Handler, cfg, vps))
     url = f"http://{host}:{port}"

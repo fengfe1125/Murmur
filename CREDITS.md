@@ -17,7 +17,7 @@
 
 | 依赖 / 服务 | 许可 | 用途 |
 |---|---|---|
-| [OpenCode Zen](https://opencode.ai/zen) | 商业服务 | 模型网关，OpenAI 兼容。Go 订阅走 `/zen/go/v1` |
+| [DeepSeek](https://platform.deepseek.com) | 商业服务 | 模型与余额接口，OpenAI 兼容。对话走 `/beta`（assistant prefix 只在 beta 上有） |
 | [models.dev](https://models.dev/api.json) | 见站点 | 模型目录（模态/上下文/价格）的数据源，选型时查的就是它 |
 | [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) | LGPL-3.0 | Telegram 层 |
 | [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin) | 见仓库 | 微信官方 ClawBot 通道。**没有依赖这个 npm 包**：`wechat.py` 照着它 README 的 "Backend API Protocol" 一节和随包发布的 TS 源码，用 Python 重实现了收发那几个接口（`ilink/bot/getupdates`、`sendmessage`、`sendtyping`、`getconfig`）。扫码登录仍然交给它的 CLI 做——那部分涉及设备绑定和配对码，反解不值当 |

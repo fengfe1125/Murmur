@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import counters
 from .config import Config
 from .engine import _client
 from .memory import Entry, Memory
@@ -437,6 +438,7 @@ def refresh(
             model,
             attempts,
         )
+        counters.bump(cfg, "dossier.no_usable_blocks")
         return None
     if data is None:
         # 截断抢救：只更新完整捞回的分区，没捞到的保持旧内容。
@@ -452,6 +454,7 @@ def refresh(
             model,
             len(partial),
         )
+        counters.bump(cfg, "dossier.partial_saved")
         return d
 
     for name, (_, limit) in BLOCKS.items():
@@ -466,4 +469,5 @@ def refresh(
         model,
         len(entries),
     )
+    counters.bump(cfg, "dossier.full_saved")
     return d

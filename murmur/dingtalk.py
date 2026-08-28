@@ -502,7 +502,7 @@ def run() -> None:
             "去 open-dev.dingtalk.com 建个企业内部应用，把 AppKey/AppSecret 填进 .env.test-bots。"
         )
     if not cfg.api_key:
-        raise RuntimeError("没有 OPENCODE_API_KEY。")
+        raise RuntimeError("没有 DEEPSEEK_API_KEY。")
 
     mem = Memory(cfg.db_path)
     client = DingTalkStreamClient(

@@ -12,10 +12,8 @@
 
 from __future__ import annotations
 
-import sqlite3
 import sys
 import tempfile
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -24,7 +22,6 @@ from _helpers import make_config  # noqa: E402
 
 from murmur.memory import Memory, thread_key  # noqa: E402
 from murmur.web import (  # noqa: E402
-    QUOTA_SCHEMA,
     _bubbles,
     _conversation_label,
     _health,
@@ -35,7 +32,6 @@ from murmur.web import (  # noqa: E402
     _person_id,
     _platform_of,
     _redact,
-    _snapshot,
     _split_thread,
     _tail,
 )
@@ -279,44 +275,6 @@ with tempfile.TemporaryDirectory() as d:
           u1["unanswered"] == 4 and u1["initiative_state"] == "hold",
           str({k: u1[k] for k in ("unanswered", "initiative_state")}))
     mem.close()
-
-
-print("\n── 额度快照：没变化就别记 " + "─" * 34)
-
-with tempfile.TemporaryDirectory() as d:
-    conn = sqlite3.connect(Path(d) / "q.db")
-    conn.row_factory = sqlite3.Row
-    conn.executescript(QUOTA_SCHEMA)
-
-    q = {"ok": True, "rolling": {"percent": 0}, "weekly": {"percent": 49},
-         "monthly": {"percent": 24}}
-    _snapshot(conn, q)
-    _snapshot(conn, q)
-    _snapshot(conn, q)
-    n = conn.execute("SELECT COUNT(*) n FROM quota_snapshots").fetchone()["n"]
-    check("值没变就只有一行（5 分钟一采，无脑插一个月就是 8600 行噪点）",
-          n == 1, f"实际 {n} 行")
-
-    q2 = {"ok": True, "rolling": {"percent": 3}, "weekly": {"percent": 49},
-          "monthly": {"percent": 24}}
-    _snapshot(conn, q2)
-    check("变了就记一行",
-          conn.execute("SELECT COUNT(*) n FROM quota_snapshots").fetchone()["n"] == 2)
-
-    # 隔了一小时就算没变也留个点，否则停机一整天在图上是一条直线
-    conn.execute("UPDATE quota_snapshots SET at = ? WHERE id = 2",
-                 ((datetime.now(UTC) - timedelta(hours=2))
-                  .isoformat(timespec="seconds"),))
-    _snapshot(conn, q2)
-    check("离上一条超过一小时就补一个点",
-          conn.execute("SELECT COUNT(*) n FROM quota_snapshots").fetchone()["n"] == 3)
-
-    _snapshot(conn, {"ok": False, "detail": "HTTP 503"})
-    last = conn.execute(
-        "SELECT * FROM quota_snapshots ORDER BY id DESC LIMIT 1").fetchone()
-    check("取不到额度也记一行，写清原因（不然图上是断的但没人知道为什么）",
-          last["ok"] == 0 and last["detail"] == "HTTP 503")
-    conn.close()
 
 
 print("\n── 读日志尾巴：900 KB 的文件不能整个读进来 " + "─" * 18)

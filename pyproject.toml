@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "发一张图，它回你一句戳中的话。"
 requires-python = ">=3.11"
 dependencies = [
-    "openai>=1.60",              # OpenCode Zen 是 OpenAI 兼容网关
+    "openai>=1.60",              # DeepSeek 是 OpenAI 兼容接口
     "python-telegram-bot>=21.6",
     "dingtalk-stream>=0.20",
     "pillow>=11.0",

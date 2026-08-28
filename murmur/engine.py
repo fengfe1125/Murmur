@@ -1,6 +1,6 @@
 """组装上下文 → 调模型 → 拿回一句话。
 
-走 OpenAI 兼容接口（OpenCode Zen 网关），不是 Anthropic SDK。
+走 OpenAI 兼容接口（默认 DeepSeek 直连），不是 Anthropic SDK。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from openai import BadRequestError, OpenAI, OpenAIError
 
+from . import counters
 from .affect import has_negative_affect
 from .config import Config
 from .memory import Entry, Memory
@@ -681,24 +682,30 @@ def _sampling_kwargs(cfg: Config) -> dict:
 
 def _fallback_attempts(
     cfg: Config, *, primary: str, use_schema: bool = True,
-) -> list[tuple[str, bool]]:
-    """(模型, 是否带 json_schema) 的尝试序列。
+) -> list[tuple[str, bool, str | None, str | None]]:
+    """(模型, 是否带 json_schema, base_url, api_key) 的尝试序列。
 
     降级模型一律不带 json_schema——deepseek-v4-flash / mimo-v2.5 在
-    OpenCode 网关上不支持 response_format，靠 SYSTEM 提示词里的
+    不支持 response_format，靠 SYSTEM 提示词里的
     「只返回 JSON」约束输出，_extract_json 负责剥代码块。主模型是否
     带由 MURMUR_JSON_SCHEMA 决定（glm / deepseek 系都不支持）。
+
+    后两个字段是第二家网关的端点与 key（MURMUR_FALLBACK_BASE_URL /
+    MURMUR_FALLBACK_API_KEY）。不配就是 None = 跟主网关同一家——能用，
+    但网关整体挂掉时整条链一起挂（2026-08-16 的前例），配了才算真降级。
     """
-    attempts = [(primary, use_schema)]
+    attempts = [(primary, use_schema, None, None)]
     fallback = (cfg.fallback_model or "").strip()
     if fallback and fallback != primary:
-        attempts.append((fallback, False))
+        attempts.append(
+            (fallback, False, cfg.fallback_base_url, cfg.fallback_api_key)
+        )
     else:
         # 没有第二家可换的时候（直连 deepseek 就一家），同一个模型再来一次。
         # 线上失败几乎全是一次性的：网关 5xx，或者这一次没按 JSON 写。
         # 代价是一次调用，换的是他那条消息不会直接变成红色感叹号。
         # 读图那边（read_photo）早就是两次，这里补齐。
-        attempts.append((primary, use_schema))
+        attempts.append((primary, use_schema, None, None))
     return attempts
 
 
@@ -749,12 +756,13 @@ def initiate(
 
     last_error: Exception | None = None
     attempts = _fallback_attempts(cfg, primary=cfg.model, use_schema=cfg.json_schema)
-    for attempt, (model, use_schema) in enumerate(attempts, 1):
+    for attempt, (model, use_schema, fb_url, fb_key) in enumerate(attempts, 1):
         try:
             reply = _initiate_once(
                 cfg, model, use_schema, messages,
                 said_before=said_before,
                 attempt=attempt,
+                client=_client(cfg, base_url=fb_url, api_key=fb_key),
             )
             if last_error is not None:
                 log.info("主动消息：降级模型 %s 接住了", model)
@@ -776,6 +784,7 @@ def _initiate_once(
     *,
     said_before,
     attempt: int,
+    client: OpenAI,
 ) -> Reply:
     if cfg.json_prefix and not use_schema:
         # 和 _respond_once、_read_once、dossier 同一招，之前只有这里漏了：
@@ -787,7 +796,7 @@ def _initiate_once(
     kwargs.update(_sampling_kwargs(cfg))
     if use_schema:
         kwargs["response_format"] = _response_format()
-    resp = _client(cfg).chat.completions.create(**kwargs)
+    resp = client.chat.completions.create(**kwargs)
     raw = resp.choices[0].message.content or ""
     finish_reason = getattr(resp.choices[0], "finish_reason", None)
     if cfg.json_prefix and not use_schema:
@@ -803,6 +812,7 @@ def _initiate_once(
             "length=%d finish_reason=%s bubbles=%d",
             model, attempt, len(raw), finish_reason or "unknown", len(salvaged),
         )
+        counters.bump(cfg, "initiate.salvaged_output")
         return Reply(scene="（主动·输出被截断）", move="speak", say=salvaged)
 
     move = data.get("move", "quiet")
@@ -825,6 +835,7 @@ def _initiate_once(
         "finish_reason=%s bubbles=%d",
         model, attempt, len(raw), finish_reason or "unknown", len(say),
     )
+    counters.bump(cfg, "initiate.full_output")
     return Reply(scene=str(data.get("scene", "")), move=move, say=say)
 
 
@@ -832,23 +843,36 @@ _client_cache: dict[tuple[str, str], OpenAI] = {}
 _client_lock = threading.Lock()
 
 
-def _client(cfg: Config) -> OpenAI:
-    if not cfg.api_key:
+def _client(
+    cfg: Config, base_url: str | None = None, api_key: str | None = None
+) -> OpenAI:
+    # 两个都为空 = 主网关；降级到第二家网关时两个一起显式传。**端点和
+    # key 必须成对**：只换端点不换 key，就是拿主网关的凭据去打另一家的
+    # 域名。Config 已经在启动时挡了配一半的情况（_parse_fallback_gateway），
+    # 这里再挡一次，是因为这个函数也被 dossier / continuity 直接调用。
+    if bool(base_url) != bool(api_key):
         raise RuntimeError(
-            "没有 OPENCODE_API_KEY。把 .env.example 复制成 .env 填进去，"
+            "_client 的 base_url 和 api_key 必须成对传：只传一个会把"
+            "另一家的 API key 发给不该收到它的那一方。"
+        )
+    api_key = api_key or cfg.api_key
+    base_url = base_url or cfg.base_url
+    if not api_key:
+        raise RuntimeError(
+            "没有 DEEPSEEK_API_KEY。把 .env.example 复制成 .env 填进去，"
             "或者先用 --dry-run 看拼出来的 prompt。"
         )
     # 每次回复都新建 client 的话，底层 httpx 连接池也一起重建，
     # 每张图多付一次 TCP+TLS 握手。OpenAI SDK 的 client 是线程安全的，
     # 按 (key, base_url) 缓存复用即可。
-    key = (cfg.api_key, cfg.base_url)
+    key = (api_key, base_url)
     cached = _client_cache.get(key)
     if cached is not None:
         return cached
     with _client_lock:
         if key not in _client_cache:
             _client_cache[key] = OpenAI(
-                api_key=cfg.api_key, base_url=cfg.base_url, timeout=90.0
+                api_key=api_key, base_url=base_url, timeout=90.0
             )
     return _client_cache[key]
 
@@ -895,7 +919,6 @@ def respond(
             },
         }
 
-    client = _client(cfg)
     if image_block is not None and (cfg.image_model or "").strip():
         # 带图消息：mimo 系多模态模型（不支持 json_schema，靠提示词约束）
         attempts = _fallback_attempts(cfg, primary=cfg.image_model, use_schema=False)
@@ -905,7 +928,7 @@ def respond(
         )
 
     last_error: Exception | None = None
-    for attempt, (model, use_schema) in enumerate(attempts, 1):
+    for attempt, (model, use_schema, fb_url, fb_key) in enumerate(attempts, 1):
         include_image = image_block is not None and model == attempts[0][0]
         content: list[dict] = []
         if include_image:
@@ -918,7 +941,7 @@ def respond(
                 content=content,
                 history=history,
                 dossier=dossier,
-                client=client,
+                client=_client(cfg, base_url=fb_url, api_key=fb_key),
                 cfg=cfg,
                 on_bubble=on_bubble,
                 photo=photo,
@@ -1051,6 +1074,7 @@ def _respond_once(
             "length=%d finish_reason=%s bubbles=%d",
             model, attempt, len(raw), finish_reason or "unknown", len(salvaged),
         )
+        counters.bump(cfg, "respond.salvaged_output")
         return Reply(scene="（输出被截断）", move="speak", say=salvaged)
 
     move = data.get("move", "quiet")
@@ -1069,6 +1093,7 @@ def _respond_once(
                 "finish_reason=%s bubbles=0",
                 model, attempt, len(raw), finish_reason or "unknown",
             )
+            counters.bump(cfg, "respond.quiet_output")
             return Reply(scene=str(data.get("scene", "")), move="quiet", say=[])
         raise _guard_error(raw, finish_reason)
 
@@ -1091,4 +1116,5 @@ def _respond_once(
         "finish_reason=%s bubbles=%d",
         model, attempt, len(raw), finish_reason or "unknown", len(say),
     )
+    counters.bump(cfg, "respond.full_output")
     return Reply(scene=str(data.get("scene", "")), move=move, say=say)

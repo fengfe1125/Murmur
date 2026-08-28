@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 from PIL import Image
 
+from . import counters
 from .affect import apply_message as preview_affect
 from .affect import prompt_context
 from .app_lock import UserOperationLock
@@ -586,6 +587,7 @@ class AppWorker:
                 "app_moment category=retryable_failure moment_id=%s error_type=%s",
                 job.moment_id, type(error).__name__,
             )
+            counters.bump(self.cfg, "app_moment.retryable_failure")
             # Do not leak gateway messages or user content into the API response.
             try:
                 cleaned_by_terminal_owner = self.store.fail_job(
@@ -657,6 +659,7 @@ def run() -> None:
     except OSError:
         pass
     with AppStore(settings.db_path) as store:
+        _start_balance_poller(cfg)
         apns_configured = all((
             settings.apns_key_path, settings.apns_key_id,
             settings.apns_team_id, settings.apns_topic,
@@ -699,6 +702,22 @@ def run() -> None:
             delivery_budget_seconds=settings.push_delivery_budget_seconds,
         )
         AppWorker(store, cfg, settings, scheduler=scheduler).serve_forever()
+
+
+def _start_balance_poller(cfg: Config) -> None:
+    """余额采集挂在常驻的 worker 上，而不是只活在看板里。
+
+    历史原因：采集最早写在看板进程里，但生产 VPS 上没人天天开面板，
+    曲线全是大段空白。worker 是 Always-On 的那个进程，放这里。
+    daemon 线程随进程退出；看板自己单跑时还会再起一个同样的 poller，
+    balance.snapshot 的同值去重保证两边同时跑也不会写重复行。
+    """
+    from .balance import poller
+
+    threading.Thread(
+        target=poller, args=(cfg, threading.Event()),
+        name="murmur-balance", daemon=True,
+    ).start()
 
 
 def main() -> None:

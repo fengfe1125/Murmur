@@ -427,7 +427,7 @@ def run() -> None:
     if not cfg.telegram_token:
         raise RuntimeError("没有 TELEGRAM_BOT_TOKEN。找 @BotFather 要一个填进 .env.test-bots。")
     if not cfg.api_key:
-        raise RuntimeError("没有 OPENCODE_API_KEY。")
+        raise RuntimeError("没有 DEEPSEEK_API_KEY。")
 
     app = Application.builder().token(cfg.telegram_token).build()
     app.bot_data["cfg"] = cfg

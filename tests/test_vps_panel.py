@@ -345,19 +345,19 @@ finally:
     vps_panel.status = real_status
     Handler._vps_status_cache = None
 
-print("\n── web 层：/api/quota 的 hours 要校验、要有上限 " + "─" * 12)
+print("\n── web 层：/api/balance 的 hours 要校验、要有上限 " + "─" * 10)
 
 import sqlite3  # noqa: E402
 import tempfile  # noqa: E402
 
-from murmur.web import QUOTA_SCHEMA  # noqa: E402
+from murmur.web import BALANCE_SCHEMA  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp:
     dbp = Path(tmp) / "q.db"
     conn = sqlite3.connect(dbp)
-    conn.executescript(QUOTA_SCHEMA)
+    conn.executescript(BALANCE_SCHEMA)
     conn.execute(
-        "INSERT INTO quota_snapshots (at, ok) VALUES (?, 1)",
+        "INSERT INTO balance_snapshots (at, ok) VALUES (?, 1)",
         (("2020-01-01T00:00:00+00:00"),))  # 远超任何合理窗口的旧点
     conn.commit()
     conn.close()
@@ -369,8 +369,8 @@ with tempfile.TemporaryDirectory() as tmp:
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
 
-    def get_quota(qs: str):
-        req = urllib.request.Request(f"{base}/api/quota{qs}",
+    def get_balance(qs: str):
+        req = urllib.request.Request(f"{base}/api/balance{qs}",
                                      headers={"X-Murmur-Token": "s3cret"})
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
@@ -379,13 +379,13 @@ with tempfile.TemporaryDirectory() as tmp:
             return e.code, json.loads(e.read())
 
     try:
-        code, d = get_quota("?hours=abc")
+        code, d = get_balance("?hours=abc")
         check("hours 不是整数返回 400 而不是 500", code == 400, str(code))
         # 2020 年的点在 90 天上限之外：能查到它说明 hours 没被 clamp
-        code, d = get_quota("?hours=99999999")
+        code, d = get_balance("?hours=99999999")
         check("hours 再大也被 clamp 到 90 天，不会全表扫",
               code == 200 and d["points"] == [], str(d.get("points")))
-        code, d = get_quota("?hours=-5")
+        code, d = get_balance("?hours=-5")
         check("负数被抬到下限，不炸",
               code == 200 and d["points"] == [], str(code))
     finally:

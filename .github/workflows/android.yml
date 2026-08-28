@@ -1,0 +1,25 @@
+name: Android
+
+# 安卓这一摊此前没有任何 CI：服务端契约改动要等部署后才在 App 上炸出来。
+# 这里先做最低成本的闸门——编译过得了才允许合。app/src 下还没有单元测试，
+# 有了之后把 testDebugUnitTest 加进同一 job 即可。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon

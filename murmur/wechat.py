@@ -854,7 +854,7 @@ def run() -> None:
     )
     log.info("微信直连（绕过代理）：%s", _bypass_proxy_for_wechat())
     if not cfg.api_key:
-        raise RuntimeError("没有 OPENCODE_API_KEY。")
+        raise RuntimeError("没有 DEEPSEEK_API_KEY。")
 
     token, account_id = load_credentials(cfg)
     root = cfg.db_path.parent / "wechat" / account_id

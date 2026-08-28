@@ -170,14 +170,14 @@ h2{font-size:17px;margin:0 0 3px;font-weight:600}
 .stat .big{font-size:22px}
 .stat .lbl{font-size:11px;color:var(--ink-3)}
 
-/* 额度条 */
+/* 余额条 */
 .bar{height:6px;border-radius:3px;background:var(--panel-2);overflow:hidden;margin:6px 0 3px}
 .bar i{display:block;height:100%;border-radius:3px;background:var(--green);transition:width .4s}
 .bar i.warn{background:var(--amber)} .bar i.hot{background:var(--coral)}
-.quota-item{margin-bottom:14px}
-.quota-item .top{display:flex;justify-content:baseline;align-items:baseline;gap:8px}
-.quota-item .top b{font-size:13px;font-weight:600}
-.quota-item .top .pct{margin-left:auto;font-family:var(--mono);font-size:13px}
+.bal-item{margin-bottom:14px}
+.bal-item .top{display:flex;justify-content:baseline;align-items:baseline;gap:8px}
+.bal-item .top b{font-size:13px;font-weight:600}
+.bal-item .top .amt{margin-left:auto;font-family:var(--mono);font-size:13px}
 
 svg.chart{width:100%;height:180px;display:block;overflow:visible}
 .legend{display:flex;gap:14px;font-size:11px;color:var(--ink-3);margin-top:8px}
@@ -362,7 +362,7 @@ pre.log{
     </div>
     <div class="pills" id="pills"></div>
     <button class="navbtn on" data-view="overview">总览</button>
-    <button class="navbtn" data-view="quota">额度变化</button>
+    <button class="navbtn" data-view="balance">余额变化</button>
     <a class="navbtn" id="vps-link" href="/vps">VPS 面板 ↗</a>
     <div class="seclabel"><span>聊天窗口</span><span id="pcount"></span></div>
     <div class="filters" id="filters"></div>
@@ -608,31 +608,43 @@ function kv(k,v){
   return d;
 }
 
-function quotaCard(q, compact){
+// 余额是"还剩多少"，方向和原来的额度百分比是反的：跌到 0 才是要出事，
+// 所以告警色也反过来——少了才红。阈值是拍脑袋的量级判断，不是账单规则。
+const BAL_HOT = 10, BAL_WARN = 50;
+
+function money(v, cur){
+  if(v==null) return '—';
+  return (cur==='USD'?'$':'¥') + Number(v).toFixed(2);
+}
+
+function balanceCard(q){
   const c = el('div','card');
-  c.append(el('h3',null,'OpenCode 额度'));
-  if(!q){ c.append(el('div','dim','还没采到。看板每 5 分钟采一次，稍等。')); return c; }
+  c.append(el('h3',null,'DeepSeek 余额'));
+  if(!q){ c.append(el('div','dim','还没采到。每 5 分钟采一次，稍等。')); return c; }
   if(!q.ok){ c.append(el('div','err','取不到：'+(q.detail||'未知'))); return c; }
-  [['rolling','5 小时','$12'],['weekly','本周','$30'],['monthly','本月','$60']].forEach(([k,label,cap])=>{
-    const pct = q[k];
-    if(pct==null) return;
-    const it = el('div','quota-item');
-    const top = el('div','top');
-    top.append(el('b',null,label));
-    top.append(el('span','pct', pct===0 ? '不到 1%' : (pct+'% 已用')));
-    it.append(top);
-    const bar = el('div','bar');
-    const i = el('i'); i.style.width = Math.min(100, Math.max(pct===0?1.5:0, pct))+'%';
-    if(pct>=80) i.className='hot'; else if(pct>=50) i.className='warn';
-    bar.append(i); it.append(bar);
-    const rst = q[k+'_reset'];
-    const bits = ['额度 '+cap];
-    if(rst) bits.push('重置于 '+new Date(rst).toLocaleString('zh-CN',
-      {month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'}));
-    it.append(el('div','dimmer', bits.join(' · ')));
-    c.append(it);
+
+  const cur = q.currency;
+  const it = el('div','bal-item');
+  const top = el('div','top');
+  top.append(el('b',null,'账户总额'));
+  top.append(el('span','amt', money(q.total, cur)));
+  it.append(top);
+  // 条形按 BAL_WARN 满格：余额没有上限，画"占额度多少"没有意义，
+  // 这根条只是让"快没了"一眼看得见。
+  const bar = el('div','bar');
+  const i = el('i');
+  const t = Number(q.total)||0;
+  i.style.width = Math.min(100, Math.max(1.5, t/BAL_WARN*100))+'%';
+  if(t < BAL_HOT) i.className='hot'; else if(t < BAL_WARN) i.className='warn';
+  bar.append(i); it.append(bar);
+  c.append(it);
+
+  [['granted','赠送'],['topped_up','充值']].forEach(([k,label])=>{
+    if(q[k]==null) return;
+    c.append(kv(label, money(q[k], cur)));
   });
-  c.append(el('div','dimmer','采样于 '+ago(q.at)+' · 官方只返回整数百分比，5 小时窗口不到 $0.12 就是 0'));
+  if(q.available===0) c.append(el('div','err','官方标记余额不足，调用会被拒'));
+  c.append(el('div','dimmer','采样于 '+ago(q.at)+' · 值没变就不记新点'));
   return c;
 }
 
@@ -665,13 +677,43 @@ function renderOverview(d){
   }
   w.append(stats);
 
+  // 回复质量计数：服务端只记分类和次数（counters.py），不含任何正文，
+  // 是 P0 生产验收的数据源。
+  const COUNTER_LABELS = {
+    'respond.full_output':'回复 · 完整输出',
+    'respond.salvaged_output':'回复 · 截断抢救',
+    'respond.quiet_output':'回复 · 选择安静',
+    'initiate.full_output':'主动 · 完整输出',
+    'initiate.salvaged_output':'主动 · 截断抢救',
+    'app_moment.retryable_failure':'可重试失败',
+    'dossier.full_saved':'记忆整理 · 完整',
+    'dossier.partial_saved':'记忆整理 · 部分',
+    'dossier.no_usable_blocks':'记忆整理 · 失败',
+  };
+  const cntCard = el('div','card');
+  cntCard.append(el('h3',null,'回复质量 · 近 14 天'));
+  const agg = {};
+  (d.counters||[]).forEach(r=>{
+    const a = agg[r.key] = agg[r.key]||{today:0,total:0};
+    a.total += r.count;
+    if(r.day===d.today) a.today += r.count;
+  });
+  const cntKeys = Object.keys(COUNTER_LABELS).filter(k=>agg[k]);
+  if(!cntKeys.length){
+    cntCard.append(el('div','sub','还没有计数——升级后随每次回复开始积累。'));
+  }else{
+    cntKeys.forEach(k=>cntCard.append(
+      kv(COUNTER_LABELS[k], `今天 ${agg[k].today} · 14 天 ${agg[k].total}`)));
+  }
+  w.append(cntCard);
+
   const g1 = el('div','grid g3');
   g1.style.marginTop='14px';
   d.platforms.forEach(p=>g1.append(procCard(p)));
   w.append(g1);
 
   const g2 = el('div','grid g2'); g2.style.marginTop='14px';
-  g2.append(quotaCard(d.quota));
+  g2.append(balanceCard(d.balance));
 
   const m = el('div','card');
   m.append(el('h3',null,'模型与配置'));
@@ -690,8 +732,9 @@ function renderOverview(d){
   return w;
 }
 
-/* ---------- 额度图 ---------- */
-function chart(points, keys){
+/* ---------- 余额图 ---------- */
+function chart(points, keys, unit){
+  unit = unit || '';
   const NS='http://www.w3.org/2000/svg';
   const svg = document.createElementNS(NS,'svg');
   svg.setAttribute('class','chart');
@@ -710,9 +753,19 @@ function chart(points, keys){
   const t0 = +parseAt(usable[0].at), t1 = +parseAt(usable[usable.length-1].at);
   const span = Math.max(1, t1-t0);
   const x = p => pad.l + (parseAt(p.at)-t0)/span*(W-pad.l-pad.r);
-  const y = v => pad.t + (1 - Math.min(100, Number(v)||0)/100)*(H-pad.t-pad.b);
 
-  [0,50,100].forEach(v=>{
+  // 原来纵轴钉死 0–100（百分比）。余额没有上限，得按数据自适应——
+  // 但**下沿始终留在 0**：余额图要回答的是"离见底还有多远"，浮动基线
+  // 会把 100 块掉到 90 块画成一次悬崖。
+  const all = [];
+  keys.forEach(({k})=>usable.forEach(p=>{
+    const v = Number(p[k]);
+    if(p[k]!=null && !Number.isNaN(v)) all.push(v);
+  }));
+  const top = Math.max(1, ...all);
+  const y = v => pad.t + (1 - Math.min(top, Math.max(0, Number(v)||0))/top)*(H-pad.t-pad.b);
+
+  [0, top/2, top].forEach(v=>{
     const ln = document.createElementNS(NS,'line');
     ln.setAttribute('x1',pad.l); ln.setAttribute('x2',W-pad.r);
     ln.setAttribute('y1',y(v)); ln.setAttribute('y2',y(v));
@@ -722,7 +775,8 @@ function chart(points, keys){
     t.setAttribute('x',pad.l-8); t.setAttribute('y',y(v)+4);
     t.setAttribute('text-anchor','end');
     t.setAttribute('fill','currentColor'); t.setAttribute('fill-opacity','.4');
-    t.setAttribute('font-size','11'); t.textContent=v+'%';
+    t.setAttribute('font-size','11');
+    t.textContent = unit + (v>=100 ? v.toFixed(0) : v.toFixed(1));
     svg.append(t);
   });
 
@@ -759,18 +813,19 @@ function chart(points, keys){
   return svg;
 }
 
-async function renderQuota(){
+async function renderBalance(){
   const w = el('div','wrap');
-  w.append(el('h2',null,'额度变化'));
-  w.append(el('div','sub','OpenCode 只给"此刻的百分比"，这条曲线是看板自己按时间攒出来的。'));
-  const r = await get('/api/quota?hours=336');
-  w.append(quotaCard(r.latest));
+  w.append(el('h2',null,'余额变化'));
+  w.append(el('div','sub','DeepSeek 只给"此刻还剩多少"，这条曲线是自己按时间攒出来的。往下走就是在花钱。'));
+  const r = await get('/api/balance?hours=336');
+  w.append(balanceCard(r.latest));
   const c = el('div','card'); c.style.marginTop='14px';
   c.append(el('h3',null,'近 14 天'));
-  const keys=[{k:'rolling',color:'#6aa9d8',label:'5 小时'},
-              {k:'weekly',color:'#e0a44a',label:'本周'},
-              {k:'monthly',color:'#F2705C',label:'本月'}];
-  c.append(chart(r.points, keys));
+  const cur = r.latest && r.latest.currency;
+  const keys=[{k:'total',color:'#6aa9d8',label:'总额'},
+              {k:'topped_up',color:'#e0a44a',label:'充值'},
+              {k:'granted',color:'#F2705C',label:'赠送'}];
+  c.append(chart(r.points, keys, cur==='USD'?'$':'¥'));
   const lg = el('div','legend');
   keys.forEach(({color,label})=>{
     const s = el('span'); const i = el('i'); i.style.background=color;
@@ -991,7 +1046,7 @@ async function refresh(){
     state.sig = sig;
     main.innerHTML='';
     if(state.view==='overview') main.append(renderOverview(ov));
-    else if(state.view==='quota') main.append(await renderQuota());
+    else if(state.view==='balance') main.append(await renderBalance());
     else {
       const p = await get('/api/person?key='+encodeURIComponent(state.person));
       if(p.error) main.append(el('div','wrap', p.error));
