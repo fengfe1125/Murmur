@@ -1,5 +1,8 @@
 # Design — Murmur
 
+> 状态：归档｜适用：历史追溯｜归档核验：2026-08-28｜依据：重组前文件快照。
+> 以下保留当时描述、路径和判断，不代表当前能力、部署状态或新开发要求。现行说明见 [文档导航](../README.md)。
+
 Murmur is a native iOS app for a small invited audience. This file is the
 locked visual and interaction system for every app screen. SwiftUI code must
 consume named native tokens rather than inventing local colours, spacing, or
@@ -143,4 +146,3 @@ old photo is a different kind of thing to bring up.
   not been taken.
 - The three openers appear here and nowhere else. The conversation used to
   carry them under a photo reply; it no longer does.
-

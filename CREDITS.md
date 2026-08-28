@@ -1,5 +1,9 @@
 # 参考的开源项目
 
+> 状态：现状记录｜适用：历史设计来源｜核验：2026-08-28｜依据：原有来源清单；外部项目状态与许可本轮未重新核验。
+
+以下记录项目形成过程中的参考，不是当前产品定位或承诺采用的技术路线；现行方向见 [产品说明](docs/product/current-state.md)。
+
 这个骨架不是凭空写的。下面是每一块具体参考了谁，以及参考了什么。
 
 | 项目 | 许可 | 这里参考了什么 |
@@ -9,7 +13,7 @@
 | [Romancha/photo-moments-telegram-bot](https://github.com/Romancha/photo-moments-telegram-bot) | 见仓库 | 它的 `/info` 命令展示了一张照片该读哪些 EXIF 字段（时间、机型、GPS）。[`murmur/photo.py`](murmur/photo.py) 是同一组字段，用 Pillow 重写。 |
 | [TokenMixAi/tg-ai-bot](https://github.com/TokenMixAi/tg-ai-bot) | 见仓库 | 两处：图片 → base64 data URL → vision 输入的处理方式；以及"可配置上下文深度"这个参数化思路（这里对应 `Memory.recent(limit)`）。[`murmur/bot.py`](murmur/bot.py) 的 photo/document 双通道处理也是照着它的形状搭的。 |
 | [hanamorix/companion-emergence](https://github.com/hanamorix/companion-emergence) | 见仓库 | 陪伴型 agent 的持久人格 + 情绪状态设计。Murmur 没有采用它的情绪状态机（对这个场景太重），但"人格是一等公民、单独成文件"这点照搬了 —— 见 [`murmur/persona.py`](murmur/persona.py)。 |
-| [mem0ai/mem0](https://mem0.ai/) | Apache-2.0 | 没有直接依赖。记忆层规模变大（跨设备、需要语义检索）时，`memory.py` 应该换成它而不是自己造。 |
+| [mem0ai/mem0](https://mem0.ai/) | Apache-2.0 | 没有直接依赖。曾作为语义记忆方向的参考，不是已决定的替换方案。 |
 
 **没有直接复制任何项目的代码**，参考的是设计决策。`persona.py` 里的提示词是原创的。
 

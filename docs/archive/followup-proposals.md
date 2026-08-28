@@ -1,5 +1,8 @@
 # Murmur 后续开发意见与功能提案
 
+> 状态：归档｜适用：历史追溯｜归档核验：2026-08-28｜依据：重组前文件快照。
+> 以下保留当时描述、路径和判断，不代表当前能力、部署状态或新开发要求。现行说明见 [文档导航](../README.md)。
+
 > 调研来源（2026-08-20 预览）：
 > [sanjaynela/liquid-glass-ios-system](https://github.com/sanjaynela/liquid-glass-ios-system)、
 > [amosgyamfi/open-swiftui-animations](https://github.com/amosgyamfi/open-swiftui-animations)、
@@ -584,4 +587,3 @@ Murmur 是纯邀请制，服务端有 `app-invite` CLI 和 VPS 面板的建码�
 
 **第四批（受外部条件约束）：6 多图+分级 → 10 游客与邀请。**
 6 的成本模型要先跑一轮真实账单；10 等 Apple 账号。
-
