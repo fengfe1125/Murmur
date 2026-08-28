@@ -184,20 +184,20 @@ sudo systemctl disable --now \
 
 目录重组使用分阶段桥接流程，见 [布局切换](layout-transition.md)。下面旧布局命令仅适用于目录迁移前版本；目录迁移 PR 会同步更新。
 
-`murmur-update` 只接受 `main` 的快进提交。合并代码前会先用
-`sqlite3 .backup` 给数据库做在线快照，存到 `backups/murmur-<旧sha>-<时间戳>.db`
-（WAL 库不能直接拷贝；`MURMUR_DB` 指向非默认路径时从 `.env` 解析；服务不用停，
-快照失败则直接中止更新）。之后安装依赖并运行全部
-`tests/test_*.py`。成功后只重启管理员已经 enable 的服务；失败会回滚代码，不会启用任何
-新服务，更不会根据平台凭据启用 Bot。
+`murmur-update` 只接受 `main` 的快进提交。更新前使用 Python 的 SQLite 在线备份 API，
+分别对 `MURMUR_DB`、`MURMUR_APP_DB`、`MURMUR_APP_MEMORY_DB` 解析出的唯一数据库做快照。
+配置解析使用 python-dotenv，并与 CLI 一致地保留显式环境变量优先级；App 配置缺失或为空时回落到基础数据库。
+快照在 `backups/<配置名>-<旧sha>-<时间戳>.db`，包含已提交 WAL 内容；新目录 0700、文件 0600。
+备份失败直接中止，不会用快照自动覆盖运行中的数据库。
+随后按实际布局选择安装目标与统一测试 runner。成功后只重启管理员已 enable 的服务；
+若已知服务正在运行但未 enable，预检直接拒绝，由管理员先处理其状态。不会自动启用服务或 Bot。
 
-仓库里的 App 代码（`MurmurApp/`、`android/` 等）不会落到 VPS：每次更新都会先执行
-`git sparse-checkout set --cone murmur deploy tests scripts`，只有服务端目录和根目录
-文件留在 `/opt/murmur`。`scripts/` 不能少——`test_channel_gate` 和 `test_env_sanitizer`
+仓库里的 App 代码（`MurmurApp/`、`android/` 等）不会保留在 VPS：桥接更新器在切换 HEAD 前展开
+旧、新服务端路径；旧布局成功后保留 `murmur deploy tests scripts`，新布局保留 `server infra scripts`，
+均保留 cone 模式所需根目录文件。`scripts/` 不能少——`test_channel_gate` 和 `test_env_sanitizer`
 会读它，缺了更新流程的测试阶段会失败回滚。若某台 VPS 早年是全量检出，第一次跑到这
 一步时会把 App 目录从磁盘清掉（前提是它们与 Git 一致；有本地改动会拒绝更新并列出路径）。
-根目录的未跟踪文件（如 `backups/`、`botpy.log`）不在 sparse 管辖范围内，同样会挡住
-更新前的干净检查。
+未忽略的未跟踪文件会挡住更新前的干净检查；已忽略的 `backups/`、`botpy.log*` 和运行数据原地保留。
 
 更新不会把服务单元强推到布局不同的主机上。单元文件里写死了 env 文件和日志目录，
 仓库里的四个 Bot 单元指向隔离布局（`.env.test-bots`、`/opt/murmur/test/logs`）：
@@ -210,11 +210,12 @@ Units left in place, repo copy needs paths this host lacks:
 
 要采用隔离布局就按上面「测试 Bot 隔离」建好路径，下次更新会自动装上对应单元；
 在此之前旧单元继续读 `/opt/murmur/.env` 和 `/opt/murmur/logs/`，Bot 不会被改瘫。
-重启阶段也不再中途放弃：每个 enable 的服务都会重启。若有服务没起来（例如新版本
-需要的 env 变量未配置），更新会执行与测试失败相同的回滚——代码 reset 回旧提交、
-重装依赖，再重启一轮这些服务：全部恢复则报告已回滚到旧版本、更新被拒绝；仍有
-服务起不来则按名字列出并说明回滚后服务仍没起来。两种情况都以非零码退出，不会把
-代码停在新版本、服务瘫着的状态留给无人值守的主机。
+若任何安装、测试、服务配置或重启失败，更新器恢复旧 SHA、原 sparse/full 检出、旧安装目标、
+安装前的更新器、服务单元和 logrotate，并重启所有已尝试重启的服务，包括此前成功的服务。
+回滚成功仍返回非零，表示更新被拒绝。若回滚本身失败，报告 `ROLLBACK INCOMPLETE`，
+保留 `.git/murmur-update-txn.*` 的旧版本与文件快照清单及 `.git/murmur-update.lock`；下一次更新会拒绝运行。
+管理员应先检查输出路径、旧 revision、安装目标和服务状态，再按清单手动恢复；未核验前不要删除锁和恢复材料。
+更新器自我替换使用同目录原子 rename，不在运行时截断自身脚本。
 
 ```bash
 sudo systemctl start murmur-update

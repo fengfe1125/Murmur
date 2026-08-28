@@ -1,0 +1,170 @@
+name: Repository
+
+# Never path-filter this workflow: Repository gate is the single required check.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scope:
+    name: Change scope
+    runs-on: ubuntu-latest
+    outputs:
+      server: ${{ steps.scope.outputs.server }}
+      ios: ${{ steps.scope.outputs.ios }}
+      android: ${{ steps.scope.outputs.android }}
+      project_install: ${{ steps.layout.outputs.project_install }}
+      python_config: ${{ steps.layout.outputs.python_config }}
+      package_path: ${{ steps.layout.outputs.package_path }}
+      tests_path: ${{ steps.layout.outputs.tests_path }}
+      test_runner: ${{ steps.layout.outputs.test_runner }}
+      ios_project: ${{ steps.layout.outputs.ios_project }}
+      android_directory: ${{ steps.layout.outputs.android_directory }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - id: layout
+        name: Resolve old or new layout to fixed paths
+        run: python scripts/check/ci_scope.py layout --github-output "$GITHUB_OUTPUT"
+      - id: scope
+        name: Select checks from exact commits
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          HEAD_SHA: ${{ github.sha }}
+        run: >-
+          python scripts/check/ci_scope.py scope
+          --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA"
+          --github-output "$GITHUB_OUTPUT"
+
+  repository:
+    name: Repository checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Layout, documentation links and runtime-data boundaries
+        run: python scripts/check/check_repository.py
+      - name: Scope selection and gate regression tests
+        run: |
+          if [[ -f server/pyproject.toml ]]; then
+            python server/tests/test_ci_scope.py
+            python server/tests/test_repository_checks.py
+          else
+            python tests/test_ci_scope.py
+            python tests/test_repository_checks.py
+          fi
+      - name: Shell syntax
+        shell: bash
+        run: |
+          git ls-files -z -- '*.sh' 'deploy/murmur-update' 'infra/deploy/murmur-update' |
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done
+
+  server:
+    name: Server Python ${{ matrix.python }}
+    needs: scope
+    if: needs.scope.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.14']
+    env:
+      PROJECT_INSTALL: ${{ needs.scope.outputs.project_install }}
+      PYTHON_CONFIG: ${{ needs.scope.outputs.python_config }}
+      PACKAGE_PATH: ${{ needs.scope.outputs.package_path }}
+      TESTS_PATH: ${{ needs.scope.outputs.tests_path }}
+      TEST_RUNNER: ${{ needs.scope.outputs.test_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e "$PROJECT_INSTALL"
+      - name: Lint server, tests and repository Python scripts
+        run: ruff check --config "$PYTHON_CONFIG" "$PACKAGE_PATH" "$TESTS_PATH" scripts
+      - name: Run every existing test file
+        run: python "$TEST_RUNNER"
+
+  ios:
+    name: iOS build and unit tests
+    needs: scope
+    if: needs.scope.outputs.ios == 'true'
+    runs-on: macos-26
+    env:
+      XCODE_PROJECT: ${{ needs.scope.outputs.ios_project }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download Metal toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain
+      - name: Build
+        run: >-
+          xcodebuild -project "$XCODE_PROJECT" -scheme Murmur
+          -configuration Debug
+          -destination 'generic/platform=iOS Simulator'
+          build
+      - name: Unit tests
+        run: >-
+          xcodebuild test -project "$XCODE_PROJECT" -scheme Murmur
+          -destination 'platform=iOS Simulator,name=iPhone 17'
+          -only-testing:MurmurTests
+
+  android:
+    name: Android debug build
+    needs: scope
+    if: needs.scope.outputs.android == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Build debug APK
+        working-directory: ${{ needs.scope.outputs.android_directory }}
+        run: ./gradlew assembleDebug --no-daemon
+
+  gate:
+    name: Repository gate
+    needs: [scope, repository, server, ios, android]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Require every selected check to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/check/ci_scope.py gate

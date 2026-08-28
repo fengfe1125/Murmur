@@ -1,74 +1,292 @@
 #!/usr/bin/env bash
-# Pull a reviewed GitHub commit, verify it, then restart only enabled services.
-# This file is installed as /usr/local/sbin/murmur-update on the VPS.
-
+# Transactional release gate for both the legacy and server/ repository layouts.
+# Production is always /opt/murmur; --test-sandbox is an explicit isolated harness.
+# Runtime cwd, .env, .venv, databases, photos, and logs stay at the repository root.
 set -euo pipefail
+# SQLite snapshots and transaction metadata contain private application state.
+# Explicit install modes below still give service definitions their intended mode.
+umask 077
 
 APP_DIR=/opt/murmur
 SERVICE_USER=murmur
-BRANCH=${MURMUR_GIT_BRANCH:-main}
-# Updates may restart services that an operator already enabled. They never
-# enable a service, and platform bots still need their isolated env + CLI gate.
+BRANCH=main
+SYSTEMCTL=systemctl
+INSTALL=install
+UNIT_DIR=/etc/systemd/system
+SELF_PATH=/usr/local/sbin/murmur-update
+LOGROTATE_PATH=/etc/logrotate.d/murmur
+SANDBOX=
 SERVICES=(murmur-app-worker murmur-app-api murmur-web murmur-telegram murmur-dingtalk murmur-wechat murmur-qq)
 
-[[ ${EUID:-$(id -u)} -eq 0 ]] || {
-  echo "Run as root: sudo murmur-update" >&2
-  exit 2
-}
-[[ -d "$APP_DIR/.git" ]] || {
-  echo "$APP_DIR is not linked to GitHub yet." >&2
-  exit 2
-}
+die() { printf '%s\n' "$*" >&2; exit 2; }
+if (($#)); then
+  [[ $# -eq 2 && "$1" == --test-sandbox ]] || die 'Usage: murmur-update [--test-sandbox TEMP_ROOT]'
+  [[ -d "$2" && ! -L "$2" ]] || die 'Test sandbox must be a real temporary directory.'
+  SANDBOX=$(cd "$2" && pwd -P)
+  case "$SANDBOX" in
+    /tmp/murmur-updater-test.*|/private/tmp/murmur-updater-test.*) ;;
+    *) die 'Test sandbox must be a direct murmur-updater-test.* directory in /tmp.' ;;
+  esac
+  # Both explicit invocation and a fixture marker are required. No environment
+  # variable can slightly redirect a production invocation to a different host.
+  sandbox_name=${SANDBOX#/private}
+  sandbox_name=${sandbox_name#/tmp/}
+  [[ "$sandbox_name" != */* && -f "$SANDBOX/.murmur-updater-test" && ! -L "$SANDBOX/.murmur-updater-test" ]] || die 'Missing sandbox marker.'
+  [[ "$(cat "$SANDBOX/.murmur-updater-test")" == 'isolated-murmur-updater-test-v1' ]] || die 'Invalid sandbox marker.'
+  for path in "$SANDBOX/repo" "$SANDBOX/host" "$SANDBOX/host/units" "$SANDBOX/bin"; do
+    [[ -d "$path" && ! -L "$path" ]] || die "Unsafe sandbox path: $path"
+  done
+  # A nested fixture path or symlink must not escape the isolation root.
+  [[ "$(cd "$SANDBOX/repo" && pwd -P)" == "$SANDBOX/repo" ]] || die 'Unsafe sandbox checkout.'
+  APP_DIR="$SANDBOX/repo"
+  UNIT_DIR="$SANDBOX/host/units"
+  SELF_PATH="$SANDBOX/host/murmur-update"
+  LOGROTATE_PATH="$SANDBOX/host/logrotate"
+  SYSTEMCTL="$SANDBOX/bin/systemctl"
+  INSTALL="$SANDBOX/bin/install"
+  [[ -x "$SYSTEMCTL" && ! -L "$SYSTEMCTL" && -x "$INSTALL" && ! -L "$INSTALL" ]] || die 'Missing isolated host commands.'
+else
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || die 'Run as root: sudo murmur-update'
+  [[ "${MURMUR_GIT_BRANCH:-main}" == main ]] || die 'Only reviewed main fast-forward releases are supported.'
+fi
+[[ -d "$APP_DIR/.git" && ! -L "$APP_DIR/.git" ]] || die "$APP_DIR is not a standalone Git checkout."
+[[ -x "$APP_DIR/.venv/bin/python" && -x "$APP_DIR/.venv/bin/pip" ]] || die 'Existing root .venv is required.'
+cd "$APP_DIR"
 
 as_murmur() {
-  runuser -u "$SERVICE_USER" -- "$@"
+  if [[ -n "$SANDBOX" ]]; then "$@"; else runuser -u "$SERVICE_USER" -- "$@"; fi
+}
+git_murmur() { as_murmur git -C "$APP_DIR" "$@"; }
+
+if [[ -n "$SANDBOX" ]]; then
+  remote=$(git_murmur remote get-url origin)
+  [[ -d "$remote" && ! -L "$remote" ]] || die 'Sandbox origin must be a local fixture repository.'
+  remote=$(cd "$remote" && pwd -P)
+  [[ "$remote" == "$SANDBOX/"* ]] || die 'Sandbox origin cannot access another checkout or network.'
+  for path in "$APP_DIR/.git/info" "$APP_DIR/.git/config" "$APP_DIR/.git/config.worktree" "$APP_DIR/.git/hooks" "$APP_DIR/.venv" "$APP_DIR/.venv/bin" "$APP_DIR/.venv/bin/pip" "$APP_DIR/.venv/bin/python" "$APP_DIR/.env" "$UNIT_DIR" "$SELF_PATH" "$LOGROTATE_PATH"; do
+    [[ ! -L "$path" ]] || die "Unsafe sandbox symlink: $path"
+  done
+fi
+
+state=
+lock="$APP_DIR/.git/murmur-update.lock"
+locked=0
+transaction=0
+current=
+old_project=
+declare -a saved_paths=() temporary_paths=() attempted_services=() units_installed=() units_held=()
+
+snapshot_file() {
+  local dest=$1 number=${#saved_paths[@]}
+  [[ ! -L "$dest" ]] || die "Refusing to replace a symlink: $dest"
+  if [[ -e "$dest" ]]; then
+    [[ -f "$dest" ]] || die "Not a regular file: $dest"
+    cp -p "$dest" "$state/$number.saved"
+  fi
+  printf '%s\n' "$dest" >"$state/$number.path"
+  saved_paths+=("$dest")
 }
 
-git_murmur() {
-  as_murmur git -C "$APP_DIR" "$@"
+# Both installation and restoration use same-directory rename. Bash can keep
+# reading the inode of this installed updater while the next release replaces it.
+install_atomic() {
+  local source=$1 dest=$2 mode=$3 temp="$2.murmur-new.$$"
+  snapshot_file "$dest"
+  temporary_paths+=("$temp")
+  "$INSTALL" -m "$mode" "$source" "$temp"
+  mv -f "$temp" "$dest"
 }
 
-# Replace by rename. install(1) truncates in place, and this script overwrites
-# itself while bash is still reading it; a rename leaves that inode alone.
-install_self() {
-  install -m 0755 "$1" "$2.murmur-new"
-  mv -f "$2.murmur-new" "$2"
+choose_layout() {
+  if [[ -f server/pyproject.toml && -d server/murmur && -d server/tests && -f scripts/check/run_tests.py && -f infra/deploy/murmur-update ]]; then
+    project=./server
+    runner=scripts/check/run_tests.py
+    deploy_dir=infra/deploy
+  elif [[ -f pyproject.toml && -d murmur && -d tests && -f scripts/run_tests.py && -f deploy/murmur-update ]]; then
+    project=.
+    runner=scripts/run_tests.py
+    deploy_dir=deploy
+  else
+    die 'Unrecognized or incomplete repository layout.'
+  fi
 }
 
-# Absolute paths a unit needs before it can start here. A leading "-" marks a
-# path systemd itself treats as optional, so it is not a requirement.
+restore_files() {
+  local number dest temp
+  for ((number=${#saved_paths[@]}-1; number>=0; number--)); do
+    dest=${saved_paths[$number]}
+    if [[ -f "$state/$number.saved" ]]; then
+      temp="$dest.murmur-restore.$$"
+      temporary_paths+=("$temp")
+      [[ ! -d "$dest" && ! -L "$dest" ]] && cp -p "$state/$number.saved" "$temp" && mv -f "$temp" "$dest" || rollback_failed=1
+    else
+      rm -f -- "$dest" || rollback_failed=1
+    fi
+  done
+}
+
+finish() {
+  local status=$? service path rollback_failed=0
+  trap - EXIT INT TERM
+  set +e
+  if ((transaction)); then
+    printf 'Update rejected; restoring %s.\n' "$current" >&2
+    # Source and sparse configuration are restored before reinstalling the old
+    # editable target. Existing data is never replaced by the safety snapshot.
+    git_murmur reset --hard "$current" || rollback_failed=1
+    # Clearing skip-worktree bits while sparse mode is still enabled is necessary
+    # when the prior checkout was full. Merely restoring core.sparseCheckout=false
+    # and read-tree leaves omitted client files absent from the working tree.
+    git_murmur sparse-checkout disable || rollback_failed=1
+    restore_files
+    git_murmur read-tree -mu HEAD || rollback_failed=1
+    as_murmur "$APP_DIR/.venv/bin/pip" install -e "$old_project" || rollback_failed=1
+    if ((${#attempted_services[@]})); then
+      "$SYSTEMCTL" daemon-reload || rollback_failed=1
+      for service in "${attempted_services[@]}"; do
+        "$SYSTEMCTL" restart "$service" && "$SYSTEMCTL" is-active --quiet "$service" || rollback_failed=1
+      done
+    elif ((host_changed)); then
+      "$SYSTEMCTL" daemon-reload || rollback_failed=1
+    fi
+    if ((rollback_failed)); then
+      printf 'ROLLBACK INCOMPLETE: inspect code/install and systemctl status before retrying.\n' >&2
+      printf 'Recovery snapshots retained: %s\nUpdate lock retained: %s\n' "$state" "$lock" >&2
+    else
+      printf 'Restored old code, editable install, updater, units and affected services.\n' >&2
+    fi
+    status=1
+  fi
+  for path in ${temporary_paths[@]+"${temporary_paths[@]}"}; do rm -f -- "$path"; done
+  if ((rollback_failed == 0)); then
+    [[ -z "$state" ]] || rm -rf -- "$state"
+    ((locked == 0)) || rmdir "$lock"
+  fi
+  exit "$status"
+}
+host_changed=0
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir "$lock" || die 'An update is already running (inspect a stale lock before removing it).'
+locked=1
+[[ -z "$(git_murmur status --porcelain --untracked-files=all)" ]] || die 'Refusing to update: uncommitted source changes.'
+current=$(git_murmur rev-parse HEAD)
+[[ "$(git_murmur symbolic-ref --short HEAD)" == main ]] || die 'Production checkout must be on main.'
+choose_layout
+old_project=$project
+git_murmur fetch --prune origin "$BRANCH"
+target=$(git_murmur rev-parse "origin/$BRANCH")
+if [[ "$current" == "$target" ]]; then
+  printf 'Murmur is already at %s\n' "$current"
+  exit 0
+fi
+git_murmur merge-base --is-ancestor "$current" "$target" || die 'Refusing a non-fast-forward update.'
+
+# A manually started disabled service would retain the old process while its
+# source moved away. Keep the enabled-only restart contract and ask the operator
+# to reconcile that state, rather than silently enabling or ignoring the service.
+for service in "${SERVICES[@]}"; do
+  if "$SYSTEMCTL" is-active --quiet "$service" && ! "$SYSTEMCTL" is-enabled --quiet "$service"; then
+    die "Refusing to update: $service is active but disabled; reconcile its service state first."
+  fi
+done
+
+# Resolve .env using the same parser and explicit-environment precedence as the
+# CLI. Online SQLite backup includes committed WAL pages without stopping apps.
+# The existing venv already contains python-dotenv as a production dependency.
+as_murmur "$APP_DIR/.venv/bin/python" - "$APP_DIR" "$current" "$SANDBOX" <<'PY'
+import os
+import sqlite3
+import sys
+import time
+from pathlib import Path
+from dotenv import load_dotenv
+
+root, revision, sandbox = sys.argv[1:]
+root = Path(root)
+# Enforce privacy in the service-user process even if a PAM configuration changed
+# its inherited mask during runuser. Existing runtime files are never chmod-ed.
+os.umask(0o077)
+load_dotenv(root / ".env", override=False)
+# Config.load() supplies the base DB; AppSettings uses that same base whenever
+# either app-specific override is missing or empty. Snapshot each unique path.
+base = Path(os.getenv("MURMUR_DB", "./murmur.db")).expanduser()
+databases = {
+    "MURMUR_DB": base,
+    "MURMUR_APP_DB": Path(os.getenv("MURMUR_APP_DB") or str(base)).expanduser(),
+    "MURMUR_APP_MEMORY_DB": Path(os.getenv("MURMUR_APP_MEMORY_DB") or str(base)).expanduser(),
+}
+seen = set()
+for name, database in databases.items():
+    if not database.is_absolute():
+        database = root / database
+    database = database.resolve()
+    if sandbox and not database.is_relative_to(Path(sandbox)):
+        raise SystemExit("Sandbox database must remain inside the isolated fixture")
+    if database in seen:
+        continue
+    seen.add(database)
+    if not database.exists():
+        print(f"No database for {name} exists yet; skipping snapshot.")
+        continue
+    if not database.is_file():
+        raise SystemExit(f"Configured database {name} is not a regular file")
+    backup_dir = root / "backups"
+    if sandbox and not backup_dir.resolve().is_relative_to(Path(sandbox)):
+        raise SystemExit("Unsafe sandbox backup directory")
+    backup_dir.mkdir(exist_ok=True)
+    backup = backup_dir / f"{name.lower()}-{revision[:12]}-{time.time_ns()}.db"
+    try:
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as source:
+            with sqlite3.connect(backup) as destination:
+                source.backup(destination)
+    except BaseException:
+        backup.unlink(missing_ok=True)
+        raise
+    print(f"Created online pre-update SQLite snapshot for {name}.")
+PY
+
+state=$(mktemp -d "$APP_DIR/.git/murmur-update-txn.XXXXXX")
+printf '%s\n' "$current" >"$state/old-revision"
+printf '%s\n' "$old_project" >"$state/old-project"
+# These are the only Git configuration files changed by sparse-checkout. Restore
+# their existence, contents and permissions on rejection, including full checkouts.
+snapshot_file "$APP_DIR/.git/config"
+snapshot_file "$APP_DIR/.git/config.worktree"
+snapshot_file "$APP_DIR/.git/info/sparse-checkout"
+transaction=1
+# Expand BEFORE moving HEAD: otherwise the old sparse cone hides server/ in the
+# migration commit. scripts/ remains because release tests read operational files.
+git_murmur sparse-checkout set --cone murmur deploy tests server infra scripts
+git_murmur merge --ff-only "$target"
+choose_layout
+as_murmur "$APP_DIR/.venv/bin/pip" install -e "$project"
+as_murmur "$APP_DIR/.venv/bin/python" "$runner" --fail-fast
+
+# Systemd optional paths start with '-'; preserve that behavior. Required env,
+# writable directories and append-log parents must already exist on this host.
 unit_missing_paths() {
-  local line key value path
-  local -a paths
+  local line key value path assignment
+  local -a paths assignments
   while IFS= read -r line; do
     [[ "$line" == *=* ]] || continue
-    key=${line%%=*}
-    value=${line#*=}
+    key=${line%%=*}; value=${line#*=}
+    paths=()
     case "$key" in
-      EnvironmentFile|ConditionPathExists)
-        paths=("$value")
-        ;;
-      ReadWritePaths)
-        read -r -a paths <<<"$value"
-        ;;
+      EnvironmentFile|ConditionPathExists) paths=("${value//\"/}"); ;;
+      ReadWritePaths) read -r -a paths <<<"$value"; ;;
       Environment)
-        # KEY=VALUE tokens; an absolute VALUE like OPENCLAW_STATE_DIR=/x is a
-        # path the service cannot start without. Quotes are stripped, not
-        # parsed, and the absolute-path filter below drops plain values.
-        paths=()
         read -r -a assignments <<<"${value//\"/}"
         for assignment in ${assignments[@]+"${assignments[@]}"}; do
-          [[ "$assignment" == *=* ]] || continue
-          paths+=("${assignment#*=}")
+          [[ "$assignment" != *=* ]] || paths+=("${assignment#*=}")
         done
         ;;
       StandardOutput|StandardError)
         [[ "$value" == append:* ]] || continue
         paths=("$(dirname "${value#append:}")")
         ;;
-      *)
-        continue
-        ;;
+      *) continue; ;;
     esac
     for path in ${paths[@]+"${paths[@]}"}; do
       [[ "$path" == /* ]] || continue
@@ -77,152 +295,43 @@ unit_missing_paths() {
   done <"$1" | sort -u
 }
 
-# The repo also carries the iOS/Android client sources; the VPS only needs the
-# server tree. Sparse-checkout keeps app code off this host, and prunes app
-# directories left behind by a full checkout from before this split. Root-level
-# files (pyproject.toml, README, .env.example, .gitignore) are always part of a
-# cone checkout. scripts/ must stay: test_channel_gate and test_env_sanitizer
-# read files from it, and without them the update's test step fails and rolls
-# back. Sparse set itself never fails on dirty files outside the cone — it
-# leaves those paths behind with a warning, and the clean check below is what
-# actually refuses the update.
-git_murmur sparse-checkout set --cone murmur deploy tests scripts
-
-[[ -z "$(git_murmur status --porcelain)" ]] || {
-  echo "Refusing to update: $APP_DIR has uncommitted source changes." >&2
-  exit 1
-}
-
-current=$(git_murmur rev-parse HEAD)
-git_murmur fetch --prune origin "$BRANCH"
-target=$(git_murmur rev-parse "origin/$BRANCH")
-
-if [[ "$current" == "$target" ]]; then
-  echo "Murmur is already at $current"
-  exit 0
-fi
-
-git_murmur merge-base --is-ancestor "$current" "$target" || {
-  echo "Refusing a non-fast-forward update; inspect the Git history first." >&2
-  exit 1
-}
-
-# Snapshot the database before touching code: murmur.db is WAL, so a plain
-# file copy can be corrupt. MURMUR_DB may point off the default path, so
-# resolve it from .env the way config.py does (relative paths anchor at
-# APP_DIR). .backup is online, so services keep running; but a failed
-# snapshot aborts the update before anything changes.
-db_path=$(grep -m1 '^MURMUR_DB=' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2- || true)
-db_path=${db_path:-murmur.db}
-[[ "$db_path" == /* ]] || db_path="$APP_DIR/${db_path#./}"
-if [[ -f "$db_path" ]]; then
-  backup="$APP_DIR/backups/murmur-${current:0:12}-$(date +%Y%m%d-%H%M%S).db"
-  as_murmur mkdir -p "$APP_DIR/backups"
-  as_murmur sqlite3 "$db_path" ".backup '$backup'" || {
-    echo "Database snapshot failed; aborting the update before any code change." >&2
-    exit 1
-  }
-else
-  echo "No database at $db_path yet; skipping the pre-update snapshot."
-fi
-
-echo "Updating Murmur ${current:0:12} → ${target:0:12}"
-git_murmur merge --ff-only "$target"
-
-# The loop used to run bare, so only the last file's exit code survived and a
-# failure in the middle still counted as a pass.  The tests are this host's only
-# release gate; run them through scripts/run_tests.py (kept in lockstep with CI)
-# and stop the update when it reports a failure.
-if ! as_murmur bash -c "
-  set -e
-  cd '$APP_DIR'
-  .venv/bin/pip install -e .
-  .venv/bin/python scripts/run_tests.py --fail-fast
-"; then
-  echo "Checks failed; restoring $current and leaving running services untouched." >&2
-  git_murmur reset --hard "$current"
-  as_murmur bash -c "cd '$APP_DIR' && .venv/bin/pip install -e ."
-  exit 1
-fi
-
-# Let later releases improve this updater. These three are host-independent.
-install_self "$APP_DIR/deploy/murmur-update" /usr/local/sbin/murmur-update
-install -m 0644 "$APP_DIR/deploy/murmur-update.service" \
-  /etc/systemd/system/murmur-update.service
-install -m 0644 "$APP_DIR/deploy/murmur-logrotate" /etc/logrotate.d/murmur
-
-# Service units are not host-independent: they name an env file and a log
-# directory, and the repo ships the isolated test-bot layout. Installing one
-# over a host that lacks those paths repoints a running service at nothing —
-# ConditionPathExists then skips it and the bot stays down. So an update only
-# installs a unit this host can actually satisfy, and reports the rest for an
-# operator to migrate deliberately.
-declare -a units_installed=() units_held=()
-for source_unit in "$APP_DIR/deploy/"*.service; do
-  unit=$(basename "$source_unit")
-  if [[ "$unit" == murmur-update.service ]]; then
-    continue
-  fi
-  if cmp -s "$source_unit" "/etc/systemd/system/$unit"; then
-    continue
-  fi
+host_changed=1
+install_atomic "$deploy_dir/murmur-update" "$SELF_PATH" 0755
+install_atomic "$deploy_dir/murmur-update.service" "$UNIT_DIR/murmur-update.service" 0644
+install_atomic "$deploy_dir/murmur-logrotate" "$LOGROTATE_PATH" 0644
+for source_unit in "$deploy_dir/"*.service; do
+  unit=${source_unit##*/}
+  [[ "$unit" != murmur-update.service ]] || continue
+  if cmp -s "$source_unit" "$UNIT_DIR/$unit"; then continue; fi
   missing=$(unit_missing_paths "$source_unit")
   if [[ -n "$missing" ]]; then
-    units_held+=("$unit (this host has no ${missing//$'\n'/, })")
+    units_held+=("$unit (missing ${missing//$'\n'/, })")
     continue
   fi
-  install -m 0644 "$source_unit" "/etc/systemd/system/$unit"
+  install_atomic "$source_unit" "$UNIT_DIR/$unit" 0644
   units_installed+=("$unit")
 done
-systemctl daemon-reload
+"$SYSTEMCTL" daemon-reload
+# Reapply after successful tests, but still inside the transaction. A pruning
+# failure also restores the exact old checkout rather than half-finishing.
+if [[ "$project" == ./server ]]; then
+  git_murmur sparse-checkout set --cone server infra scripts
+else
+  git_murmur sparse-checkout set --cone murmur deploy tests scripts
+fi
 
-# Restart every enabled service before reporting: aborting part-way through
-# leaves the untouched ones on old code and says nothing about why.
-declare -a restarted=() failed=()
+# Never enable anything, including isolated test bots. Record a service before
+# attempting its restart, so rollback also catches a partially failed restart.
 for service in "${SERVICES[@]}"; do
-  if ! systemctl is-enabled --quiet "$service"; then
-    continue
-  fi
-  if systemctl restart "$service" && systemctl is-active --quiet "$service"; then
-    restarted+=("$service")
-  elif [[ "$(systemctl show -p ConditionResult --value "$service")" == no ]]; then
-    failed+=("$service (start condition not met)")
-  else
-    failed+=("$service")
-  fi
+  if ! "$SYSTEMCTL" is-enabled --quiet "$service"; then continue; fi
+  attempted_services+=("$service")
+  "$SYSTEMCTL" restart "$service"
+  "$SYSTEMCTL" is-active --quiet "$service"
 done
-
-printf 'Updated and restarted: %s\n' "${restarted[*]:-no enabled services}"
-if ((${#units_installed[@]})); then
-  printf 'Installed units: %s\n' "${units_installed[*]}"
-fi
+transaction=0
+printf 'Updated to %s; restarted: %s\n' "$target" "${attempted_services[*]:-no enabled services}"
+if ((${#units_installed[@]})); then printf 'Installed units: %s\n' "${units_installed[*]}"; fi
 if ((${#units_held[@]})); then
-  printf 'Units left in place, repo copy needs paths this host lacks:\n' >&2
+  printf 'Units left in place because required paths are missing:\n' >&2
   printf '  %s\n' "${units_held[@]}" >&2
-  printf 'Create those paths (deploy/README.md, "测试 Bot 隔离") to adopt them.\n' >&2
-fi
-if ((${#failed[@]})); then
-  printf 'Did not come back up:\n' >&2
-  printf '  %s\n' "${failed[@]}" >&2
-  # Same rollback as a failed check: restore the old tree, reinstall its
-  # dependencies, then give the failed services one more start on the old
-  # code. install_self already replaced the on-disk updater by rename, but
-  # this shell keeps reading the old inode, so the lines below still run.
-  echo "Rolling back to ${current:0:12}." >&2
-  git_murmur reset --hard "$current"
-  as_murmur bash -c "cd '$APP_DIR' && .venv/bin/pip install -e ."
-  declare -a still_failed=()
-  for entry in "${failed[@]}"; do
-    service=${entry%% (*}
-    systemctl restart "$service" && systemctl is-active --quiet "$service" \
-      || still_failed+=("$service")
-  done
-  if ((${#still_failed[@]})); then
-    printf 'Rolled back to %s, but these services are still down:\n' "${current:0:12}" >&2
-    printf '  %s\n' "${still_failed[@]}" >&2
-    printf 'Inspect with: systemctl status <service>\n' >&2
-  else
-    printf 'Rolled back to %s; update rejected, services are on the old code.\n' "${current:0:12}" >&2
-  fi
-  exit 1
 fi
