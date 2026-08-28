@@ -2,12 +2,11 @@
 
 > 状态：现状记录｜适用：2026-08-28 仓库整理及合并收口｜核验：2026-08-28｜依据：清理基线 main 1205a27；#19、#20 与 #17／#18 收口；Git refs、PR 与 worktree 实查
 
-## 当前保留
+## 长期保留与任务去向
 
 | 引用 | 去向与理由 |
 |---|---|
-| `main` | 唯一长期分支；#14、#15、#16、#19、#20 已合并，迁移与清理按 #17 → #18 收口。线上应用仍停留在 aae2580，合并不代表部署。 |
-| `codex/chore/repo/organize-source-layout` | [PR #17](https://github.com/fengfe1125/Murmur/pull/17)，桥接安装证据已具备；合并后按规范清理任务引用。 |
+| `main` | 唯一长期分支；本地已同步 #17 合并提交 caeb6c5，包含 #14、#15、#16、#19、#20。#18 随后交付文档清理；线上应用仍停留在 aae2580，合并不代表部署。 |
 | `codex/chore/repo/record-merged-work-cleanup` | [PR #18](https://github.com/fengfe1125/Murmur/pull/18)，原基于 #17；合并前改为 main 并复核仅文档差异，合并后不复用。 |
 | 本地 `docs/repo/name-branches-by-what-changed`（d6b6cdc） | 命名原则已吸收到现行协作规范；原提交仍独有，保留，不用旧 README 覆盖新定位。 |
 | 本地 `fix/reliability-and-metrics`（9e694a9） | 原本地可靠性工作保留；其修复已通过保留远端历史的 #14 合入，原提交不强制删掉。 |
@@ -60,6 +59,7 @@
 提交可从主线或 bundle 恢复为新 worktree；缓存可重建。当前只保留主工作目录，没有清理其中的运行数据。
 
 收口时额外创建的 `codex/fix/deploy/support-pre-bridge-checkouts`（d387716）已通过 #20 合入 main；其临时 worktree 检查仅有 Ruff 缓存后移除，本地引用也已删除，代码仍在主线中。
+#17 的 `codex/chore/repo/organize-source-layout`（c4db90d）合并到 caeb6c5 后，远端任务分支自动删除，本地引用确认被 main 保留后删除。#18 的任务分支在其合并后按相同规则清理，不继续复用。
 
 ## 原件与恢复材料
 

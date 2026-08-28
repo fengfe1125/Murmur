@@ -11,11 +11,13 @@
 
 私有仓库保持私有，已设置项目简介、合并后自动删除分支；main 禁止强推和删除，要求 PR 与 `Repository gate`，审批数量为 0，不要求单人自审，也未升级套餐。
 
-## 目录迁移：本地与 CI 已验证，PR 待合并
+## 目录迁移：已合并，应用未部署
 
 [PR #17](https://github.com/fengfe1125/Murmur/pull/17) 的提交 `6e46f5a022c4de00a8fed35dde20576991ba5007` 已通过
 [GitHub 全部检查](https://github.com/fengfe1125/Murmur/actions/runs/33138224775)：Python 3.11／3.14、iOS 构建与单元测试、Android Debug、仓库检查和 Repository gate。
-PR 仍为草稿，未合并、未部署。
+最终提交 `c4db90d9e49770e893150128fde2fb1597ffc59c` 在同步 #20 和安装证据后，通过 [全部 PR 检查](https://github.com/fengfe1125/Murmur/actions/runs/33154663234/attempts/2)，并于 2026-08-28 08:35 UTC 合入 main，合并提交 `caeb6c57da21826316366ca3ec7cc94df302d368`。应用未部署。
+首轮 iOS 日志已输出 `TEST SUCCEEDED`，但结束请求与工作流收尾重叠导致取消；未把取消记为代码断言失败，同一提交、相同测试重跑后统一门禁通过（iOS 6m5s）。
+合并后的 [主线验收](https://github.com/fengfe1125/Murmur/actions/runs/33155973824) 已独立通过：Python 3.11／3.14、iOS 构建与单元测试（5m4s）、Android Debug（5m9s）、仓库检查和统一门禁全部成功，未用 PR 记录替代。
 
 以下是初始迁移提交 `6e46f5a` 的核验记录；之后独立合入的 UI 修复见下节。
 
@@ -50,13 +52,13 @@ CI 构建、单元测试与统一门禁通过；另在独立 iPhone 17／iOS 26.
 ## 待部署，不越过生产门禁
 
 初始迁移阶段没有执行生产操作。后续经单独授权完成 [桥接安装](../operations/bridge-installation-2026-08-28.md)，线上代码仍为 aae2580，业务进程未重启，运行数据与配置未改动。
-桥接安装前置条件已经满足；目录迁移仍需最终提交 CI 通过后合并，新布局应用部署尚未授权、未执行。
+桥接安装与 #17 合并已完成；新布局应用部署尚未授权、未执行。#18 只交付整理及验收记录，最终提交和合并状态以其 PR 为准。
 Android 正式认证/推送、App Attest/APNs 真机与生产健康检查未在本轮宣称验收。
 
 ## 保全
 
 开始操作前制作包含所有 Git refs 的 bundle，并保留两份原始未跟踪文档；本机保全目录在被忽略的 `.trash-backup/reorg-20260828.h11qmY/`。
 产品调研已归档，VPS 连接说明归入运维文档并脱敏；原件没有被公开提交。旧 stash 原样保留，不自动应用或清空。
-已清除 10 条旧远端分支、18 条已合并本地引用及 3 个旧 worktree，详见 [PR #18](https://github.com/fengfe1125/Murmur/pull/18) 的 [处置清单](branch-disposition.md)。两条独有历史分支与 stash 均保留。
+初始清理已清除 10 条旧远端分支、18 条已合并本地引用及 3 个旧 worktree，详见 [PR #18](https://github.com/fengfe1125/Murmur/pull/18) 的 [处置清单](branch-disposition.md)。两条独有历史分支与 stash 均保留。
 本次收口另移除已合并的 #20 临时工作区及本地引用，安装程序、只读预检和 5 项安装回退测试源码保全在原备份目录的 `bridge-closeout/` 中。
 清理 PR 的最终差异仅为文档；统一工作流仍运行仓库检查与门禁，显式跳过无关构建。按 #17 → #18 顺序合并，最终状态及提交以各 PR 为准，不据此执行生产部署。
