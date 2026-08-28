@@ -5,7 +5,7 @@
 set -euo pipefail
 umask 077
 
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 MODE=""
 SSH_TARGET=""
 GCE_INSTANCE=""
@@ -16,8 +16,8 @@ REPOSITORY=""
 usage() {
   cat <<'EOF'
 Usage:
-  ./scripts/link-vps-to-github.sh --repo OWNER/REPO --ssh user@host
-  ./scripts/link-vps-to-github.sh --repo OWNER/REPO --gcloud INSTANCE --zone ZONE --project PROJECT
+  ./scripts/ops/link-vps-to-github.sh --repo OWNER/REPO --ssh user@host
+  ./scripts/ops/link-vps-to-github.sh --repo OWNER/REPO --gcloud INSTANCE --zone ZONE --project PROJECT
 
 Creates a read-only GitHub Deploy Key for one VPS. The VPS keeps .env, SQLite,
 logs, dossiers, photos and WeChat state; only tracked source code is reset.
@@ -127,22 +127,23 @@ for service in murmur-app-worker murmur-app-api murmur-web murmur-telegram murmu
   systemctl stop "\$service" 2>/dev/null || true
 done
 sudo -u murmur -H git -C "\$APP_DIR" reset --hard "origin/\$BRANCH"
+sudo -u murmur -H git -C "\$APP_DIR" checkout -B main "origin/\$BRANCH"
 # 仓库同时装着 iOS/Android 客户端代码，VPS 只需要服务端目录；cone 模式的
 # sparse-checkout 会把刚检出或旧布局残留的 App 目录从工作区清掉。根目录
-# 文件（pyproject.toml 等）始终保留。scripts/ 必须保留：测试套件会读它，
+# 文件（README 等）始终保留。scripts/ 必须保留：测试套件会读它，
 # 缺了 murmur-update 的测试阶段会失败回滚。murmur-update 每次更新也会
 # 重复这一步。
-sudo -u murmur -H git -C "\$APP_DIR" sparse-checkout set --cone murmur deploy tests scripts
+sudo -u murmur -H git -C "\$APP_DIR" sparse-checkout set --cone server infra scripts
 chown -R murmur:murmur "\$APP_DIR"
 chmod 600 "\$APP_DIR/.env"
 sudo -u murmur -H bash -c '
   cd /opt/murmur
-  .venv/bin/pip install -e .
-  for test in tests/test_*.py; do .venv/bin/python "\$test"; done
+  .venv/bin/pip install -e ./server
+  .venv/bin/python scripts/check/run_tests.py --fail-fast
 '
-install -m 0755 "\$APP_DIR/deploy/murmur-update" /usr/local/sbin/murmur-update
-install -m 0644 "\$APP_DIR/deploy/murmur-update.service" /etc/systemd/system/murmur-update.service
-install -m 0644 "\$APP_DIR/deploy/murmur-logrotate" /etc/logrotate.d/murmur
+install -m 0755 "\$APP_DIR/infra/deploy/murmur-update" /usr/local/sbin/murmur-update
+install -m 0644 "\$APP_DIR/infra/deploy/murmur-update.service" /etc/systemd/system/murmur-update.service
+install -m 0644 "\$APP_DIR/infra/deploy/murmur-logrotate" /etc/logrotate.d/murmur
 # Linking to GitHub does not re-lay-out the host. The service units already
 # installed here keep pointing at the env files and log directories this host
 # has; murmur-update adopts a repo unit once its paths exist.

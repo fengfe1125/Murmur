@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_LAYOUT = "either"  # The directory-migration commit changes this to new.
+EXPECTED_LAYOUT = "new"
 LINK = re.compile(r"!?\[[^\]\n]*\]\(([^)\n]+)\)")
 PRIVATE_PATTERNS = (
     ".env", ".env.test-bots", ".env.dev-app", "*.local.xcconfig", "*.p8",

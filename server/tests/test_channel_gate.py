@@ -216,26 +216,26 @@ with tempfile.TemporaryDirectory() as directory:
           qq_http.sent is False)
 
 print("\n── 部署不会偷偷启用 Bot " + "─" * 32)
-root = Path(__file__).resolve().parent.parent
+root = Path(__file__).resolve().parents[2]
 deployment_scripts = "\n".join(
     (root / relative).read_text()
     for relative in (
-        "deploy/murmur-update",
-        "scripts/link-vps-to-github.sh",
-        "scripts/migrate-to-vps.sh",
+        "infra/deploy/murmur-update",
+        "scripts/ops/link-vps-to-github.sh",
+        "scripts/ops/migrate-to-vps.sh",
     )
 )
 for service in ("telegram", "dingtalk", "wechat", "qq"):
     forbidden = f"systemctl enable --now murmur-{service}"
     check(f"脚本不会自动 enable {service}", forbidden not in deployment_scripts)
-    unit = (root / f"deploy/murmur-{service}.service").read_text()
+    unit = (root / f"infra/deploy/murmur-{service}.service").read_text()
     check(f"{service} unit 只读测试环境",
           "EnvironmentFile=/opt/murmur/.env.test-bots" in unit
           and "ReadWritePaths=/opt/murmur/test" in unit)
 
-api_unit = (root / "deploy/murmur-app-api.service").read_text()
-worker_unit = (root / "deploy/murmur-app-worker.service").read_text()
-caddy = (root / "deploy/Caddyfile.example").read_text()
+api_unit = (root / "infra/deploy/murmur-app-api.service").read_text()
+worker_unit = (root / "infra/deploy/murmur-app-worker.service").read_text()
+caddy = (root / "infra/deploy/Caddyfile.example").read_text()
 check("App API 只监听 loopback:8766",
       "app-api --host 127.0.0.1 --port 8766" in api_unit)
 check("App Worker 有独立常驻服务", "murmur app-worker" in worker_unit)
@@ -255,7 +255,7 @@ check("Caddy 不把认证 header 写进 access log",
       "log {" not in caddy and "format json" not in caddy)
 
 production_env = (root / ".env.example").read_text()
-test_env = (root / "deploy/test-bots.env.example").read_text()
+test_env = (root / "infra/deploy/test-bots.env.example").read_text()
 check("生产 env 模板不夹带平台凭据",
       all(name not in production_env for name in (
           "TELEGRAM_BOT_TOKEN=", "DINGTALK_CLIENT_SECRET=",
@@ -266,18 +266,17 @@ check("测试 env 同时隔离数据库、日志并显式开门",
       and "MURMUR_DB=/opt/murmur/test/murmur.db" in test_env
       and "MURMUR_LOGDIR=/opt/murmur/test/logs" in test_env)
 
-migration = (root / "scripts/migrate-to-vps.sh").read_text()
-setup = (root / "scripts/setup-murmur.sh").read_text()
+migration = (root / "scripts/ops/migrate-to-vps.sh").read_text()
+setup = (root / "scripts/dev/setup-murmur.sh").read_text()
 gitignore = (root / ".gitignore").read_text()
-check("生产迁移排除测试凭据和 Apple 私钥",
-      "--exclude='Murmur/.env.test-bots'" in migration
-      and "--exclude='Murmur/*.p8'" in migration
-      and "--exclude='Murmur/*.p12'" in migration
-      and "--exclude='Murmur/*.mobileprovision'" in migration)
+check("生产迁移先验证 Git 允许清单源码包再连接远端",
+      '"$ROOT_DIR/scripts/check/package_source.py"' in migration
+      and migration.index('"$ROOT_DIR/scripts/check/package_source.py"') < migration.index('remote_run "true"'))
 check("原图、App 锁与微信扫码凭据不会进 Git/源码包",
       all(f"{name}/" in gitignore for name in ("app-uploads", "app-locks", "openclaw"))
-      and all(f"--exclude='Murmur/{name}'" in migration
-              for name in ("app-uploads", "app-locks", "openclaw", "wechat", "test")))
+      and 'SOURCE_ARCHIVE' in migration)
+# test_source_package.py exercises the actual allowlist, tracked secret rejection,
+# archive membership and untracked private data, instead of an excludes-only string list.
 check("设置向导精确加载刚写入的生产 env",
       '.venv/bin/python - "$ENV_FILE"' in setup
       and "load_dotenv(sys.argv[1], override=True)" in setup)

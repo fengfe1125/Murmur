@@ -22,24 +22,24 @@
 
 ```sh
 uv venv
-uv pip install -e '.[dev]'
+uv pip install -e './server[dev]'
 cp .env.example .env
 # 填写开发环境配置；不要把生产密钥提交到 Git。
-.venv/bin/python scripts/run_tests.py
+.venv/bin/python scripts/check/run_tests.py
 ```
 
 按需运行 `murmur app-worker` 和 `murmur app-api --host 127.0.0.1 --port 8766`。
 正式设备验证默认失败关闭；开发 token 只用于明确隔离的 Debug 开发环境，不能进入 Release。
 
-- [iOS 开发](MurmurApp/README.md)
-- [Android 开发](android/README.md)
-- [服务端与测试](docs/development/server.md)
+- [iOS 开发](apps/ios/MurmurApp/README.md)
+- [Android 开发](apps/android/README.md)
+- [服务端与测试](server/README.md)
 - [部署与运维](docs/operations/deployment.md)
 
 ## 仓库与协作
 
 一条长期主干 `main`，各平台按目录分工，不按长期分支分家。
-[仓库地图](docs/development/repository-layout.md) 记录当前路径与目标路径；
+[仓库地图](docs/development/repository-layout.md) 记录目录职责与旧新路径映射；
 [协作规范](docs/development/workflow.md) 规定分支、文档状态及合并验收。
 
 Telegram、钉钉、微信、QQ 仅保留为隔离测试通道，不是正式产品入口。

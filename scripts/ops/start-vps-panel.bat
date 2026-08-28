@@ -1,11 +1,11 @@
 @echo off
 chcp 65001 >nul
 rem ── Murmur VPS 面板：双击打开（状态 + 创建邀请码）──────────────
-rem 详细说明见 docs\win-vps-panel.md
-cd /d "%~dp0\.."
+rem 详细说明见 docs\operations\windows-panel.md
+cd /d "%~dp0\..\.."
 
 if not exist .venv\Scripts\murmur.exe (
-  echo [X] 还没装依赖。先按 docs\win-vps-panel.md 做一次初始化。
+  echo [X] 还没装依赖。先按 docs\operations\windows-panel.md 做一次初始化。
   pause
   exit /b 1
 )

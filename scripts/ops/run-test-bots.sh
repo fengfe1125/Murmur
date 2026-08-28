@@ -2,21 +2,21 @@
 # 本地跑 Murmur。挂了自动拉起——看门狗判定卡死时会 exit 75，靠这里重启。
 # 服务器上不用这个，systemd 的 Restart=always 管这件事。
 #
-#   cp deploy/test-bots.env.example .env.test-bots
-#   ./run.sh bot        只跑 Telegram 测试通道
-#   ./run.sh dingtalk   只跑钉钉测试通道
-#   ./run.sh wechat     只跑微信测试通道
-#   ./run.sh qq         只跑 QQ 测试通道
-#   ./run.sh all        四个都跑（默认；没配的会自己退出，不影响别的）
+#   cp infra/deploy/test-bots.env.example .env.test-bots
+#   ./scripts/ops/run-test-bots.sh bot        只跑 Telegram 测试通道
+#   ./scripts/ops/run-test-bots.sh dingtalk   只跑钉钉测试通道
+#   ./scripts/ops/run-test-bots.sh wechat     只跑微信测试通道
+#   ./scripts/ops/run-test-bots.sh qq         只跑 QQ 测试通道
+#   ./scripts/ops/run-test-bots.sh all        四个都跑（默认；没配的会自己退出，不影响别的）
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/../.."
 
 BIN=".venv/bin/murmur"
 
 # 旧平台不再读生产 .env。测试凭据和测试 DB 必须放在独立文件中，
 # 否则一次性退出；门禁失败不是可恢复崩溃，绝不进 supervise 循环。
 [ -f .env.test-bots ] || {
-  echo "旧平台只能在隔离测试环境启动：先复制 deploy/test-bots.env.example 为 .env.test-bots" >&2
+  echo "旧平台只能在隔离测试环境启动：先复制 infra/deploy/test-bots.env.example 为 .env.test-bots" >&2
   exit 2
 }
 set -a
@@ -54,7 +54,7 @@ supervise() {
     [ $ran -ge 120 ] && delay=5
     # 不靠退出码判断该不该重启：PTB 收到 SIGTERM 会**优雅退出并返回 0**，
     # 跟"我不想跑了"长得一模一样。曾经因此 pkill 之后 Telegram 再也没起来。
-    # 想真正停下就杀 run.sh 本身（下面 all 分支里打印了命令）。
+    # 想真正停下就杀 run-test-bots.sh 本身（下面 all 分支里打印了命令）。
     echo "=== $(date '+%F %T') $what 退出码 $code，${delay}s 后重启 ===" >> "$log"
     sleep "$delay"
     # 退避到 60 秒封顶：网络长时间不通时别把日志刷爆
@@ -90,16 +90,16 @@ case "${1:-all}" in
       supervise wechat &
       running="$running + 微信"
     else
-      echo "（微信未登录，跳过。要接：见 deploy/test-bots.env.example 的 WECHAT_ 配置）"
+      echo "（微信未登录，跳过。要接：见 infra/deploy/test-bots.env.example 的 WECHAT_ 配置）"
     fi
     if [ -n "${QQ_APP_ID:-}" ]; then
       supervise qq &
       running="$running + QQ"
     else
-      echo "（QQ 未配置，跳过。要接：见 deploy/test-bots.env.example 的 QQ_ 配置）"
+      echo "（QQ 未配置，跳过。要接：见 infra/deploy/test-bots.env.example 的 QQ_ 配置）"
     fi
     echo "$running 在跑。日志：$LOGDIR/murmur_*.log"
-    echo "停止：pkill -f 'run.sh|murmur bot|murmur dingtalk|murmur wechat|murmur qq'"
+    echo "停止：pkill -f 'run-test-bots.sh|murmur bot|murmur dingtalk|murmur wechat|murmur qq'"
     wait
     ;;
   *) echo "用法: $0 [bot|dingtalk|wechat|qq|all]"; exit 2 ;;

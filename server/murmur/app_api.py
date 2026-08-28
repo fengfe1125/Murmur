@@ -1,7 +1,8 @@
-"""HTTPS-facing API for the first-party Murmur iOS app.
+"""Shared HTTPS/SSE boundary for the first-party Murmur mobile clients.
 
 FastAPI and multipart imports are intentionally delayed so the existing bot
-commands remain usable before the App API optional runtime has been installed.
+commands remain importable independently. Authentication, uploads and event
+contracts stay here; journal drafting and client-side history are not this API.
 """
 
 from __future__ import annotations

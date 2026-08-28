@@ -41,7 +41,7 @@ for label, module in (
     check(f"{label} run() 调用 require_test_bot", "require_test_bot" in source)
 
 print("\n── 本地 supervise 门禁 " + "─" * 37)
-run_source = (ROOT / "run.sh").read_text(encoding="utf-8")
+run_source = (ROOT.parent / "scripts/ops/run-test-bots.sh").read_text(encoding="utf-8")
 check("run.sh 只读取隔离测试配置", ". ./.env.test-bots" in run_source)
 check("run.sh 不再 source 生产 .env", ". ./.env\n" not in run_source)
 check("run.sh 要求 transition", 'MURMUR_CHANNEL_MODE:-' in run_source)

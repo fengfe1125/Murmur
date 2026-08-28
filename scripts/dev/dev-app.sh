@@ -2,11 +2,11 @@
 #
 # Run the iOS app against a Murmur App backend -- local, or the VPS over SSH.
 #
-#   ./scripts/dev-app.sh                     # local API, build, install, launch
-#   ./scripts/dev-app.sh --api-only          # just the local API
-#   ./scripts/dev-app.sh --invite            # local permanent invite code
-#   ./scripts/dev-app.sh --vps user@host     # tunnel to the VPS API and launch
-#   ./scripts/dev-app.sh --vps user@host --invite   # invite code on the VPS
+#   ./scripts/dev/dev-app.sh                     # local API, build, install, launch
+#   ./scripts/dev/dev-app.sh --api-only          # just the local API
+#   ./scripts/dev/dev-app.sh --invite            # local permanent invite code
+#   ./scripts/dev/dev-app.sh --vps user@host     # tunnel to the VPS API and launch
+#   ./scripts/dev/dev-app.sh --vps user@host --invite   # invite code on the VPS
 #
 # Why a tunnel and not a public port: murmur-app-api binds 127.0.0.1 on purpose.
 # Without a domain there is no public TLS certificate, so exposing 8766 would
@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 ROOT="$PWD"
 ENV_FILE="$ROOT/.env.dev-app"
 PY="${PY:-$ROOT/.venv/bin/python}"
@@ -135,7 +135,7 @@ print(ds[0]["udid"] if ds else "")')
 DD="$ROOT/.build/dev-app"
 # pipefail is on: without the if, a failed build still exits 0 here because
 # grep happily matches "BUILD FAILED", and simctl would install a stale .app.
-if ! xcodebuild -project MurmurApp.xcodeproj -scheme "$SCHEME" -configuration Debug \
+if ! xcodebuild -project apps/ios/MurmurApp.xcodeproj -scheme "$SCHEME" -configuration Debug \
   -sdk iphonesimulator -destination "id=$UDID" -derivedDataPath "$DD" build \
   | grep -E "error:|BUILD"; then
   echo "构建失败：不安装残留的旧 .app，先修好上面的 error。" >&2
@@ -149,7 +149,7 @@ SIMCTL_CHILD_MURMUR_DEV_BYPASS_TOKEN="$TOKEN" \
 
 echo
 if [ -n "$SSH_TARGET" ]; then
-  echo "App 已连到 VPS。取邀请码：./scripts/dev-app.sh --vps $SSH_TARGET --invite"
+  echo "App 已连到 VPS。取邀请码：./scripts/dev/dev-app.sh --vps $SSH_TARGET --invite"
   echo "Ctrl-C 断开隧道。"
 else
   echo "邀请码（长期有效，可重复兑换）："

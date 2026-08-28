@@ -1,6 +1,6 @@
 """看板里那些"笨但必须对"的地方。
 
-看板本身是只读的，出错顶多是页面难看——除了两件事：
+本文件覆盖查看逻辑；授权写接口另由 test_vps_panel.py 验收。重点是：
 1. **脱敏**。日志里有 Telegram 的完整 token（PTB 把它写进 getUpdates 的 URL），
    漏一个就等于把 bot 的控制权贴在网页上。
 2. **聊天流的去重**。entry.reply 存的是"他之后回的话"，而这句话通常又会
@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -31,6 +32,7 @@ from murmur.web import (  # noqa: E402
     _person,
     _person_id,
     _platform_of,
+    _processes,
     _redact,
     _split_thread,
     _tail,
@@ -89,6 +91,14 @@ check("日志末尾错误需要留意",
       _health(True, [{"pid": 1}], {"last_line": "ClientConnectorError"})["level"]
       == "degraded")
 check("安静但运行的进程不误报", _health(True, [{"pid": 1}], {})["level"] == "healthy")
+
+with patch("murmur.web._run", return_value=(
+    "11 00:10 1024 0.0 bash /opt/murmur/scripts/ops/run-test-bots.sh murmur bot\n"
+    "12 00:10 1024 0.0 bash /opt/murmur/run.sh murmur bot\n"
+    "13 00:10 1024 0.0 /opt/murmur/.venv/bin/murmur bot\n"
+)):
+    check("迁移前后 Bot 监督脚本均不计作实际服务进程",
+          [process["pid"] for process in _processes()["bot"]] == [13])
 
 
 print("\n── 聊天流：一句话只画一遍 " + "─" * 34)

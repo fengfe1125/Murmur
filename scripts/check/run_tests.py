@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""统一跑全部测试：每个 tests/test_*.py 当脚本跑，全部跑完再汇总。
+"""统一跑全部测试：每个 server/tests/test_*.py 当脚本跑，全部跑完再汇总。
 
-为什么存在：裸 `for f in tests/test_*.py` 循环在第一个失败就停，一次
+为什么存在：裸 `for f in server/tests/test_*.py` 循环在第一个失败就停，一次
 只能看到一个问题；这里全部跑完，把失败名单一次给全。为什么不用
 unittest discover：一半测试是脚本式的，import 那一刻就把自己跑完再
 sys.exit()，discover 会把它们整批报成 import error（README「测试」
 一节）。逐个当脚本跑是唯一对两种风格都成立的方式。
 
-谁调用它就用谁的解释器：本机 `.venv/bin/python scripts/run_tests.py`，
+谁调用它就用谁的解释器：本机 `.venv/bin/python scripts/check/run_tests.py`，
 CI 里是 pip install 过的系统 python，VPS 上是 murmur-update 的
 `.venv/bin/python`——三处跑的是同一份名单，答案才有可比性。
 
 用法：
-    scripts/run_tests.py                    # 全部
-    scripts/run_tests.py tests/test_web.py  # 只跑指定的几个
-    scripts/run_tests.py --fail-fast        # 第一个失败就停（旧行为）
+    scripts/check/run_tests.py                    # 全部
+    scripts/check/run_tests.py server/tests/test_web.py  # 只跑指定的几个
+    scripts/check/run_tests.py --fail-fast        # 第一个失败就停（旧行为）
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 
 # 单个测试的超时。绝大多数几秒跑完；给足余量是防某个测试死等网络
 # 把整个闸门挂住——超时按失败算，名单里能看到是哪个。
@@ -53,9 +53,9 @@ def main() -> int:
             print("找不到测试文件：" + ", ".join(missing), file=sys.stderr)
             return 2
     else:
-        tests = sorted(ROOT.glob("tests/test_*.py"))
+        tests = sorted(ROOT.glob("server/tests/test_*.py"))
     if not tests:
-        print("tests/ 下没有 test_*.py", file=sys.stderr)
+        print("server/tests/ 下没有 test_*.py", file=sys.stderr)
         return 2
 
     # (文件名, 怎么挂的)。原因要带到最后的名单里：超时的提示打在 300 秒

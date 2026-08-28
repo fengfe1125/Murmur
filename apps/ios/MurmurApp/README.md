@@ -4,18 +4,18 @@
 
 iOS 是体验主线，最低 iOS 18，不支持 Mac Catalyst。当前入口仍是聊天、当年今日、我的。
 聊天在本机保留并恢复；照片房间使用独立按天存档，可续聊旧日期。清空两个记录分别操作。
-新定位中的日记确认和风格选择尚未实现，见 [当前能力](../docs/product/current-state.md)。
+新定位中的日记确认和风格选择尚未实现，见 [当前能力](../../../docs/product/current-state.md)。
 
 ## 开发
 
-从仓库根目录打开 `MurmurApp.xcodeproj`，使用共享 scheme `Murmur`。
+从仓库根目录打开 `apps/ios/MurmurApp.xcodeproj`，使用共享 scheme `Murmur`。
 按 `Config/Debug.local.xcconfig.example` 配置 Debug 地址和显式开发 token；原件、密钥均不提交。
 Release 从本地配置读取 HTTPS 地址，不包含开发绕过；不要因移动文件重置 bundle ID、签名或客户端存储。
 
 ```sh
-xcodebuild -project MurmurApp.xcodeproj -scheme Murmur \
+xcodebuild -project apps/ios/MurmurApp.xcodeproj -scheme Murmur \
   -destination 'generic/platform=iOS Simulator' build
-xcodebuild test -project MurmurApp.xcodeproj -scheme Murmur \
+xcodebuild test -project apps/ios/MurmurApp.xcodeproj -scheme Murmur \
   -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:MurmurTests
 ```
 

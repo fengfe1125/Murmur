@@ -1,12 +1,9 @@
-"""看板：一个只读的网页，随时能看到它现在是什么状态。
+"""管理员运维面板：查看状态与诊断，不是用户产品入口。
 
-为什么是 stdlib 的 http.server 而不是 FastAPI：
-这是给一个人在本机看的面板，并发量是"我按了下刷新"。为它多装
-uvicorn + fastapi 两个包不划算，而且 Murmur 的依赖表是刻意维持得很短的。
+使用 stdlib 的 http.server；共享 App API 则使用 FastAPI。
 
-**只读**是设计上的硬约束：这个进程不发消息、不改记忆、不碰 .env。
-唯一的写操作是把 DeepSeek 的余额快照记进 balance_snapshots
-（额度只有一个"此刻的百分比"接口，不自己攒就永远看不到"变化"）。
+面板会写 balance_snapshots，授权写接口也可通过既有 SSH 权限创建邀请码；
+不能统称为只读。产品聊天、照片房间存档和未来日记是不同的数据概念。
 
 默认只绑 127.0.0.1。面板上有聊天原文和记忆文件，那是很私人的东西，
 不该因为在咖啡馆连了个 wifi 就暴露在局域网里。
@@ -148,7 +145,7 @@ def _processes() -> dict[str, list[dict]]:
             continue
         pid, etime, rss, pcpu, args = parts
         # 看板自己也是 murmur 进程，别把自己算进去
-        if "murmur" not in args or "run.sh" in args \
+        if "murmur" not in args or "run.sh" in args or "run-test-bots.sh" in args \
                 or re.search(r"murmur\s+web(\s|$)", args):
             continue
         for kind in PLATFORMS:
