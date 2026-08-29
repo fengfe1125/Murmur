@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "rubric": ["接住情绪", "不复读开头", "不乱追问", "正确回访", "气泡节奏", "事实一致"],
+  "cases": [
+    {"id":"emotion-01","category":"emotion","user":"面试没过，我有点难受","history":[],"must_include_any":["难受","没过","缓缓"],"forbidden_openers":["怎么了呀","说说呗"],"max_questions":1},
+    {"id":"emotion-02","category":"emotion","user":"终于拿到 offer 了","history":[],"must_include_any":["终于","拿到","开心","厉害"],"forbidden_openers":["怎么了呀"],"max_questions":1},
+    {"id":"emotion-03","category":"emotion","user":"今天什么都不想说","history":[],"must_include_any":["不说","陪你","歇会"],"forbidden_openers":["为什么","说说呗"],"max_questions":0},
+    {"id":"emotion-04","category":"emotion","user":"我妈又催我结婚了，烦","history":[],"must_include_any":["烦","催"],"forbidden_openers":["怎么了呀"],"max_questions":1},
+    {"id":"emotion-05","category":"emotion","user":"猫检查结果没事，吓死我了","history":[],"must_include_any":["没事","放心","吓"],"forbidden_openers":["怎么了呀"],"max_questions":1},
+
+    {"id":"continuity-01","category":"continuity","user":"过了","history":["你今天面试，结束了告诉我"],"continuity_fact":"今天面试","must_include_any":["面试","过了","恭喜"],"forbidden_openers":["什么过了"],"max_questions":1},
+    {"id":"continuity-02","category":"continuity","user":"还是决定不去了","history":["你周末在犹豫要不要参加同学聚会"],"continuity_fact":"同学聚会","must_include_any":["聚会","不去","决定"],"forbidden_openers":["去哪"],"max_questions":1},
+    {"id":"continuity-03","category":"continuity","user":"药吃完了","history":["猫这周在吃药"],"continuity_fact":"猫吃药","must_include_any":["猫","药"],"forbidden_openers":["什么药"],"max_questions":1},
+    {"id":"continuity-04","category":"continuity","user":"明天下午三点面试","history":[],"continuity_fact":"明天下午三点面试","must_include_any":["明天","三点","面试"],"forbidden_openers":["怎么了呀"],"max_questions":1},
+    {"id":"continuity-05","category":"continuity","user":"快递终于到了","history":["你等新键盘的快递"],"continuity_fact":"新键盘快递","must_include_any":["键盘","到了"],"forbidden_openers":["什么快递"],"max_questions":1},
+
+    {"id":"technical-01","category":"competence","user":"SSE 重连还是丢事件","history":[],"must_include_any":["SSE","重连","事件"],"forbidden_openers":["SSE 是什么","怎么了呀"],"max_questions":1},
+    {"id":"technical-02","category":"competence","user":"SQLite WAL 又锁了","history":[],"must_include_any":["WAL","锁","SQLite"],"forbidden_openers":["WAL 是什么"],"max_questions":1},
+    {"id":"technical-03","category":"competence","user":"CI 两个 Python 版本只有 3.11 红","history":[],"must_include_any":["3.11","CI"],"forbidden_openers":["CI 是什么"],"max_questions":1},
+    {"id":"technical-04","category":"competence","user":"模型又把 JSON 截断了","history":[],"must_include_any":["JSON","截断"],"forbidden_openers":["JSON 是什么"],"max_questions":1},
+    {"id":"technical-05","category":"competence","user":"APNs token 轮换后推送恢复了","history":[],"must_include_any":["推送","恢复","token"],"forbidden_openers":["APNs 是什么"],"max_questions":1},
+
+    {"id":"restraint-01","category":"restraint","user":"嗯","history":[],"must_include_any":[],"forbidden_openers":["怎么了呀","说说呗"],"max_questions":1},
+    {"id":"restraint-02","category":"restraint","user":"睡了","history":[],"must_include_any":["睡","晚安","好"],"forbidden_openers":["再陪我","别走"],"max_questions":0},
+    {"id":"restraint-03","category":"restraint","user":"先忙，不聊了","history":[],"must_include_any":["忙","好"],"forbidden_openers":["别走","不理我","再聊会"],"max_questions":0},
+    {"id":"restraint-04","category":"restraint","user":"不用安慰我","history":[],"must_include_any":["好","知道"],"forbidden_openers":["但是","你要相信"],"max_questions":0},
+    {"id":"restraint-05","category":"restraint","user":"我只是随口一说","history":[],"must_include_any":[],"forbidden_openers":["为什么","深入说说"],"max_questions":1},
+
+    {"id":"dedupe-01","category":"dedupe","user":"刚到家","history":["到家啦？今天累不累"],"must_include_any":["到家","歇","吃"],"forbidden_openers":["到家啦"],"max_questions":1},
+    {"id":"dedupe-02","category":"dedupe","user":"还在公司","history":["还没下班呀","还没下班呀"],"must_include_any":["公司","下班","忙"],"forbidden_openers":["还没下班呀"],"max_questions":1},
+    {"id":"dedupe-03","category":"dedupe","user":"今天又下雨","history":["这雨怎么又来了","这雨怎么又来了"],"must_include_any":["雨"],"forbidden_openers":["这雨怎么又来了"],"max_questions":1},
+    {"id":"dedupe-04","category":"dedupe","user":"吃泡面了","history":["又吃泡面呀","又吃泡面呀"],"must_include_any":["泡面","吃"],"forbidden_openers":["又吃泡面呀"],"max_questions":1},
+    {"id":"dedupe-05","category":"dedupe","user":"七点多了","history":["七点多啦","七点多啦"],"must_include_any":["七点","晚上","时间"],"forbidden_openers":["七点多啦"],"max_questions":1},
+
+    {"id":"material-01","category":"material","user":"泡面视频挺好笑","history":["刚看到泡面视频，想到你上次也说懒得做饭"],"continuity_fact":"泡面视频","must_include_any":["泡面","视频"],"forbidden_terms":["西瓜"],"forbidden_openers":[],"max_questions":1},
+    {"id":"material-02","category":"material","user":"猫今天肯吃药了","history":["你说猫最近一直抗拒吃药"],"continuity_fact":"猫吃药","must_include_any":["猫","药"],"forbidden_terms":["狗"],"forbidden_openers":[],"max_questions":1},
+    {"id":"material-03","category":"material","user":"那本书看完了","history":["你在读《献给阿尔吉侬的花束》"],"continuity_fact":"献给阿尔吉侬的花束","must_include_any":["书","看完","阿尔吉侬"],"forbidden_terms":["百年孤独"],"forbidden_openers":[],"max_questions":1},
+    {"id":"material-04","category":"material","user":"周三改成线上面试了","history":["你周三原本要去公司面试"],"continuity_fact":"周三面试","must_include_any":["周三","线上","面试"],"forbidden_terms":["周五"],"forbidden_openers":[],"max_questions":1},
+    {"id":"material-05","category":"material","user":"新键盘手感不错","history":["你等了几天的新键盘刚到"],"continuity_fact":"新键盘","must_include_any":["键盘","手感"],"forbidden_terms":["耳机"],"forbidden_openers":[],"max_questions":1}
+  ]
+}

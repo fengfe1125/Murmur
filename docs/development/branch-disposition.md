@@ -1,0 +1,71 @@
+# 分支、worktree 与未提交资料处置清单
+
+> 状态：现状记录｜适用：2026-08-28 仓库整理及合并收口｜核验：2026-08-28｜依据：清理基线 main 1205a27；#19、#20 与 #17／#18 收口；Git refs、PR 与 worktree 实查
+
+## 长期保留与任务去向
+
+| 引用 | 去向与理由 |
+|---|---|
+| `main` | 唯一长期分支；本地已同步 #17 合并提交 caeb6c5，包含 #14、#15、#16、#19、#20。#18 随后交付文档清理；线上应用仍停留在 aae2580，合并不代表部署。 |
+| `codex/chore/repo/record-merged-work-cleanup` | [PR #18](https://github.com/fengfe1125/Murmur/pull/18)，原基于 #17；合并前改为 main 并复核仅文档差异，合并后不复用。 |
+| 本地 `docs/repo/name-branches-by-what-changed`（d6b6cdc） | 命名原则已吸收到现行协作规范；原提交仍独有，保留，不用旧 README 覆盖新定位。 |
+| 本地 `fix/reliability-and-metrics`（9e694a9） | 原本地可靠性工作保留；其修复已通过保留远端历史的 #14 合入，原提交不强制删掉。 |
+| 本地 `fix/ios/tab-bar-pill-travel`（8062a0d） | 用户的标签栏动画修复已通过 #19 合入 main，并同步到 #17／#18；原本地引用保留。 |
+| `stash@{0}`（9d1318eef3927947f84eecb220b61c4f429bb1fc） | 原样保留，没有 apply、pop 或 drop。 |
+
+原本地 0f17b99 与远端 322a0ad 的 tree 相同；以远端为基线补入修复得到 58e077b，再合入 main 得到 87c1faa。
+因此 #14 保留了原远端提交，没有 force-push 或重写共同历史。
+
+## 已删除的合并分支引用
+
+以下 10 条旧远端分支和同名本地分支，在删除前均再次确认是 `origin/main` 的祖先；删除的是引用，不是主线提交。
+
+| 分支 | 原 tip | 合并依据 |
+|---|---|---|
+| `claude/send-failure-marks-and-composer-gap` | 364a7b3 | PR #1 |
+| `feat/on-this-day-photo-reading` | c5175c7 | PR #2 |
+| `fix/photo-reading-retry` | 3258882 | PR #3 |
+| `ci/server-workflow` | af26ff8 | PR #4／#5／#6，最终 tip 在 #6 |
+| `fix/memory-salvage-and-sampling` | 51ac823 | PR #7 |
+| `fix/reply-directive-photo-context` | 41beeac | PR #8 |
+| `feat/persona-warm-companion` | c767ac6 | PR #9 |
+| `fix/directive-matches-one-message` | bd142ec | PR #10 |
+| `fix/gitignore-backups` | 662a177 | PR #11 |
+| `fix/answer-what-he-asks` | d617a8e | PR #12 |
+
+额外清除 8 条已合并本地引用，故本轮共删 18 条本地引用：
+
+| 分支 | 原 tip | 保留位置 |
+|---|---|---|
+| `claude/amazing-cartwright-64f905` | 9132ab0 | main 祖先；原始 bundle |
+| `claude/amazing-chatelet-56dcce` | b682eff | main 祖先；原始 bundle |
+| `claude/competent-lovelace-b4d32e` | 4eac4cd | main 祖先；原始 bundle |
+| `worktree-android-server-auth-push` | 15a9392 | main 祖先；原始 bundle |
+| `feat/ios/continue-an-archived-day` | afa5233 | PR #13；main |
+| `codex/fix/repo/close-reliability-work` | 87c1faa | PR #14；main |
+| `codex/docs/repo/reframe-private-memories` | d078150 | PR #15；main |
+| `codex/ci/deploy/bridge-layout-update` | 56739bf | PR #16；main |
+
+远端 `fix/reliability-and-metrics`、本轮文档分支和桥接分支在各自 PR 合并后自动删除；本地原始 9e694a9 引用仍保留。
+
+## 已移除的旧 worktree
+
+| 仓库相对路径 | 原 HEAD／分支 | 检查与处置 |
+|---|---|---|
+| `.claude/worktrees/amazing-cartwright-64f905` | detached b682eff | 无未提交/未跟踪工作；HEAD 在 main；移除 |
+| `.claude/worktrees/android-server-auth-push` | 15a9392／worktree-android-server-auth-push | 无未提交/未跟踪工作；忽略文件仅 Ruff/Python 缓存；移除 |
+| `.claude/worktrees/competent-lovelace-b4d32e` | detached 4eac4cd | 无未提交/未跟踪工作；忽略文件仅 Ruff/Python 缓存；移除 |
+
+提交可从主线或 bundle 恢复为新 worktree；缓存可重建。当前只保留主工作目录，没有清理其中的运行数据。
+
+收口时额外创建的 `codex/fix/deploy/support-pre-bridge-checkouts`（d387716）已通过 #20 合入 main；其临时 worktree 检查仅有 Ruff 缓存后移除，本地引用也已删除，代码仍在主线中。
+#17 的 `codex/chore/repo/organize-source-layout`（c4db90d）合并到 caeb6c5 后，远端任务分支自动删除，本地引用确认被 main 保留后删除。#18 的任务分支在其合并后按相同规则清理，不继续复用。
+
+## 原件与恢复材料
+
+- 本机被忽略目录 `.trash-backup/reorg-20260828.h11qmY/` 保存操作前 refs 清单、两个未跟踪文档原件和经 `git bundle verify` 确认完整的 `git-before-reorg.bundle`。
+- `docs/product-plan-2026-08-27.md` 原件在备份中；带核验边界的 [归档副本](../archive/product-plan-2026-08-27.md) 不作为需求。
+- `docs/vps-connection.md` 原件在备份中；现行 [连接说明](../operations/vps-connection.md) 已脱敏，原始凭据/主机资料不进入新提交。
+- `.env`、移动端本地配置和已有根目录运行数据不因清理而删除；`.venv` 仅更新 editable 路径。
+
+不要为了让分支列表更短而强删保留的独有工作；也不要恢复原始文档后无检查地提交私有信息。

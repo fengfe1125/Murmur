@@ -1,0 +1,35 @@
+[Unit]
+Description=Murmur — official App worker
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=murmur
+WorkingDirectory=/opt/murmur
+EnvironmentFile=/opt/murmur/.env
+ExecStart=/opt/murmur/.venv/bin/python /opt/murmur/scripts/ops/run_logged_service.py /opt/murmur/logs/murmur_app_worker.log /opt/murmur/.venv/bin/murmur app-worker
+
+Restart=always
+RestartSec=5
+
+# Cap a leak so the OOM killer never picks a host-wide victim; the VPS has ~4G.
+MemoryMax=512M
+
+# The wrapper opens the file after User=murmur is active. Wrapper failures stay
+# in journald; application stdout/stderr is redirected to the private file.
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/murmur
+ReadWritePaths=/opt/murmur/logs
+
+[Install]
+WantedBy=multi-user.target

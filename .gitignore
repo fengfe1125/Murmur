@@ -34,13 +34,25 @@ wechat/
 .hallmark/
 .cache/
 .ssh/
-botpy.log
+# 轮转出来的是 botpy.log.2026-08-17 这种名字，星号不能少：
+# 漏一个就会有未跟踪文件堆在仓库根目录，把下一次 murmur-update 顶回去。
+botpy.log*
 manifest.txt
 .rollback-commit
 .env.bak-*
 # 安卓开发工具链（JDK / Android SDK / AVD），不入库
 tools/
-android/.gradle/
-android/local.properties
-android/**/build/
+apps/android/.gradle/
+apps/android/local.properties
+apps/android/**/build/
 *.keystore
+
+# 本机工作目录，不属于仓库：.claude/ 是 skills 与 worktrees，
+# .trash-backup/ 装着数据库导出和私聊记忆文件——它们进版本库就等于泄露。
+.claude/
+.trash-backup/
+
+# murmur-update 每次更新前把数据库在线备份到 APP_DIR/backups/。那是运行时
+# 产物，不该进版本库——而且脚本自己会用 `git status --porcelain` 检查工作区
+# 是否干净，不忽略的话它写的备份迟早会挡住它自己下一次更新。
+backups/

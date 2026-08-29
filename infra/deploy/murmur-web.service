@@ -1,0 +1,36 @@
+[Unit]
+Description=Murmur — Dashboard
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=murmur
+WorkingDirectory=/opt/murmur
+EnvironmentFile=/opt/murmur/.env
+ExecStart=/opt/murmur/.venv/bin/python /opt/murmur/scripts/ops/run_logged_service.py /opt/murmur/logs/murmur_web.log /opt/murmur/.venv/bin/murmur web --host 127.0.0.1 --port 8765 --no-open
+
+Restart=always
+RestartSec=10
+
+# 内存泄漏时只重启本服务，不让 OOM killer 在全局挑牺牲品；VPS 约 4G 内存。
+MemoryMax=512M
+
+# 看板会写额度快照、读取 SQLite / 照片 / 记忆文件和各通道日志。
+# The wrapper opens the file after User=murmur is active. Wrapper failures stay
+# in journald; application stdout/stderr is redirected to the private file.
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/murmur
+ReadWritePaths=/opt/murmur/logs
+
+[Install]
+WantedBy=multi-user.target

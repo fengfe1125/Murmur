@@ -1,0 +1,35 @@
+[Unit]
+Description=Murmur — Telegram test bot
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/murmur/.env.test-bots
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=murmur
+WorkingDirectory=/opt/murmur
+EnvironmentFile=/opt/murmur/.env.test-bots
+ExecStart=/opt/murmur/.venv/bin/python /opt/murmur/scripts/ops/run_logged_service.py /opt/murmur/test/logs/murmur_bot.log /opt/murmur/.venv/bin/murmur bot
+
+# 挂了就重连。网络抖动、网关 5xx、进程崩溃都靠这个爬起来。
+Restart=always
+RestartSec=10
+# 别在启动失败时无限快速重启把日志刷爆
+
+# 看板按文件读取日志；部署包里的 logrotate 负责轮转。
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+
+# 基本加固：.env.test-bots 里有活的 key
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/murmur/test
+ReadWritePaths=/opt/murmur/test/logs
+
+[Install]
+WantedBy=multi-user.target
