@@ -1,6 +1,6 @@
 # 部署 Murmur 正式 App 服务
 
-> 状态：现行规范｜适用：授权运维｜核验：2026-08-28｜依据：PR #14；生产状态另行验收。
+> 状态：现行规范｜适用：授权运维｜核验：2026-08-29｜依据：本次日志所有权修复 PR；生产状态另行验收。
 
 正式生产入口只有 iOS App。Telegram、钉钉、微信和 QQ 的代码继续保留用于回归测试，
 但凭据、SQLite、日志和 systemd 环境都必须与生产 App 隔离。任何脚本都不会因为发现
@@ -258,6 +258,28 @@ tail -f /opt/murmur/logs/murmur_app_api.log
 tail -f /opt/murmur/logs/murmur_app_worker.log
 ssh -N -L 8765:127.0.0.1:8765 user@server
 ```
+
+服务单元不再让 systemd 以 root 直接打开日志；`scripts/ops/run_logged_service.py`
+在 `User=murmur` 生效后以追加模式打开 `0600` 普通文件，并拒绝符号链接和管道等
+非普通文件。这样管理员面板与 `su murmur murmur` 的 logrotate 规则使用同一权限边界。
+
+从旧单元首次更新到这套日志入口前，若实查 App API/Worker 日志仍为 `root:root`，
+需另行取得生产授权后先原地修正所有权；`chown` 不截断内容，运行中的文件描述符继续有效：
+
+```bash
+sudo chown murmur:murmur \
+  /opt/murmur/logs/murmur_app_api.log \
+  /opt/murmur/logs/murmur_app_worker.log
+sudo chmod 0600 \
+  /opt/murmur/logs/murmur_app_api.log \
+  /opt/murmur/logs/murmur_app_worker.log
+sudo -u murmur test -r /opt/murmur/logs/murmur_app_api.log
+sudo -u murmur test -w /opt/murmur/logs/murmur_app_worker.log
+```
+
+不要把提权 `chown` 放进服务的 `ExecStartPre`：日志目录由应用用户持有，root 跟随其中
+路径会扩大符号链接攻击面。日志目录缺失时，更新器通过 unit 的精确
+`ReadWritePaths` 预检失败，不安装一个启动后才报错的单元。
 
 ## 模型降级备案
 
