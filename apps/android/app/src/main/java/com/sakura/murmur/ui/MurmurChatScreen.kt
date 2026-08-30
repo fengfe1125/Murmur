@@ -6,7 +6,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,16 +22,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -41,10 +46,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sakura.murmur.MurmurConnectionState
@@ -143,7 +151,8 @@ private fun TranscriptPane(state: MurmurSessionModel.UiState, session: MurmurSes
 
     Column(modifier = Modifier.fillMaxSize()) {
         MurmurTranscriptView(
-            state = state,
+            messages = state.messages,
+            sendFailures = state.sendFailures,
             // The typing indicator reads the phase, the way iOS's reads
             // `isAwaitingReply`: a send on the wire, not a photo decoding.
             showsTyping = state.phase == MurmurPhase.Uploading || state.phase == MurmurPhase.Responding,
@@ -214,36 +223,99 @@ private fun ComposerPane(
                 }
             }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(
-                onClick = onPickPhoto,
-                modifier = Modifier.size(48.dp),
-                enabled = !state.phase.isBusy,
-            ) {
-                Icon(Icons.Outlined.Add, contentDescription = "添加照片", tint = colors.olive)
-            }
-            OutlinedTextField(
-                value = state.draftText,
-                onValueChange = session::updateDraftText,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("发一张图，或说点什么") },
-                singleLine = true,
-                enabled = !state.phase.isBusy,
-            )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Bottom,
+        ) {
             if (state.phase.isBusy) {
                 TextButton(onClick = session::cancelCurrentOperation, modifier = Modifier.height(48.dp)) {
                     Text("取消", color = colors.secondaryInk, fontSize = 15.sp)
                 }
+                Spacer(Modifier.width(MurmurSpacing.sm))
             }
-            Button(
-                onClick = session::submit,
-                modifier = Modifier
-                    .height(48.dp)
-                    .testTag("send-moment"),
-                enabled = state.canSubmit,
-                colors = ButtonDefaults.buttonColors(containerColor = colors.olive),
+            // One pill instead of a square button beside a taller field:
+            // both controls are discs inside the container, the counterpart
+            // of `MomentComposer` in `MurmurChatView.swift`.
+            Surface(
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(26.dp),
+                color = colors.raisedPaper,
+                border = BorderStroke(1.dp, colors.rule),
             ) {
-                Text("发送此刻", fontSize = 16.sp)
+                Row(
+                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.Bottom,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    // The plus disc: a 36dp ink disc inside a 44dp tap target,
+                    // the transparent ring keeping the hit area honest.
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clickable(enabled = !state.phase.isBusy, onClick = onPickPhoto),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(colors.ink, CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Outlined.Add,
+                                contentDescription = "添加照片",
+                                tint = colors.paper,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                    // No box, no background: the field is just the line of
+                    // text; the hint shows only while the draft is empty.
+                    BasicTextField(
+                        value = state.draftText,
+                        onValueChange = session::updateDraftText,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("moment-composer"),
+                        textStyle = TextStyle(fontSize = 16.sp, color = colors.ink),
+                        singleLine = true,
+                        enabled = !state.phase.isBusy,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { session.submit() }),
+                        cursorBrush = SolidColor(colors.ink),
+                        decorationBox = { innerTextField ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (state.draftText.isEmpty()) {
+                                    Text("发一张图，或说点什么", color = colors.secondaryInk, fontSize = 16.sp)
+                                }
+                                innerTextField()
+                            }
+                        },
+                    )
+                    // The send disc: ink on paper when there is something to
+                    // send, rule on secondary ink when there is not.
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clickable(enabled = state.canSubmit, onClick = session::submit)
+                            .testTag("send-moment"),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(if (state.canSubmit) colors.ink else colors.rule, CircleShape),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Outlined.ArrowUpward,
+                                contentDescription = "发送这一刻",
+                                tint = if (state.canSubmit) colors.paper else colors.secondaryInk,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                }
             }
         }
     }

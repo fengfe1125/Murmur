@@ -5,6 +5,8 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,14 +14,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Smartphone
+import androidx.compose.material.icons.outlined.TabletAndroid
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -29,7 +35,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
@@ -44,10 +49,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sakura.murmur.BuildConfig
 import com.sakura.murmur.MurmurConnectionState
 import com.sakura.murmur.MurmurDevice
 import com.sakura.murmur.MurmurSessionModel
@@ -56,8 +64,9 @@ import com.sakura.murmur.NotificationPermission
 
 /**
  * The settings pane — the Android counterpart of `MurmurSettingsView` in
- * `MurmurChatView.swift`: connection state, devices, proactive preferences,
- * notifications, clearing the current moment, and account deletion.
+ * `MurmurChatView.swift`: connection state and build stamp, devices,
+ * proactive preferences, notifications, the archive, clearing the current
+ * moment, and account deletion.
  *
  * It is the 我的 tab inside `MurmurShell`, so [onClose] is optional: with no
  * close handler there is no 完成 button, and losing the identity (removing
@@ -71,6 +80,10 @@ fun MurmurSettingsScreen(session: MurmurSessionModel, onClose: (() -> Unit)? = n
     val context = LocalContext.current
     var permissionRefresh by remember { mutableIntStateOf(0) }
     var confirmClearTranscript by remember { mutableStateOf(false) }
+    var confirmClearArchive by remember { mutableStateOf(false) }
+    // Recomposes the 留下的日子 count and the clear-archive row's enabled
+    // state whenever a room lands or wipes a row.
+    val archiveRows by session.archive.rows.collectAsState()
 
     LaunchedEffect(Unit) {
         session.loadPreferences()
@@ -121,13 +134,18 @@ fun MurmurSettingsScreen(session: MurmurSessionModel, onClose: (() -> Unit)? = n
                 .weight(1f)
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(MurmurSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             Spacer(Modifier.height(MurmurSpacing.md))
 
             // ---- 连接 ---------------------------------------------------------
             SettingsSection(title = "连接") {
                 SettingsRow(label = "状态", value = state.connection.label)
+                SettingsRow(
+                    label = "版本",
+                    value = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                    modifier = Modifier.testTag("build-stamp"),
+                )
                 if (state.requiresDeviceReconnect) {
                     Text(
                         "本机安全身份已失效。重置只会移除本机绑定，不会删除 Murmur 的记忆。",
@@ -146,8 +164,8 @@ fun MurmurSettingsScreen(session: MurmurSessionModel, onClose: (() -> Unit)? = n
             // ---- 设备 ---------------------------------------------------------
             SettingsSection(title = "设备") {
                 when {
-                    !state.devicesLoaded -> Text("正在读取设备", color = colors.secondaryInk, fontSize = 14.sp)
-                    state.devices.isEmpty() -> Text("还没有绑定设备", color = colors.secondaryInk, fontSize = 14.sp)
+                    !state.devicesLoaded -> Text("正在读取设备", color = colors.secondaryInk, fontSize = 13.sp)
+                    state.devices.isEmpty() -> Text("还没有绑定设备", color = colors.secondaryInk, fontSize = 13.sp)
                     else -> state.devices.forEach { device ->
                         DeviceRow(device = device, isCurrent = device.id == state.identity?.deviceID, session = session)
                     }
@@ -216,26 +234,21 @@ fun MurmurSettingsScreen(session: MurmurSessionModel, onClose: (() -> Unit)? = n
             // ---- 当前界面 ------------------------------------------------------
             SettingsSection(title = "当前界面") {
                 val hasAnything = state.hasCurrentMoment || state.draftPhoto != null || state.draftText.isNotEmpty()
-                OutlinedButton(
-                    onClick = session::clearCurrent,
-                    modifier = Modifier.height(48.dp),
+                DestructiveActionRow(
+                    text = "清空这一刻",
                     enabled = hasAnything,
-                ) {
-                    Text("清空这一刻", color = colors.ink)
-                }
+                    onClick = session::clearCurrent,
+                )
             }
 
             // ---- 聊天记录 ------------------------------------------------------
             SettingsSection(title = "聊天记录") {
-                OutlinedButton(
-                    onClick = { confirmClearTranscript = true },
-                    modifier = Modifier
-                        .height(48.dp)
-                        .testTag("clear-transcript"),
+                DestructiveActionRow(
+                    text = "清空聊天记录",
                     enabled = state.messages.isNotEmpty(),
-                ) {
-                    Text("清空聊天记录", color = colors.coral)
-                }
+                    modifier = Modifier.testTag("clear-transcript"),
+                    onClick = { confirmClearTranscript = true },
+                )
                 Text(
                     "聊天记录连同其中的照片只存在这台设备上，删除 App 就一并消失。服务端保存的是私有记忆，不是对话本身。",
                     color = colors.secondaryInk,
@@ -256,6 +269,35 @@ fun MurmurSettingsScreen(session: MurmurSessionModel, onClose: (() -> Unit)? = n
                 )
             }
 
+            // ---- 当年今日 ------------------------------------------------------
+            SettingsSection(title = "当年今日") {
+                SettingsRow(label = "留下的日子", value = "${session.archive.daysWithRooms.size} 天")
+                DestructiveActionRow(
+                    text = "清空当年今日的记录",
+                    enabled = archiveRows.isNotEmpty(),
+                    modifier = Modifier.testTag("clear-archive"),
+                    onClick = { confirmClearArchive = true },
+                )
+                Text(
+                    "日历上的每一天，连同那天聊过的照片，都只存在这台设备上。清空之后日历会空掉，服务端的记忆不受影响。",
+                    color = colors.secondaryInk,
+                    fontSize = 13.sp,
+                )
+            }
+            if (confirmClearArchive) {
+                MurmurConfirmDialog(
+                    title = "清空当年今日的记录？",
+                    message = "这台设备上日历里的记录和照片会被删除，服务端的记忆不受影响。",
+                    confirmTitle = "确认清空",
+                    destructive = true,
+                    onConfirm = {
+                        confirmClearArchive = false
+                        session.archive.clear()
+                    },
+                    onDismiss = { confirmClearArchive = false },
+                )
+            }
+
             // ---- 账号 ---------------------------------------------------------
             SettingsSection(title = "") {
                 DeleteAccountButton(session)
@@ -267,7 +309,9 @@ fun MurmurSettingsScreen(session: MurmurSessionModel, onClose: (() -> Unit)? = n
             }
 
             state.settingsMessage?.let {
-                Text(it, color = colors.secondaryInk, fontSize = 14.sp)
+                SettingsSection(title = "") {
+                    Text(it, color = colors.secondaryInk, fontSize = 14.sp)
+                }
             }
             Spacer(Modifier.height(MurmurSpacing.xl))
         }
@@ -281,10 +325,23 @@ private fun authorizationLabel(authorization: NotificationAuthorization): String
     NotificationAuthorization.Unknown -> "未知"
 }
 
+/**
+ * One iOS-Form section: a raised-paper card with an 18dp corner and a 1dp
+ * rule outline, the small secondary header inside at the top, 16dp between
+ * the rows.  Sections stack 20dp apart in the scroll column.
+ */
 @Composable
 private fun SettingsSection(title: String, content: @Composable () -> Unit) {
     val colors = MurmurTheme.colors
-    Column(verticalArrangement = Arrangement.spacedBy(MurmurSpacing.sm)) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(colors.raisedPaper)
+            .border(1.dp, colors.rule, RoundedCornerShape(18.dp))
+            .padding(MurmurSpacing.lg),
+        verticalArrangement = Arrangement.spacedBy(MurmurSpacing.lg),
+    ) {
         if (title.isNotEmpty()) {
             Text(title, color = colors.secondaryInk, fontSize = 13.sp)
         }
@@ -293,15 +350,40 @@ private fun SettingsSection(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SettingsRow(label: String, value: String) {
+private fun SettingsRow(label: String, value: String, modifier: Modifier = Modifier) {
     val colors = MurmurTheme.colors
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, color = colors.ink, fontSize = 15.sp)
         Spacer(Modifier.weight(1f))
         Text(value, color = colors.secondaryInk, fontSize = 14.sp)
+    }
+}
+
+/**
+ * The Android counterpart of an iOS `.role(.destructive)` button inside a
+ * Form: plain coral text on the card, no filled Material block.  Disabled is
+ * a fade to secondaryInk, not a greyed-out button.
+ */
+@Composable
+private fun DestructiveActionRow(
+    text: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MurmurTheme.colors
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 44.dp)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(start = MurmurSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(text, color = if (enabled) colors.coral else colors.secondaryInk, fontSize = 15.sp)
     }
 }
 
@@ -313,17 +395,31 @@ private fun DeviceRow(device: MurmurDevice, isCurrent: Boolean, session: MurmurS
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        Icon(
+            imageVector = if (device.deviceName?.contains("Pad") == true) {
+                Icons.Outlined.TabletAndroid
+            } else {
+                Icons.Outlined.Smartphone
+            },
+            contentDescription = null,
+            tint = colors.olive,
+            modifier = Modifier.size(28.dp),
+        )
+        Spacer(Modifier.width(MurmurSpacing.md))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(device.deviceName ?: "设备", color = colors.ink, fontSize = 15.sp)
                 if (isCurrent) {
                     Spacer(Modifier.width(MurmurSpacing.sm))
-                    Text("当前", color = colors.olive, fontSize = 13.sp)
+                    Text("当前", color = colors.olive, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
+            // Coral only when it is *this* device that has no push channel —
+            // the same rule as iOS, where a secondary device's quiet state is
+            // not this screen's alarm to raise.
             Text(
-                if (device.pushEnabled) "推送已连接" else "推送未连接",
-                color = colors.secondaryInk,
+                text = if (device.pushEnabled) "推送已连接" else "推送未连接",
+                color = if (device.pushEnabled || !isCurrent) colors.secondaryInk else colors.coral,
                 fontSize = 13.sp,
             )
         }
@@ -412,13 +508,11 @@ private fun TimePickerDialog(
 @Composable
 private fun ReconnectButton(session: MurmurSessionModel) {
     var confirmReset by remember { mutableStateOf(false) }
-    Button(
+    DestructiveActionRow(
+        text = "重新连接此设备",
+        enabled = true,
         onClick = { confirmReset = true },
-        modifier = Modifier.height(48.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = MurmurTheme.colors.coral),
-    ) {
-        Text("重新连接此设备", fontSize = 15.sp)
-    }
+    )
     if (confirmReset) {
         MurmurConfirmDialog(
             title = "重置本机安全身份？",
@@ -436,15 +530,12 @@ private fun ReconnectButton(session: MurmurSessionModel) {
 
 @Composable
 private fun DeleteAccountButton(session: MurmurSessionModel) {
-    val colors = MurmurTheme.colors
     var confirmDelete by remember { mutableStateOf(false) }
-    Button(
+    DestructiveActionRow(
+        text = "删除账号与全部记忆",
+        enabled = true,
         onClick = { confirmDelete = true },
-        modifier = Modifier.height(48.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = colors.coral),
-    ) {
-        Text("删除账号与全部记忆", fontSize = 15.sp)
-    }
+    )
     if (confirmDelete) {
         MurmurConfirmDialog(
             title = "删除账号与全部记忆？",

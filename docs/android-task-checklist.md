@@ -434,3 +434,40 @@ W1–W5（独立轨道，随时做）
 - 真机键盘遮挡观感、当年今日/存档天 cover 在带软键盘模拟器或真机上的
   实际体验——建议真机验收时复核。
 - 真机 Key Attestation、FCM 端到端、Play 发布——仍阻塞原 Phase 2/3 运维项。
+
+## Phase 5 — 观感缺陷修复（2026-08-30，实机演示反馈驱动）
+
+> 起因：Phase 4/4.5 模拟器实机演示后用户反馈五点——气泡都在一边、输入框不美观、
+> 发送没有粒子散开、我的界面不美观、整体卡顿。逐条对照 iOS 基准定位根因并修复，
+> 全部经模拟器实机截图验收 + 37 条仪器化/JVM 全量回归绿。
+
+### 根因与修复
+
+- [x] T5.1 气泡全在左边：`MurmurTranscriptView.MessageRow` 内容 Column 无
+  `weight(1f)`，End 对齐失效。修复并新增分列仪器化断言
+  （追加序 tag：you=message-0 在右、murmur reply=message-1 在左）。
+- [x] T5.2 输入框药丸化：三段式 Material 输入区 → iOS 同款单容器药丸
+  （raisedPaper 26dp 圆角 + 左 + 墨盘 + BasicTextField + 右 ↑ 圆盘，
+  44dp 点击区，testTag `moment-composer`/`send-moment`）。
+- [x] T5.3 粒子溶解：Canvas 粒子系统（204 粒网格采样取色、LCG 确定性随机、
+  方向锥公式对齐 iOS shader、850ms 错相位淡出；慢档 3s 可验；
+  Reduce Motion 回退纯淡出）。覆盖层生命周期挂 `isSending`（不挂 dissolve
+  浮点——测试时钟可能跑在组合前面），`send()` 完毕自复位 isSending
+  （独立宿主场景）。仪器化断言节点出现/消失。
+- [x] T5.4 设置页分组：iOS Form 风格 section 卡（圆角 18 + 描边 + footnote）、
+  destructive 纯文本行、设备行带头像图标/当前徽标/推送状态着色；补齐 iOS 有
+  安卓缺失的「版本」行（build-stamp）与「当年今日」组（留下的日子 N 天 +
+  clear-archive + 确认对话框）。
+- [x] T5.5 卡顿：LazyColumn item 捕获整个 UiState → 改为只传
+  `messages`/`sendFailures`，按键/SSE 不再触发全部可见行重组；日期/时间
+  计算 remember 化。图片解码本来就走 MurmurImageCache（IO 线程），不动。
+- [x] T5.6 验证：JVM 141 + 模拟器 37 全绿；实机截图验收（气泡分列、药丸
+  composer、分组设置页、粒子溶解进行中、照片房间真实读图）。
+
+### 实机演示记录（2026-08-30，VPS 生产后端 development 通道）
+
+邀请码注册 → 文本 moment 流式回复（双勾+按天分隔）→ 通知权限请求 →
+当年今日权限四态（未决定门 / API 34 部分访问受限门实锤）→ 上滑发送 →
+真实 photo_reading（视觉模型读橙色图产出 guess + 3 话头）→ 存档月历当天
+出圆点 → 设置页服务端真实偏好。环境注记：adb 推入的无 EXIF 图片
+datetaken=NULL 被扫描契约排除（真机无此问题）。

@@ -50,7 +50,6 @@ import com.sakura.murmur.MurmurMessage
 import com.sakura.murmur.MurmurMessageAuthor
 import com.sakura.murmur.MurmurPhotoPreview
 import com.sakura.murmur.MurmurSendFailure
-import com.sakura.murmur.MurmurSessionModel
 import com.sakura.murmur.TranscriptPhoto
 import java.io.File
 import java.time.Instant
@@ -96,7 +95,12 @@ private fun MessageRow(
     val isOutgoing = message.author == MurmurMessageAuthor.you
     Row(modifier = Modifier.fillMaxWidth()) {
         if (isOutgoing) Spacer(Modifier.width(if (sendFailure == null) 56.dp else 20.dp))
-        Column(horizontalAlignment = if (isOutgoing) Alignment.End else Alignment.Start) {
+        Column(
+            horizontalAlignment = if (isOutgoing) Alignment.End else Alignment.Start,
+            // Without the weight the column wraps its content, so End
+            // alignment has no slack and the outgoing bubble parks left.
+            modifier = Modifier.weight(1f),
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (isOutgoing && sendFailure != null && sendFailure.canResend) {
                     // The mark is a button exactly when pressing it would do
@@ -222,7 +226,7 @@ private fun DeliveryTicks(state: MurmurDeliveryState) {
 @Composable
 private fun DaySeparator(date: Instant) {
     val colors = MurmurTheme.colors
-    val day = LocalDate.ofInstant(date, ZoneId.systemDefault())
+    val day = remember(date) { LocalDate.ofInstant(date, ZoneId.systemDefault()) }
     Text(
         text = "${day.year}年${day.monthValue}月${day.dayOfMonth}日",
         color = colors.secondaryInk,
@@ -236,8 +240,9 @@ private fun DaySeparator(date: Instant) {
     )
 }
 
+@Composable
 private fun formatTime(instant: Instant): String {
-    val time = LocalTime.ofInstant(instant, ZoneId.systemDefault())
+    val time = remember(instant) { LocalTime.ofInstant(instant, ZoneId.systemDefault()) }
     return "%02d:%02d".format(time.hour, time.minute)
 }
 
@@ -298,17 +303,22 @@ private fun EmptyTranscript(modifier: Modifier = Modifier) {
  * before sending again, the way the iOS question card does — the question
  * itself is Material chrome (an explicit 取消 button) rather than the pinned
  * paper card, which has no Compose equivalent.
+ *
+ * The row content reads the two lists directly rather than the whole
+ * [MurmurSessionModel.UiState]: the state carries List fields Compose treats
+ * as unstable, and capturing it here would recompose every visible row on
+ * every keystroke and every streamed event.
  */
 @Composable
 fun MurmurTranscriptView(
-    state: MurmurSessionModel.UiState,
+    messages: List<MurmurMessage>,
+    sendFailures: Map<String, MurmurSendFailure>,
     showsTyping: Boolean,
     imageFile: (String) -> File,
     onOpenImage: (MurmurPhotoPreview) -> Unit,
     onResend: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val messages = state.messages
     var resendQuestion by remember { mutableStateOf<MurmurMessage?>(null) }
 
     if (messages.isEmpty() && !showsTyping) {
@@ -348,7 +358,7 @@ fun MurmurTranscriptView(
                 message = message,
                 index = index,
                 imageFile = message.imageFile?.let(imageFile),
-                sendFailure = sendFailureFor(state, message),
+                sendFailure = sendFailureFor(sendFailures, message),
                 onOpenImage = onOpenImage,
                 onAskResend = { resendQuestion = it },
             )
@@ -356,7 +366,7 @@ fun MurmurTranscriptView(
     }
 
     resendQuestion?.let { question ->
-        val failure = sendFailureFor(state, question) ?: return@let
+        val failure = sendFailureFor(sendFailures, question) ?: return@let
         MurmurConfirmDialog(
             title = "重新发送这一条？",
             message = failure.message,
@@ -376,9 +386,9 @@ fun MurmurTranscriptView(
  *  when it has one; a row read back from disk kept the verdict but not the
  *  wording, and says only that much — but it is still pressable, because the
  *  transcript holds everything the send needs. */
-private fun sendFailureFor(state: MurmurSessionModel.UiState, message: MurmurMessage): MurmurSendFailure? {
+private fun sendFailureFor(sendFailures: Map<String, MurmurSendFailure>, message: MurmurMessage): MurmurSendFailure? {
     if (message.author != MurmurMessageAuthor.you || message.delivery != MurmurDeliveryState.failed) return null
-    return state.sendFailures[message.id]
+    return sendFailures[message.id]
         ?: MurmurSendFailure.interrupted(canResend = message.text.isNotEmpty() || message.imageFile != null)
 }
 

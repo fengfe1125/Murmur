@@ -7,7 +7,9 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.printToLog
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
 import androidx.compose.ui.test.swipeUp
@@ -177,6 +179,24 @@ class OnThisDayFlowViewTest {
         assertTrue(sent.isEmpty())
         composeRule.mainClock.advanceTimeBy(3_400)
         composeRule.waitForIdle()
+        assertEquals(1, sent.size)
+    }
+
+    /** The send-off is a particle dissolve, not just a fade: the overlay is
+     *  up while the dissolve runs and gone once it has completed. */
+    @Test
+    fun slowDissolveShowsParticleOverlay() {
+        OnThisDayDebugTuning.slowDissolve = true
+        setBrowser(OnThisDayAuthorization.Authorized, sameDay = 3)
+        waitForCanSend()
+        composeRule.onNodeWithTag("onthisday-photo").performTouchInput { swipeUp() }
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag("dissolve-particles").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("dissolve-particles").assertIsDisplayed()
+        composeRule.mainClock.advanceTimeBy(3_400)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dissolve-particles").assertDoesNotExist()
         assertEquals(1, sent.size)
     }
 

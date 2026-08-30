@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -50,6 +51,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -71,7 +74,10 @@ import com.sakura.murmur.PhotoRoomModel
 import java.time.Instant
 import java.time.ZoneId
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.min
+import kotlin.math.PI
+import kotlin.math.sin
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -119,9 +125,12 @@ fun OnThisDayFlowView(
  * three vertical gestures on one photo. This screen has exactly one vertical
  * gesture with an explicit direction-and-distance gate.
  *
- * iOS sends the card off with a particle shader; Android has no Metal, so the
- * send-off is the same motion in the vocabulary this platform allows:
- * fade + scale, same 0.85s window, same cancellability.
+ * iOS sends the card off with a Metal particle shader; Android has no Metal,
+ * so the send-off is the same dissolve in the vocabulary this platform
+ * allows: the card keeps its fade + scale while a Canvas layer of
+ * photo-coloured particles — sampled from the bitmap the moment the send
+ * starts — drifts up and apart over the same 0.85s window, same
+ * cancellability. Reduce Motion keeps the plain fade, particles skipped.
  */
 @Composable
 fun OnThisDayView(
@@ -157,6 +166,10 @@ fun OnThisDayView(
         BuildConfig.DEBUG && OnThisDayDebugTuning.slowDissolve -> SLOW_DISSOLVE_DURATION_MILLIS
         else -> DISSOLVE_DURATION_MILLIS
     }
+    /** Particles only exist while a dissolve actually runs: Reduce Motion's
+     *  zero-duration window keeps the plain fade and skips the sampling and
+     *  per-frame draw entirely. */
+    val particleDissolve = dissolveDurationMillis > 0
 
     fun springHome() {
         scope.launch { dragOffset.animateTo(0f, tween(240)) }
@@ -191,6 +204,10 @@ fun OnThisDayView(
                 throw cancelled
             }
             onSend(image)
+            // The send has left: standalone viewers (tests, other hosts) keep
+            // composing, so the sending state must end on its own — the
+            // production flow swaps this screen for the room either way.
+            isSending = false
         }
     }
 
@@ -267,6 +284,7 @@ fun OnThisDayView(
                     dragOffset = dragOffset,
                     dissolve = dissolve.value,
                     zone = model.zone,
+                    particleDissolve = particleDissolve,
                     onDragOffset = { next -> scope.launch { dragOffset.snapTo(next) } },
                     onDragEnd = { dy, dx ->
                         val vertical = abs(dy) > 2 * abs(dx)
@@ -321,6 +339,7 @@ private fun OnThisDayViewer(
     dragOffset: Animatable<Float, *>,
     dissolve: Float,
     zone: ZoneId,
+    particleDissolve: Boolean,
     onDragOffset: (Float) -> Unit,
     onDragEnd: (Float, Float) -> Unit,
     onResetDrag: () -> Unit,
@@ -332,6 +351,16 @@ private fun OnThisDayViewer(
     val dragAlpha = 1f - min(abs(dragOffset.value) / 700f, 0.45f)
     var totalDx by remember { mutableStateOf(0f) }
     var totalDy by remember { mutableStateOf(0f) }
+    /** The dust of the send-off, sampled from the bitmap at the moment the
+     *  send starts and dropped the moment it is cancelled — the dissolve
+     *  state machine itself owns timing; this only mirrors isSending. */
+    var particles by remember { mutableStateOf<List<DissolveParticle>?>(null) }
+    LaunchedEffect(isSending) {
+        particles = when {
+            !isSending || !particleDissolve || image == null -> null
+            else -> sampleDissolveParticles(image, candidate.id.hashCode().toLong())
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
@@ -347,18 +376,24 @@ private fun OnThisDayViewer(
             modifier = Modifier.padding(top = 4.dp),
         )
         Spacer(Modifier.weight(1f))
+        // The wrapper owns the card's slot; the particle overlay is its
+        // second child, exactly the card's bounds, drawn above it.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = MurmurSpacing.lg)
-                .aspectRatio(3f / 4f)
-                .shadow(
-                    elevation = 18.dp,
-                    shape = RoundedCornerShape(16.dp),
-                    clip = false,
-                    ambientColor = colors.ink.copy(alpha = 0.12f),
-                    spotColor = colors.ink.copy(alpha = 0.12f),
-                )
+                .aspectRatio(3f / 4f),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .shadow(
+                        elevation = 18.dp,
+                        shape = RoundedCornerShape(16.dp),
+                        clip = false,
+                        ambientColor = colors.ink.copy(alpha = 0.12f),
+                        spotColor = colors.ink.copy(alpha = 0.12f),
+                    )
                 .graphicsLayer {
                     alpha = (1f - dissolve) * dragAlpha
                     val scale = 1f - 0.08f * dissolve
@@ -415,26 +450,43 @@ private fun OnThisDayViewer(
                     )
                 }
                 .testTag("onthisday-photo"),
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(colors.raisedPaper)
-                    .border(1.dp, colors.rule, RoundedCornerShape(16.dp)),
-                contentAlignment = Alignment.Center,
             ) {
-                val bitmap = image
-                if (bitmap != null) {
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit,
-                    )
-                } else {
-                    CircularProgressIndicator(color = colors.secondaryInk)
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(colors.raisedPaper)
+                        .border(1.dp, colors.rule, RoundedCornerShape(16.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val bitmap = image
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit,
+                        )
+                    } else {
+                        CircularProgressIndicator(color = colors.secondaryInk)
+                    }
                 }
+            }
+            // The overlay lives for the whole send, mirroring isSending —
+            // never on the dissolve float: the animation clock can run
+            // ahead of composition in tests, and a completed dissolve would
+            // tear the dust down early. At progress 1 the particles draw
+            // fully transparent anyway.
+            val activeParticles = if (particleDissolve && isSending) particles else null
+            if (activeParticles != null && image != null) {
+                DissolveParticleOverlay(
+                    particles = activeParticles,
+                    bitmap = image,
+                    progress = dissolve,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("dissolve-particles"),
+                )
             }
         }
         Spacer(Modifier.weight(1f))
@@ -522,3 +574,110 @@ private fun reduceMotionEnabled(context: Context): Boolean = try {
 
 private const val DISSOLVE_DURATION_MILLIS = 850L
 private const val SLOW_DISSOLVE_DURATION_MILLIS = 3000L
+
+/** One mote of the send-off. [homeX]/[homeY] are normalised over the drawn
+ *  photo; [color] is the pixel sampled from the bitmap; direction, speed,
+ *  stagger and lift all come from the seeded LCG. Immutable, so the
+ *  per-frame draw allocates nothing but the [Offset]s. */
+private class DissolveParticle(
+    val homeX: Float,
+    val homeY: Float,
+    val color: Color,
+    val sizeDp: Float,
+    val dirX: Float,
+    val dirY: Float,
+    val speed: Float,
+    val delay: Float,
+    val buoyancy: Float,
+)
+
+/** Samples the card's bitmap into the dissolve's particle set, at the moment
+ *  the send starts. Deterministic per candidate id — same photo, same dust.
+ *  Homes sit on a 12×17 lattice (≈200 motes) with a little jitter; a
+ *  recycled bitmap or an out-of-range [Bitmap.getPixel] skips that mote. */
+private fun sampleDissolveParticles(bitmap: Bitmap, seed: Long): List<DissolveParticle> {
+    if (bitmap.isRecycled) return emptyList()
+    var state = (seed xor 0x2545F4914F6CDD1DL) * 6_364_136_223_846_793_005L + 1_442_695_040_888_963_407L
+    fun next(): Double {
+        state = state * 6_364_136_223_846_793_005L + 1_442_695_040_888_963_407L
+        return (state ushr 33).toDouble() / (1L shl 31).toDouble()
+    }
+    val particles = ArrayList<DissolveParticle>(DISSOLVE_GRID_COLS * DISSOLVE_GRID_ROWS)
+    for (row in 0 until DISSOLVE_GRID_ROWS) {
+        for (col in 0 until DISSOLVE_GRID_COLS) {
+            val homeX = ((col + 0.2 + next() * 0.6) / DISSOLVE_GRID_COLS).toFloat()
+            val homeY = ((row + 0.2 + next() * 0.6) / DISSOLVE_GRID_ROWS).toFloat()
+            val px = (homeX * (bitmap.width - 1)).toInt().coerceIn(0, bitmap.width - 1)
+            val py = (homeY * (bitmap.height - 1)).toInt().coerceIn(0, bitmap.height - 1)
+            val argb = try {
+                bitmap.getPixel(px, py)
+            } catch (_: Throwable) {
+                continue
+            }
+            val angle = next() * PI * 2.0
+            particles += DissolveParticle(
+                homeX = homeX,
+                homeY = homeY,
+                color = Color(argb),
+                sizeDp = (3.0 + next() * 5.0).toFloat(),
+                // Upward-outward scatter, the same cone the Metal shader's
+                // direction formula draws: sideways damped, vy always rising.
+                dirX = (cos(angle) * 0.45).toFloat(),
+                dirY = (-(0.55 + 0.45 * sin(angle))).toFloat(),
+                speed = (0.6 + next() * 0.5).toFloat(),
+                delay = (next() * 0.4).toFloat(),
+                buoyancy = next().toFloat(),
+            )
+        }
+    }
+    return particles
+}
+
+/** The particle layer of the send-off, the Android counterpart of the iOS
+ *  `onThisDayDissolve` shader: every mote sits at its home on the photo at
+ *  progress 0; as progress advances each one waits out its staggered delay,
+ *  then drifts up and apart with `t²` easing — let go of, not thrown — while
+ *  fading non-linearly (`1 - t`, squared, as the shader). The card under it
+ *  keeps its own fade + scale, which is what holds the photo legible. */
+@Composable
+private fun DissolveParticleOverlay(
+    particles: List<DissolveParticle>,
+    bitmap: Bitmap,
+    progress: Float,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(modifier = modifier) {
+        if (bitmap.isRecycled) return@Canvas
+        // ContentScale.Fit: the photo is centred in the card with the same
+        // letterbox the Image applies, so homes land on their pixels.
+        val fit = min(size.width / bitmap.width.toFloat(), size.height / bitmap.height.toFloat())
+        val imageWidth = bitmap.width * fit
+        val imageHeight = bitmap.height * fit
+        val left = (size.width - imageWidth) / 2f
+        val top = (size.height - imageHeight) / 2f
+        val drift = DISSOLVE_DRIFT_DP.dp.toPx()
+        val lift = DISSOLVE_LIFT_DP.dp.toPx()
+        particles.forEach { particle ->
+            val span = 1f - particle.delay
+            val t = ((progress - particle.delay) / span).coerceIn(0f, 1f)
+            if (t >= 1f) return@forEach
+            // t² easing: the scatter accelerates out of the still photo, and
+            // the buoyancy term lifts instead of gravity pulling down.
+            val ease = t * t
+            val x = left + particle.homeX * imageWidth + particle.dirX * drift * particle.speed * ease
+            val y = top + particle.homeY * imageHeight +
+                (particle.dirY * drift * particle.speed - particle.buoyancy * lift) * ease
+            drawCircle(
+                color = particle.color,
+                radius = particle.sizeDp.dp.toPx() * (1f - 0.4f * t) * 0.5f,
+                center = Offset(x, y),
+                alpha = (1f - t) * (1f - t),
+            )
+        }
+    }
+}
+
+private const val DISSOLVE_GRID_COLS = 12
+private const val DISSOLVE_GRID_ROWS = 17
+private const val DISSOLVE_DRIFT_DP = 90f
+private const val DISSOLVE_LIFT_DP = 24f

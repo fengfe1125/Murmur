@@ -97,6 +97,12 @@ class MurmurChatScreenTest {
         }
     }
 
+    private fun waitForTag(tag: String, timeoutMs: Long = 5_000) {
+        composeRule.waitUntil(timeoutMillis = timeoutMs) {
+            composeRule.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
     @Test
     fun enrollmentPaneShowsWhenThereIsNoIdentity() {
         setScreen(identity = null)
@@ -113,7 +119,7 @@ class MurmurChatScreenTest {
         waitForText("发来眼前的一刻。")
         composeRule.onNodeWithTag("empty-transcript").assertIsDisplayed()
         composeRule.onNodeWithText("Murmur").assertIsDisplayed()
-        composeRule.onNodeWithText("发送此刻").assertIsDisplayed()
+        composeRule.onNodeWithTag("send-moment").assertIsDisplayed()
     }
 
     @Test
@@ -126,8 +132,8 @@ class MurmurChatScreenTest {
     @Test
     fun sendButtonStaysDisabledUntilThereIsContent() {
         setScreen(identity = MurmurIdentity("u", "d", "k"))
-        waitForText("发送此刻")
-        composeRule.onNodeWithText("发送此刻").assertIsNotEnabled()
+        waitForTag("send-moment")
+        composeRule.onNodeWithTag("send-moment").assertIsNotEnabled()
     }
 
     @Test
@@ -135,7 +141,7 @@ class MurmurChatScreenTest {
         setScreen(identity = MurmurIdentity("u", "d", "k"))
         waitForText("发来眼前的一刻。")
 
-        composeRule.onNodeWithText("发一张图，或说点什么").performTextInput("看看这个")
+        composeRule.onNodeWithTag("moment-composer").performTextInput("看看这个")
         composeRule.onNodeWithTag("send-moment").performClick()
 
         // The outgoing row is on screen the instant the button is pressed,
@@ -143,6 +149,27 @@ class MurmurChatScreenTest {
         composeRule.onNodeWithTag("murmur-message-0").assertIsDisplayed()
         waitForText("reply-1")
         composeRule.onNodeWithText("reply-1").assertIsDisplayed()
+    }
+
+    @Test
+    fun outgoingAndIncomingBubblesLandOnTheirOwnSides() {
+        setScreen(identity = MurmurIdentity("u", "d", "k"))
+        waitForText("发来眼前的一刻。")
+
+        composeRule.onNodeWithTag("moment-composer").performTextInput("看看这个")
+        composeRule.onNodeWithTag("send-moment").performClick()
+
+        // Tags follow the transcript's append order, not visual position:
+        // the outgoing row is index 0 (the only message until the reply
+        // lands); the reply appends as index 1.
+        composeRule.onNodeWithTag("murmur-message-0").assertIsDisplayed()
+        waitForText("reply-1")
+
+        val rootWidth = composeRule.onRoot().fetchSemanticsNode().size.width.toFloat()
+        val outgoingCenter = composeRule.onNodeWithTag("murmur-message-0").fetchSemanticsNode().boundsInWindow.center.x
+        val replyCenter = composeRule.onNodeWithText("reply-1").fetchSemanticsNode().boundsInWindow.center.x
+        assertTrue("outgoing row should sit right of centre (x=$outgoingCenter)", outgoingCenter > rootWidth / 2f)
+        assertTrue("reply row should sit left of centre (x=$replyCenter)", replyCenter < rootWidth / 2f)
     }
 
     @Test
@@ -161,11 +188,13 @@ class MurmurChatScreenTest {
         composeRule.onNodeWithText("每天最多").assertIsDisplayed()
         composeRule.onNodeWithText("Test Phone").assertIsDisplayed()
         composeRule.onNodeWithText("Test Pad").assertIsDisplayed()
-        composeRule.onNodeWithText("保存频率与时段").assertIsDisplayed()
+        // The grouped layout is taller than the viewport; the save row sits
+        // below the fold until scrolled.
+        composeRule.onNodeWithText("保存频率与时段").performScrollTo().assertIsDisplayed()
         // The tab owns its own exit: there is no 完成 in the shell.
         assertTrue(composeRule.onAllNodesWithText("完成").fetchSemanticsNodes().isEmpty())
         composeRule.onNodeWithTag("tab-chat").performClick()
-        waitForText("发送此刻")
+        waitForTag("send-moment")
     }
 
     @Test
@@ -232,7 +261,7 @@ class MurmurChatScreenTest {
         setScreen(identity = MurmurIdentity("u", "d", "k"), widthDp = 800)
         waitForText("发来眼前的一刻。")
         composeRule.onNodeWithTag("empty-transcript").assertIsDisplayed()
-        assertTrue(composeRule.onAllNodesWithText("发送此刻").fetchSemanticsNodes().isNotEmpty())
+        assertTrue(composeRule.onAllNodesWithTag("send-moment").fetchSemanticsNodes().isNotEmpty())
     }
 
     @Test

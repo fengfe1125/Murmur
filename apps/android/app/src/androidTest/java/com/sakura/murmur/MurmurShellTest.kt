@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.sakura.murmur.ui.MurmurShell
 import com.sakura.murmur.ui.MurmurTheme
@@ -72,7 +73,8 @@ class MurmurShellTest {
 
         composeRule.onNodeWithTag("tab-me").performClick()
         waitForText("保存频率与时段")
-        composeRule.onNodeWithText("保存频率与时段").assertIsDisplayed()
+        // Below the fold in the grouped layout until scrolled.
+        composeRule.onNodeWithText("保存频率与时段").performScrollTo().assertIsDisplayed()
         assertTrue(composeRule.onAllNodesWithText("翻翻同一天的旧照片").fetchSemanticsNodes().isEmpty())
 
         composeRule.onNodeWithTag("tab-chat").performClick()
