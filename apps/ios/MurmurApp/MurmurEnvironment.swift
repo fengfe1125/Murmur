@@ -164,6 +164,8 @@ private actor UnavailableMurmurAPIClient: MurmurAPIClient {
     func removeDevice(deviceID: String) async throws { throw unavailable }
     func preferences() async throws -> MurmurPreferences { throw unavailable }
     func updatePreferences(_ preferences: MurmurPreferences) async throws { throw unavailable }
+    func musicAvailability() async throws -> MusicFeatureAvailability { throw unavailable }
+    func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws { throw unavailable }
     func resetLocalIdentity() async throws {}
     func deleteAccount() async throws { throw unavailable }
 

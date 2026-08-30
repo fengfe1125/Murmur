@@ -23,6 +23,9 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
     /// File name inside the transcript's image directory, not a full path: the
     /// container path changes between installs, so storing one would rot.
     var imageFile: String?
+    /// A stable metadata snapshot only.  Playback URLs and Audius credentials
+    /// are always reacquired by the music module and never enter the transcript.
+    var musicTrack: MusicTrackAttachmentV1?
     let sentAt: Date
     /// The calendar day this row belongs to when it resumes an older room.
     /// `sentAt` remains the real send time; older transcripts omit this field
@@ -43,6 +46,7 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
         author: MurmurMessageAuthor,
         text: String,
         imageFile: String? = nil,
+        musicTrack: MusicTrackAttachmentV1? = nil,
         sentAt: Date = Date(),
         archiveDay: Date? = nil,
         delivery: MurmurDeliveryState = .sent,
@@ -53,6 +57,7 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
         self.author = author
         self.text = text
         self.imageFile = imageFile
+        self.musicTrack = musicTrack
         self.sentAt = sentAt
         self.archiveDay = archiveDay
         self.delivery = delivery

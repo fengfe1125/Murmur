@@ -1,3 +1,8 @@
 // Copy to Debug.local.xcconfig. The real file is gitignored.
 MURMUR_API_BASE_URL = http:/$()/127.0.0.1:8766
 MURMUR_DEVELOPMENT_TOKEN = replace-with-a-local-development-token
+
+// Audius, optional.  Without a key the music entry never appears, whatever the
+// server says.  The redirect URI must match the one registered for the app.
+MURMUR_AUDIUS_API_KEY =
+MURMUR_AUDIUS_REDIRECT_URI = murmur-audius:/$()/oauth/callback

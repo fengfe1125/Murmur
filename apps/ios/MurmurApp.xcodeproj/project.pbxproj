@@ -36,6 +36,11 @@
 		A10000000000000000000203 /* OnThisDayTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000204 /* OnThisDayTabView.swift */; };
 		A100000000000000000000F3 /* OnThisDay.metal in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F4 /* OnThisDay.metal */; };
 		A100000000000000000000F5 /* MurmurPhotoRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* MurmurPhotoRoom.swift */; };
+		A10000000000000000000301 /* MusicModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000302 /* MusicModels.swift */; };
+		A10000000000000000000303 /* MusicPlaybackReporting.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000304 /* MusicPlaybackReporting.swift */; };
+		A10000000000000000000305 /* AudiusClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000306 /* AudiusClient.swift */; };
+		A10000000000000000000307 /* AudiusAccountModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000308 /* AudiusAccountModel.swift */; };
+		A10000000000000000000309 /* MusicPlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030A /* MusicPlaybackController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -94,6 +99,11 @@
 		A10000000000000000000204 /* OnThisDayTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnThisDayTabView.swift; sourceTree = "<group>"; };
 		A100000000000000000000F4 /* OnThisDay.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = OnThisDay.metal; sourceTree = "<group>"; };
 		A100000000000000000000F6 /* MurmurPhotoRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurPhotoRoom.swift; sourceTree = "<group>"; };
+		A10000000000000000000302 /* MusicModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicModels.swift; sourceTree = "<group>"; };
+		A10000000000000000000304 /* MusicPlaybackReporting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlaybackReporting.swift; sourceTree = "<group>"; };
+		A10000000000000000000306 /* AudiusClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudiusClient.swift; sourceTree = "<group>"; };
+		A10000000000000000000308 /* AudiusAccountModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudiusAccountModel.swift; sourceTree = "<group>"; };
+		A1000000000000000000030A /* MusicPlaybackController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlaybackController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -153,6 +163,11 @@
 				A100000000000000000000F4 /* OnThisDay.metal */,
 				A100000000000000000000D2 /* MurmurDiagnostics.swift */,
 				A100000000000000000000E2 /* MurmurKeyboardInset.swift */,
+				A10000000000000000000302 /* MusicModels.swift */,
+				A10000000000000000000304 /* MusicPlaybackReporting.swift */,
+				A10000000000000000000306 /* AudiusClient.swift */,
+				A10000000000000000000308 /* AudiusAccountModel.swift */,
+				A1000000000000000000030A /* MusicPlaybackController.swift */,
 				A1000000000000000000001A /* Assets.xcassets */,
 				A1000000000000000000001B /* PrivacyInfo.xcprivacy */,
 				A10000000000000000000034 /* Config */,
@@ -354,6 +369,11 @@
 				A10000000000000000000207 /* MurmurArchiveViews.swift in Sources */,
 				A10000000000000000000203 /* OnThisDayTabView.swift in Sources */,
 				A100000000000000000000F5 /* MurmurPhotoRoom.swift in Sources */,
+				A10000000000000000000309 /* MusicPlaybackController.swift in Sources */,
+				A10000000000000000000307 /* AudiusAccountModel.swift in Sources */,
+				A10000000000000000000305 /* AudiusClient.swift in Sources */,
+				A10000000000000000000303 /* MusicPlaybackReporting.swift in Sources */,
+				A10000000000000000000301 /* MusicModels.swift in Sources */,
 				A100000000000000000000F3 /* OnThisDay.metal in Sources */,
 				A100000000000000000000D1 /* MurmurDiagnostics.swift in Sources */,
 				A100000000000000000000E1 /* MurmurKeyboardInset.swift in Sources */,
@@ -445,7 +465,7 @@
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Murmur 想在本机翻找你相册里同一天的旧照片；发送哪一张，由你决定。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
+				INFOPLIST_KEY_UIBackgroundModes = "remote-notification audio";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -479,7 +499,7 @@
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Murmur 想在本机翻找你相册里同一天的旧照片；发送哪一张，由你决定。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
+				INFOPLIST_KEY_UIBackgroundModes = "remote-notification audio";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";

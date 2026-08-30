@@ -83,11 +83,30 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         intent: MurmurMomentIntent?,
         contextMomentIDs: [String]
     ) async throws -> MomentReceipt {
+        try await createMoment(
+            note: note,
+            photo: photo,
+            musicTrack: nil,
+            idempotencyKey: idempotencyKey,
+            intent: intent,
+            contextMomentIDs: contextMomentIDs
+        )
+    }
+
+    func createMoment(
+        note: String?,
+        photo: PhotoAttachment?,
+        musicTrack: MusicTrackAttachmentV1?,
+        idempotencyKey: String,
+        intent: MurmurMomentIntent?,
+        contextMomentIDs: [String]
+    ) async throws -> MomentReceipt {
         let boundary = "Murmur-\(UUID().uuidString)"
         let bodyURL = try makeMultipartBody(
             boundary: boundary,
             note: note,
             photo: photo,
+            musicTrack: musicTrack,
             idempotencyKey: idempotencyKey,
             intent: intent,
             contextMomentIDs: contextMomentIDs
@@ -156,6 +175,30 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         let _: EmptyResponse = try await send(
             path: "/v1/moments/\(pathComponent(momentID))/ack",
             method: "POST",
+            body: body,
+            contentType: "application/json",
+            authenticated: true,
+            allowsEmpty: true
+        )
+    }
+
+    func musicAvailability() async throws -> MusicFeatureAvailability {
+        try await send(
+            path: "/v1/music/config",
+            method: "GET",
+            body: Data(),
+            contentType: nil,
+            authenticated: true
+        )
+    }
+
+    func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let body = try encoder.encode(event)
+        let _: PlaybackStateResponse = try await send(
+            path: "/v1/music/playback-state",
+            method: "PUT",
             body: body,
             contentType: "application/json",
             authenticated: true,
@@ -315,7 +358,7 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             return .accepted(id: id)
         case "bubble":
             let bubble = try decoder.decode(BubblePayload.self, from: payload)
-            return .bubble(id: id, text: bubble.text)
+            return .bubble(id: id, text: bubble.text, musicTrack: bubble.musicTrack)
         case "quiet":
             return .quiet(id: id)
         case "done":
@@ -494,6 +537,7 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         boundary: String,
         note: String?,
         photo: PhotoAttachment?,
+        musicTrack: MusicTrackAttachmentV1? = nil,
         idempotencyKey: String,
         intent: MurmurMomentIntent?,
         contextMomentIDs: [String]
@@ -530,6 +574,25 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             try field("context_moment_ids", value)
         }
         if let note, !note.isEmpty { try field("note", note) }
+        if let musicTrack {
+            guard photo == nil else {
+                throw MurmurFailure(
+                    code: "invalid_music_attachment",
+                    message: "歌曲不能和照片一起发送。",
+                    retryable: false
+                )
+            }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            guard let value = String(data: try encoder.encode(musicTrack), encoding: .utf8) else {
+                throw MurmurFailure(
+                    code: "upload_prepare_failed",
+                    message: "无法准备这首歌。",
+                    retryable: false
+                )
+            }
+            try field("music_track", value)
+        }
         // What the photo says about itself.  It rides as its own field rather
         // than being written back into the JPEG: the bytes going up are a
         // downsampled derivative, and forging EXIF into a derivative so the
@@ -577,6 +640,12 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
     }
 
     private static let emptyDigest = Data(SHA256.hash(data: Data()))
+}
+
+extension URLSessionMurmurAPIClient: MusicPlaybackEventTransport {
+    func send(_ event: MusicPlaybackEvent) async throws {
+        try await reportMusicPlayback(event)
+    }
 }
 
 actor ProtectedRequestGate {
@@ -653,7 +722,15 @@ struct DeviceRequest: Encodable {
 
 private struct DevicesResponse: Decodable, Sendable { let devices: [MurmurDevice] }
 
-private struct BubblePayload: Decodable { let text: String }
+private struct BubblePayload: Decodable {
+    let text: String
+    let musicTrack: MusicTrackAttachmentV1?
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case musicTrack = "music_track"
+    }
+}
 private struct DonePayload: Decodable { let move: String?; let scene: String? }
 private struct AnglesPayload: Decodable { let angles: [String] }
 private struct StreamFailurePayload: Decodable { let code: String; let message: String; let retryable: Bool }
@@ -661,4 +738,9 @@ private struct ErrorEnvelope: Decodable { let error: StreamFailurePayload }
 
 private struct EmptyResponse: Codable {
     init() {}
+}
+
+private struct PlaybackStateResponse: Decodable {
+    let accepted: Bool?
+    init() { accepted = nil }
 }

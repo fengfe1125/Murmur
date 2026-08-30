@@ -5,6 +5,50 @@ import XCTest
 
 @MainActor
 final class MurmurSessionModelTests: XCTestCase {
+    func testSubmittingMusicKeepsDraftAndQueuesFallbackWithTrack() async throws {
+        let api = FakeMurmurAPIClient()
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
+        await model.bootstrap()
+        model.draftText = "这句还没写完"
+        let track = testMusicTrack()
+
+        model.submitMusic(track)
+        try await waitUntil { model.messages.contains { $0.author == .murmur } }
+
+        XCTAssertEqual(model.draftText, "这句还没写完")
+        let outgoing = try XCTUnwrap(model.messages.first)
+        XCTAssertEqual(outgoing.musicTrack, track)
+        XCTAssertEqual(outgoing.text, "🎵 夜航 — 林一, 小野\nhttps://audius.co/lin/night-sail")
+        let tracks = await api.submittedMusicTracks
+        let notes = await api.submittedNotes
+        XCTAssertEqual(tracks, [track])
+        XCTAssertEqual(notes, [outgoing.text])
+    }
+
+    func testMusicTrackSurvivesTranscriptReload() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let track = testMusicTrack()
+        await store.save([.init(author: .murmur, text: "听听这首", musicTrack: track)])
+
+        let restored = await store.load()
+        XCTAssertEqual(restored.first?.musicTrack, track)
+    }
+
+    private func testMusicTrack() -> MusicTrackAttachmentV1 {
+        MusicTrackAttachmentV1(
+            trackID: "night-sail",
+            title: "夜航",
+            artists: ["林一", "小野"],
+            artworkURL: URL(string: "https://images.audius.co/night-sail.jpg"),
+            canonicalURL: URL(string: "https://audius.co/lin/night-sail")!,
+            durationSeconds: 201,
+            explicit: false
+        )
+    }
+
     func testTranscriptSurvivesAReloadAndMarksInterruptedSendsFailed() async throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -841,6 +885,8 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
     private(set) var acknowledgements: [(momentID: String, reply: String?)] = []
     private(set) var resetLocalIdentityCalls = 0
     private(set) var deviceTokens: [String?] = []
+    private(set) var submittedMusicTracks: [MusicTrackAttachmentV1?] = []
+    private(set) var submittedNotes: [String?] = []
     private var storedPreferences = MurmurPreferences(dailyFrequency: 2, quietStart: "21:00", quietEnd: "09:00")
 
     init(mode: Mode = .normal) { self.mode = mode }
@@ -870,6 +916,21 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
             try await Task.sleep(for: .milliseconds(90))
         }
         return .init(momentID: "moment-\(createCount)", status: "queued")
+    }
+
+    func createMoment(
+        note: String?, photo: PhotoAttachment?, musicTrack: MusicTrackAttachmentV1?,
+        idempotencyKey: String, intent: MurmurMomentIntent?, contextMomentIDs: [String]
+    ) async throws -> MomentReceipt {
+        submittedMusicTracks.append(musicTrack)
+        submittedNotes.append(note)
+        return try await createMoment(
+            note: note,
+            photo: photo,
+            idempotencyKey: idempotencyKey,
+            intent: intent,
+            contextMomentIDs: contextMomentIDs
+        )
     }
 
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> {

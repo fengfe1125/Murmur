@@ -32,7 +32,7 @@ struct MurmurRoomEventConsumer {
             switch event {
             case .accepted:
                 lastBubbleAt = Date()
-            case let .bubble(id, text):
+            case let .bubble(id, text, _):
                 guard !text.isEmpty else { continue }
                 try await pace(for: text, since: lastBubbleAt)
                 await onBubble(.init(
@@ -70,7 +70,7 @@ struct MurmurRoomEventConsumer {
 
     private static func eventID(of event: MurmurStreamEvent) -> String? {
         switch event {
-        case let .accepted(id), let .bubble(id, _), let .angles(id, _),
+        case let .accepted(id), let .bubble(id, _, _), let .angles(id, _),
              let .quiet(id), let .done(id, _, _), let .failure(id, _):
             id
         }

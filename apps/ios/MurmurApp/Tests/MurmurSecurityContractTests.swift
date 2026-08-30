@@ -69,6 +69,44 @@ final class MurmurNotificationPolicyTests: XCTestCase {
 }
 
 final class MurmurMomentMultipartTests: XCTestCase {
+    func testMusicMomentCarriesFallbackNoteAndCanonicalTrackJSON() async throws {
+        let client = URLSessionMurmurAPIClient(
+            baseURL: try XCTUnwrap(URL(string: "https://murmur.test")),
+            authenticator: MomentAuthenticator()
+        )
+        let track = MusicTrackAttachmentV1(
+            trackID: "track-42",
+            title: "Night Drive",
+            artists: ["Mira", "June"],
+            artworkURL: URL(string: "https://images.audius.test/42.jpg"),
+            canonicalURL: try XCTUnwrap(URL(string: "https://audius.co/mira/night-drive")),
+            durationSeconds: 187,
+            explicit: false
+        )
+        let fallback = "🎵 Night Drive — Mira, June\nhttps://audius.co/mira/night-drive"
+        let url = try await client.makeMultipartBody(
+            boundary: "MusicBoundary",
+            note: fallback,
+            photo: nil,
+            musicTrack: track,
+            idempotencyKey: "music-key",
+            intent: nil,
+            contextMomentIDs: []
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let body = String(decoding: try Data(contentsOf: url), as: UTF8.self)
+
+        XCTAssertTrue(body.contains(#"name="note""#), body)
+        XCTAssertTrue(body.contains(fallback), body)
+        XCTAssertTrue(body.contains(#"name="music_track""#), body)
+        XCTAssertTrue(body.contains(#""track_id":"track-42""#), body)
+        XCTAssertTrue(body.contains(#""artists":["Mira","June"]"#), body)
+        XCTAssertTrue(body.contains(#""canonical_url":"https:\/\/audius.co\/mira\/night-drive""#)
+            || body.contains(#""canonical_url":"https://audius.co/mira/night-drive""#), body)
+        XCTAssertFalse(body.localizedCaseInsensitiveContains("access_token"), body)
+        XCTAssertFalse(body.localizedCaseInsensitiveContains("stream_url"), body)
+    }
+
     func testArchiveContextIsEncodedWhileOrdinaryMomentsKeepTheOldBody() async throws {
         let recorder = RecoveryRequestRecorder()
         RecoveryURLProtocol.handler = { request in
