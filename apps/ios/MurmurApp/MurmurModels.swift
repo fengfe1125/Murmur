@@ -134,6 +134,38 @@ struct MurmurBubblePacing: Sendable, Equatable {
     }
 }
 
+/// What a photo carries about itself: when it was taken, and where.
+///
+/// 当年今日 sends a re-encoded JPEG, and a re-encoded JPEG has no EXIF left —
+/// without saying so explicitly, a photo from three years ago arrives looking
+/// like it was taken a second ago, and the one screen whose whole job is to ask
+/// about *that day* gets told the wrong day.  So the app states these facts
+/// rather than leaving a parser downstream to infer them from an image that no
+/// longer contains them.
+///
+/// `place` is reverse-geocoded on this device.  The coordinates still only ever
+/// become an anonymised ~110m fingerprint on the server, which does no
+/// geocoding of its own and keeps no latitude or longitude.
+struct PhotoProvenance: Codable, Equatable, Sendable {
+    var shotAt: Date?
+    var latitude: Double?
+    var longitude: Double?
+    var place: String?
+
+    enum CodingKeys: String, CodingKey {
+        case shotAt = "shot_at"
+        case latitude = "lat"
+        case longitude = "lon"
+        case place
+    }
+
+    /// Nothing worth saying.  An empty block is not sent at all rather than
+    /// sent as `{}` — the server would have to decide what that meant.
+    var isEmpty: Bool {
+        shotAt == nil && latitude == nil && longitude == nil && place == nil
+    }
+}
+
 struct PhotoAttachment: Identifiable, @unchecked Sendable {
     let id: UUID
     let originalURL: URL
@@ -141,6 +173,10 @@ struct PhotoAttachment: Identifiable, @unchecked Sendable {
     let filename: String
     let mimeType: String
     let byteCount: Int64
+    /// Filled in after the encode rather than during it: the place name is
+    /// resolved over the network alongside the encode, and whichever finishes
+    /// first should not hold up the other.
+    var provenance: PhotoProvenance?
 }
 
 struct MurmurBubble: Identifiable, Equatable, Sendable {

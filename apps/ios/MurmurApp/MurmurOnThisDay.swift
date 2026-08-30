@@ -44,6 +44,35 @@ struct OnThisDayCandidate: Identifiable, Equatable, Sendable {
     let id: String
     let creationDate: Date
     let origin: Origin
+    /// Where it was taken, straight off `PHAsset.location` — no EXIF parsing,
+    /// and no location permission: read access to the library is the whole
+    /// budget.  Nil is ordinary: the person had location off that day, or the
+    /// photo came from somewhere other than a camera.
+    let latitude: Double?
+    let longitude: Double?
+
+    init(
+        id: String,
+        creationDate: Date,
+        origin: Origin,
+        latitude: Double? = nil,
+        longitude: Double? = nil
+    ) {
+        self.id = id
+        self.creationDate = creationDate
+        self.origin = origin
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+
+    /// What this photo can say about itself on the way up.  The place name is
+    /// not here: resolving it needs the network, so it is asked for only at the
+    /// moment the photo is actually sent.
+    var provenance: PhotoProvenance {
+        PhotoProvenance(
+            shotAt: creationDate, latitude: latitude, longitude: longitude
+        )
+    }
 }
 
 // MARK: - Library
@@ -130,7 +159,9 @@ actor PhotoKitOnThisDayLibrary: OnThisDayLibrary {
                     OnThisDayCandidate(
                         id: asset.localIdentifier,
                         creationDate: asset.creationDate ?? start,
-                        origin: .sameDay(yearsAgo: yearsAgo)
+                        origin: .sameDay(yearsAgo: yearsAgo),
+                        latitude: asset.location?.coordinate.latitude,
+                        longitude: asset.location?.coordinate.longitude
                     ),
                     asset.isFavorite,
                     area
@@ -183,7 +214,9 @@ actor PhotoKitOnThisDayLibrary: OnThisDayLibrary {
             picked.append(OnThisDayCandidate(
                 id: asset.localIdentifier,
                 creationDate: asset.creationDate ?? Date(),
-                origin: .elsewhere
+                origin: .elsewhere,
+                latitude: asset.location?.coordinate.latitude,
+                longitude: asset.location?.coordinate.longitude
             ))
         }
         return picked
@@ -296,6 +329,15 @@ final class OnThisDayModel: ObservableObject {
     /// Index into `candidates`; the viewer is one card, not a grid.
     @Published private(set) var index = 0
     @Published private(set) var currentImage: UIImage?
+    /// The card those pixels came from, published in the same pass as them.
+    ///
+    /// Held rather than derived from `index`, because the two move on different
+    /// clocks: 下滑 advances the index at once and the library hands over the
+    /// image whenever it is ready.  A candidate derived from the index would,
+    /// for the width of that gap, describe a photo other than the one on
+    /// screen — and a send landing inside it would file one person's picture
+    /// under another day and another place.
+    @Published private(set) var currentCandidate: OnThisDayCandidate?
     /// Swipe-up is not an offer until there is actually a photo to send.
     var canSend: Bool { currentImage != nil && !candidates.isEmpty }
 
@@ -397,6 +439,7 @@ final class OnThisDayModel: ObservableObject {
     private func showCurrent() async {
         guard candidates.indices.contains(index) else {
             currentImage = nil
+            currentCandidate = nil
             return
         }
         imageGeneration += 1
@@ -405,6 +448,7 @@ final class OnThisDayModel: ObservableObject {
         let image = await library.image(for: candidate, targetPixels: MurmurImageCache.fullScreenPixels)
         guard generation == imageGeneration else { return }
         currentImage = image
+        currentCandidate = candidate
     }
 }
 
@@ -455,7 +499,9 @@ private struct StubOnThisDayLibrary: OnThisDayLibrary {
             let yearsAgo = offset + 1
             let day = calendar.date(byAdding: .year, value: -yearsAgo, to: date) ?? date
             return OnThisDayCandidate(
-                id: "stub-\(offset)", creationDate: day, origin: .sameDay(yearsAgo: yearsAgo)
+                id: "stub-\(offset)", creationDate: day,
+                origin: .sameDay(yearsAgo: yearsAgo),
+                latitude: 31.201, longitude: 121.447
             )
         }
     }
@@ -471,7 +517,8 @@ private struct StubOnThisDayLibrary: OnThisDayLibrary {
                 return OnThisDayCandidate(
                     id: identifier,
                     creationDate: calendar.date(byAdding: .day, value: -days, to: Date()) ?? Date(),
-                    origin: .elsewhere
+                    origin: .elsewhere,
+                    latitude: 31.201, longitude: 121.447
                 )
             }
     }
@@ -505,7 +552,7 @@ enum OnThisDayLibraryResolver {
 /// motion, so the two live in one cover and cross-fade under the photo.
 struct OnThisDayFlowView: View {
     @ObservedObject var model: OnThisDayModel
-    let makeRoom: (UIImage) -> PhotoRoomModel
+    let makeRoom: (UIImage, PhotoProvenance?) -> PhotoRoomModel
     @Environment(\.dismiss) private var dismiss
     @State private var room: PhotoRoomModel?
 
@@ -515,9 +562,9 @@ struct OnThisDayFlowView: View {
                 PhotoRoomView(model: room) { dismiss() }
                     .transition(.opacity)
             } else {
-                OnThisDayView(model: model) { image in
+                OnThisDayView(model: model) { image, provenance in
                     withAnimation(.easeInOut(duration: 0.25)) {
-                        room = makeRoom(image)
+                        room = makeRoom(image, provenance)
                     }
                 }
                 .transition(.opacity)
@@ -537,7 +584,7 @@ struct OnThisDayFlowView: View {
 struct OnThisDayView: View {
 
     @ObservedObject var model: OnThisDayModel
-    let onSend: (UIImage) -> Void
+    let onSend: (UIImage, PhotoProvenance?) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -809,6 +856,10 @@ struct OnThisDayView: View {
 
     private func send() {
         guard let image = model.currentImage else { return }
+        // Captured here, next to the image, not read again after the dissolve:
+        // the photo that leaves must be the one last seen, and so must the
+        // facts that travel with it.
+        let provenance = model.currentCandidate?.provenance
         let settle: Duration
         if MurmurShaderSupport.particleDissolve, !reduceMotion {
             // KeyframeAnimator reports no completion; the send leaves a beat
@@ -832,7 +883,7 @@ struct OnThisDayView: View {
             } catch {
                 return
             }
-            onSend(image)
+            onSend(image, provenance)
         }
     }
 

@@ -127,6 +127,11 @@ class Job:
     # A bounded, ordered set of earlier App moments whose linked Memory rows
     # should replace the generic recent-history window for this turn.
     context_moment_ids: tuple[str, ...] = ()
+    # Canonical JSON the App sent with the photo: when it was taken, where,
+    # and the place name it reverse-geocoded on device.  A re-encoded JPEG
+    # carries no EXIF, so 当年今日's old photo would otherwise arrive looking
+    # like it was taken just now.
+    provenance: str | None = None
 
 
 # The non-ordinary things an inbound moment can be asking for.  NULL is the
@@ -222,6 +227,9 @@ CREATE TABLE IF NOT EXISTS app_moments (
     preview_path     TEXT,
     intent           TEXT CHECK(intent IS NULL OR intent IN ('photo_reading')),
     context_moment_ids TEXT,
+    -- 照片自己带的事实：拍摄时间、坐标、机上反解出的地名。和 image_path
+    -- 一样是临时的，每条终结路径上一起清空。
+    provenance       TEXT,
     request_digest   TEXT NOT NULL,
     idempotency_key  TEXT NOT NULL,
     status           TEXT NOT NULL,
@@ -364,6 +372,12 @@ class AppStore:
             # therefore the exact backward-compatible value for every row.
             self.conn.execute(
                 "ALTER TABLE app_moments ADD COLUMN context_moment_ids TEXT"
+            )
+        if "provenance" not in moment_columns:
+            # 老 moment 从来没带过照片自己的事实，NULL 就是它们的准确值。
+            # 已经终结的行本来也该是 NULL——这一列只在处理途中有内容。
+            self.conn.execute(
+                "ALTER TABLE app_moments ADD COLUMN provenance TEXT"
             )
         if "proactive_memory_finalized" not in moment_columns:
             # Rows from before the durable continuity outbox predate this
@@ -734,6 +748,7 @@ class AppStore:
         request_digest: str,
         intent: str | None = None,
         context_moment_ids: list[str] | tuple[str, ...] | None = None,
+        provenance: str | None = None,
     ) -> MomentResult:
         if intent is not None and intent not in MOMENT_INTENTS:
             raise ValueError("unknown moment intent")
@@ -783,10 +798,11 @@ class AppStore:
                         raise MomentInFlight("another moment is still being processed")
                     db.execute(
                         "UPDATE app_moments SET note=?,image_path=?,intent=?,"
-                        "context_moment_ids=?,status='queued',"
+                        "context_moment_ids=?,provenance=?,status='queued',"
                         "scene=NULL,move=NULL,memory_entry_id=NULL,preview_path=NULL,"
                         "push_preview=NULL,failure_retryable=NULL,updated_at=? WHERE id=?",
-                        (note, image_path, intent, context_json, now, existing["id"]),
+                        (note, image_path, intent, context_json, provenance, now,
+                         existing["id"]),
                     )
                     db.execute("DELETE FROM app_events WHERE moment_id=?", (existing["id"],))
                     db.execute(
@@ -827,10 +843,10 @@ class AppStore:
             db.execute(
                 "INSERT INTO app_moments"
                 "(id,user_id,source,note,image_path,intent,context_moment_ids,"
-                "request_digest,idempotency_key,status,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "provenance,request_digest,idempotency_key,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (moment_id, user_id, "inbound", note, image_path, intent, context_json,
-                 request_digest, idempotency_key, "queued", now, now),
+                 provenance, request_digest, idempotency_key, "queued", now, now),
             )
             db.execute(
                 "INSERT INTO app_jobs(id,moment_id,created_at,updated_at) VALUES(?,?,?,?)",
@@ -963,7 +979,7 @@ class AppStore:
             while True:
                 row = db.execute(
                     "SELECT j.id,j.moment_id,j.attempts,m.user_id,m.note,m.image_path,m.intent,"
-                    "m.context_moment_ids "
+                    "m.context_moment_ids,m.provenance "
                     "FROM app_jobs j JOIN app_moments m ON m.id=j.moment_id "
                     "JOIN app_users u ON u.id=m.user_id "
                     "WHERE (j.status='queued' OR (j.status='processing' AND j.lease_until<?)) "
@@ -985,7 +1001,7 @@ class AppStore:
                     )
                     db.execute(
                         "UPDATE app_moments SET status='failed',note=NULL,image_path=NULL,"
-                        "failure_retryable=0,updated_at=? WHERE id=?",
+                        "provenance=NULL,failure_retryable=0,updated_at=? WHERE id=?",
                         (now, row["moment_id"]),
                     )
                     self._append_event_tx(db, row["moment_id"], "error", {
@@ -1016,6 +1032,7 @@ class AppStore:
                 return Job(
                     row["id"], row["moment_id"], row["user_id"], row["note"],
                     row["image_path"], row["intent"], context_ids,
+                    row["provenance"],
                 )
 
     def renew_job(
@@ -1064,8 +1081,8 @@ class AppStore:
             )
             db.execute(
                 "UPDATE app_moments SET status='complete',note=NULL,scene=?,move=?,"
-                "memory_entry_id=?,preview_path=?,image_path=NULL,failure_retryable=NULL,"
-                "updated_at=? WHERE id=?",
+                "memory_entry_id=?,preview_path=?,image_path=NULL,provenance=NULL,"
+                "failure_retryable=NULL,updated_at=? WHERE id=?",
                 (scene, move, memory_entry_id, preview_path, _iso(), job.moment_id),
             )
             db.execute(
@@ -1086,7 +1103,8 @@ class AppStore:
         with self._tx() as db:
             db.execute(
                 "UPDATE app_moments SET status='complete',note=NULL,scene=?,move=?,memory_entry_id=?,"
-                "preview_path=?,image_path=NULL,failure_retryable=NULL,updated_at=? WHERE id=?",
+                "preview_path=?,image_path=NULL,provenance=NULL,failure_retryable=NULL,"
+                "updated_at=? WHERE id=?",
                 (scene, move, memory_entry_id, preview_path, _iso(), job.moment_id),
             )
             db.execute(
@@ -1107,7 +1125,7 @@ class AppStore:
                 return False
             db.execute(
                 "UPDATE app_moments SET status='failed',note=NULL,image_path=NULL,"
-                "failure_retryable=?,updated_at=? WHERE id=?",
+                "provenance=NULL,failure_retryable=?,updated_at=? WHERE id=?",
                 (1 if retryable else 0, _iso(), job.moment_id),
             )
             db.execute(

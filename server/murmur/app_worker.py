@@ -7,13 +7,14 @@ the single source of delivery state.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -96,6 +97,47 @@ class MomentProcessor(Protocol):
     ) -> ProcessedMoment: ...
 
 
+def _provenance(job: Job) -> dict:
+    """App 随图声明的事实：拍摄时间、坐标、机上反解出的地名。
+
+    写坏了当没有。这条路径宁可少一句地名，也不该因为一个字段把整条
+    moment 弄失败——API 那层已经校验过一遍了，这里只是不信任地读回来。
+    """
+    # getattr 而不是 job.provenance：同 _archive_context 里的
+    # context_moment_ids，Job 的可选字段在测试替身里未必存在。
+    raw = getattr(job, "provenance", None)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _apply_provenance(photo: Photo, provenance: dict) -> Photo:
+    """把 App 声明的事实盖到从图里读出来的之上。
+
+    当年今日推上来的是重新编码过的 JPEG，EXIF 已经没了，_read_gps 和
+    _read_shot_at 一定读出 None——不盖的话，一张三年前的照片会被当成
+    刚拍的。普通发图走原图，EXIF 还在，那时 App 不声明，也就盖不动。
+    两条路径共用同一个 Photo。
+    """
+    shot_at = photo.shot_at
+    if raw := provenance.get("shot_at"):
+        try:
+            shot_at = datetime.fromisoformat(raw)
+        except (TypeError, ValueError):
+            pass
+    lat, lon = provenance.get("lat"), provenance.get("lon")
+    return replace(
+        photo,
+        shot_at=shot_at,
+        lat=photo.lat if lat is None else float(lat),
+        lon=photo.lon if lon is None else float(lon),
+    )
+
+
 class EngineMomentProcessor:
     def __init__(
         self, cfg: Config, data_root: Path, *, max_image_pixels: int = 100_000_000
@@ -111,8 +153,12 @@ class EngineMomentProcessor:
             load_app_photo(job.image_path, self.max_image_pixels)
             if job.image_path else None
         )
+        provenance = _provenance(job)
+        if photo is not None:
+            photo = _apply_provenance(photo, provenance)
         moment = (
-            Moment.of(photo, self.cfg.tz) if photo is not None
+            Moment.of(photo, self.cfg.tz, place=provenance.get("place"))
+            if photo is not None
             else Moment.text_only(self.cfg.tz)
         )
         chat_id, label = thread_key("app", "direct", job.user_id)
@@ -137,7 +183,15 @@ class EngineMomentProcessor:
                 prompt_parts.append(tone)
         prompt_dossier = "\n\n".join(prompt_parts) or None
         if job.intent == "photo_reading" and photo is not None:
-            reading = self._read(job, moment, photo, prompt_dossier)
+            reading = self._read(
+                job, moment, photo, prompt_dossier,
+                # 没有坐标就没有「来过几次」可数，也就不必去问库——
+                # spot_visits 自己也是这么早退的。
+                visits=(
+                    memory.spot_visits(chat_id, moment.spot, moment.bucket)
+                    if moment.spot else 0
+                ),
+            )
             if reading is not None:
                 return reading
         reply = respond(
@@ -178,7 +232,8 @@ class EngineMomentProcessor:
         return entries or None
 
     def _read(
-        self, job: Job, moment: Moment, photo: Photo, dossier: str | None
+        self, job: Job, moment: Moment, photo: Photo, dossier: str | None,
+        *, visits: int = 0,
     ) -> ProcessedMoment | None:
         """当年今日 推过来的那一张：先看图，猜他想说什么，再递三个话头。
 
@@ -187,7 +242,9 @@ class EngineMomentProcessor:
         回复：这间房宁可少三个话头，也不能开门就是一片空白。
         """
         try:
-            reading = read_photo(moment, photo, self.cfg, dossier=dossier)
+            reading = read_photo(
+                moment, photo, self.cfg, visits=visits, dossier=dossier
+            )
         except Exception as error:
             log.warning(
                 "App photo reading fell back moment_id=%s error_type=%s",

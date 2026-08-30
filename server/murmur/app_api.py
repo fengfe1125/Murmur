@@ -197,6 +197,76 @@ def _looks_like_image(data: bytes) -> bool:
     )
 
 
+# 地名在这里只做长度上的兜底，内容不动：它是 App 反解出来的一段人读的文字，
+# 服务端没有第二个来源可以拿来校验它。
+MAX_PLACE_CHARS = 120
+_PROVENANCE_KEYS = {"shot_at", "lat", "lon", "place"}
+
+
+def _parse_provenance(value) -> str | None:
+    """照片自己带的事实：拍摄时间、坐标、机上反解出的地名。
+
+    重新编码过的 JPEG 没有 EXIF，所以这些不从图里读，由 App 显式声明。
+    存回去的是规范化后的 JSON——幂等摘要要算它，同一份内容必须得到同一串字节。
+
+    四个键全是可选的：老照片可能关了定位，反解可能超时，都不是错误。
+    """
+    if value in (None, ""):
+        return None
+    try:
+        raw = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise APIError(400, "validation_error", "provenance 无效。") from exc
+    if not isinstance(raw, dict) or not _PROVENANCE_KEYS.issuperset(raw):
+        raise APIError(400, "validation_error", "provenance 无效。")
+
+    clean: dict[str, object] = {}
+
+    shot_at = raw.get("shot_at")
+    if shot_at is not None:
+        if not isinstance(shot_at, str):
+            raise APIError(400, "validation_error", "provenance.shot_at 无效。")
+        try:
+            parsed = datetime.fromisoformat(shot_at)
+        except ValueError as exc:
+            raise APIError(
+                400, "validation_error", "provenance.shot_at 无效。"
+            ) from exc
+        clean["shot_at"] = parsed.isoformat()
+
+    lat, lon = raw.get("lat"), raw.get("lon")
+    if (lat is None) != (lon is None):
+        # 半个坐标折不出地点指纹，也没法解释它是什么意思。
+        raise APIError(400, "validation_error", "provenance 的经纬度要成对提交。")
+    if lat is not None:
+        # bool 是 int 的子类，挡掉，否则 True 会被当成 1.0 度。
+        if isinstance(lat, bool) or isinstance(lon, bool):
+            raise APIError(400, "validation_error", "provenance 的经纬度无效。")
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            raise APIError(400, "validation_error", "provenance 的经纬度无效。")
+        if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+            raise APIError(400, "validation_error", "provenance 的经纬度无效。")
+        clean["lat"], clean["lon"] = float(lat), float(lon)
+
+    place = raw.get("place")
+    if place is not None:
+        if not isinstance(place, str):
+            raise APIError(400, "validation_error", "provenance.place 无效。")
+        place = " ".join(place.split())
+        if len(place) > MAX_PLACE_CHARS:
+            raise APIError(400, "validation_error", "provenance.place 过长。")
+        if place:
+            clean["place"] = place
+
+    if not clean:
+        return None
+    return json.dumps(
+        {key: clean[key] for key in sorted(clean)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def erase_account(store: AppStore, settings: AppSettings, user_id: str) -> None:
     """Erase app identity, hidden memory, dossier and every retained preview."""
     with UserOperationLock(settings.data_root, user_id):
@@ -643,7 +713,7 @@ def create_app(
             auth = await authenticate(request, None, body_digest=wire_digest)
             try:
                 form = await request.form(
-                    max_files=1, max_fields=5, max_part_size=64 * 1024
+                    max_files=1, max_fields=6, max_part_size=64 * 1024
                 )
             except Exception as exc:
                 raise APIError(400, "validation_error", "multipart 内容无效。") from exc
@@ -690,6 +760,10 @@ def create_app(
                         if moment not in seen_context:
                             seen_context.add(moment)
                             context_moment_ids.append(moment)
+                # 当年今日推上来的是一张旧照片，App 顺手把这张照片自己的
+                # 事实一起送来：拍摄时间、坐标，以及机上反解好的地名。
+                # 这些不从图里猜——重新编码过的 JPEG 早就没有 EXIF 了。
+                provenance = _parse_provenance(form.get("provenance"))
                 upload = form.get("image")
                 image_hash = hashlib.sha256()
                 image_size = 0
@@ -730,6 +804,10 @@ def create_app(
                     raise APIError(
                         400, "validation_error", "文字和图片至少要有一个。"
                     )
+                if provenance is not None and not temp_path:
+                    raise APIError(
+                        400, "validation_error", "provenance 只能随图片一起提交。"
+                    )
                 if intent == "photo_reading" and (not temp_path or note):
                     raise APIError(
                         400, "validation_error", "读图只接受一张不带文字的照片。"
@@ -748,6 +826,8 @@ def create_app(
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ).encode("utf-8")
+                if provenance is not None:
+                    digest_input += b"\x00" + provenance.encode("utf-8")
                 digest = hashlib.sha256(digest_input).hexdigest()
                 result = await asyncio.to_thread(
                     store.create_moment,
@@ -758,6 +838,7 @@ def create_app(
                     request_digest=digest,
                     intent=intent,
                     context_moment_ids=context_moment_ids,
+                    provenance=provenance,
                 )
                 if not result.created and temp_path:
                     temp_path.unlink(missing_ok=True)

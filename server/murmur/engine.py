@@ -89,7 +89,14 @@ def build_context(
     has_photo: bool = True,
 ) -> str:
     """只描述"这一条"消息。历史走 history_turns()。"""
-    lines = [f"此刻：{moment.describe()}"]
+    # 旧照片不能叫「此刻」。读图失败退回这里的那条路走的也是这个函数，
+    # 只在 read_photo 里分开说两个时间，等于只修了一半。
+    if moment.is_recalled:
+        lines = [moment.describe_recalled()]
+    else:
+        lines = [f"此刻：{moment.describe()}"]
+        if place := moment.describe_place():
+            lines.append(place)
 
     if visits >= 3:
         lines.append(
@@ -417,10 +424,33 @@ def _read_once(model: str, content: list[dict], cfg: Config, dossier: str | None
     return ("{" + raw) if cfg.json_prefix else raw
 
 
+def _reading_context(moment: Moment, visits: int) -> str:
+    """读图那一屏的上下文。
+
+    和 build_context 分开写，因为这里说的是一张旧照片：「拍摄于」和「现在」
+    是两个时间，合成一个模型就会以为今天是三年前的那天。
+    """
+    lines = [moment.describe_recalled()]
+    if visits >= 3:
+        lines.append(
+            f"（系统提示，别点破）同一个地方的{moment.bucket}他发过 {visits} 次图，"
+            "这大概是他的日常场景。"
+        )
+    return "\n".join(lines)
+
+
 def read_photo(
-    moment: Moment, photo: Photo, cfg: Config, *, dossier: str | None = None
+    moment: Moment,
+    photo: Photo,
+    cfg: Config,
+    *,
+    visits: int = 0,
+    dossier: str | None = None,
 ) -> PhotoReading:
     """当年今日推过来一张旧照片，他还没说话：先看图，猜他想说什么。
+
+    上下文里「拍摄于」和「现在」是分开的两个时间，地名（如果 App 反解出来了）
+    也在里面——「那天下午你在这家店干嘛」这句话，信息全在这两样里，不在画面里。
 
     必须真的看得见图——这一屏的全部价值就是「上游读懂了这张照片」，
     所以只走 cfg.image_model，没有纯文字的降级档可言。两次都不成才抛出去，
@@ -442,7 +472,7 @@ def read_photo(
                 "url": f"data:{photo.media_type};base64,{photo.image_b64}"
             },
         },
-        {"type": "text", "text": f"此刻：{moment.describe()}"},
+        {"type": "text", "text": _reading_context(moment, visits)},
     ]
     last_error: Exception | None = None
     for attempt in range(1, READING_ATTEMPTS + 1):

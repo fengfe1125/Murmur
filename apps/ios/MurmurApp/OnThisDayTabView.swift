@@ -83,8 +83,8 @@ struct OnThisDayTabView: View {
         // The browser keeps its cover: the dissolve owns the whole screen, and
         // a tab bar under it would be a second thing to look at mid-gesture.
         .fullScreenCover(isPresented: $showBrowser) {
-            OnThisDayFlowView(model: onThisDay) { image in
-                model.makePhotoRoom(image: image)
+            OnThisDayFlowView(model: onThisDay) { image, provenance in
+                model.makePhotoRoom(image: image, provenance: provenance)
             }
         }
     }

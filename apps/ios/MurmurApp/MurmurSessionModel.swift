@@ -273,7 +273,9 @@ final class MurmurSessionModel: ObservableObject {
     /// in the view so it borrows the app's own authenticated client, photo
     /// loader and timeouts: the room's upload goes out the same door as every
     /// other, and its temporary original lands under the same swept prefix.
-    func makePhotoRoom(image: UIImage) -> PhotoRoomModel {
+    func makePhotoRoom(
+        image: UIImage, provenance: PhotoProvenance? = nil
+    ) -> PhotoRoomModel {
         PhotoRoomModel(
             image: image,
             api: api,
@@ -281,6 +283,11 @@ final class MurmurSessionModel: ObservableObject {
             uploadTimeoutSeconds: uploadTimeoutSeconds,
             requestTimeoutSeconds: requestTimeoutSeconds,
             bubblePacing: bubblePacing,
+            // What the photo says about itself.  Without it a picture from
+            // three years ago arrives looking like it was taken a second ago,
+            // and the one screen whose job is to ask about that day gets told
+            // the wrong day.
+            provenance: provenance,
             // Into the archive, never the conversation: what is said about an
             // old photo belongs to the day it was said on, and the chat stays
             // a chat.  当年今日 reads that archive back as a calendar.

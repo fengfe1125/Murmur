@@ -16,15 +16,98 @@ final class PhotoRoomModelTests: XCTestCase {
     }
 
     private func makeModel(
-        api: RoomAPI
+        api: RoomAPI,
+        provenance: PhotoProvenance? = nil,
+        placeLookup: any MurmurPlaceLookup = StubPlaceLookup(answer: nil)
     ) -> PhotoRoomModel {
         PhotoRoomModel(
             image: makeImage(),
             api: api,
             uploadTimeoutSeconds: 5,
             requestTimeoutSeconds: 5,
-            bubblePacing: .instant
+            bubblePacing: .instant,
+            provenance: provenance,
+            placeLookup: placeLookup
         )
+    }
+
+    private var shelfPhoto: PhotoProvenance {
+        PhotoProvenance(
+            shotAt: Date(timeIntervalSince1970: 1_693_382_651),
+            latitude: 31.201,
+            longitude: 121.447
+        )
+    }
+
+    // ---- What the photo says about itself -----------------------------------
+
+    /// Without this the server reads a re-encoded JPEG, finds no EXIF, and
+    /// dates a three-year-old photo to this second — on the one screen whose
+    /// whole job is to ask about that day.
+    func testTheOpeningUploadCarriesTheDayThePhotoWasTaken() async {
+        let api = RoomAPI()
+        let model = makeModel(api: api, provenance: shelfPhoto)
+        model.open()
+        await settle { model.phase == .listening }
+        let sent = await api.calls.first?.provenance
+        XCTAssertEqual(sent?.shotAt, shelfPhoto.shotAt)
+        XCTAssertEqual(sent?.latitude, 31.201)
+    }
+
+    /// The coordinate becomes a name on this device, and it is the name that
+    /// travels.
+    func testAResolvedPlaceTravelsWithThePhoto() async {
+        let api = RoomAPI()
+        let lookup = StubPlaceLookup(answer: "上海市 · 徐汇区 · 星巴克")
+        let model = makeModel(api: api, provenance: shelfPhoto, placeLookup: lookup)
+        model.open()
+        await settle { model.phase == .listening }
+        let sent = await api.calls.first?.provenance
+        XCTAssertEqual(sent?.place, "上海市 · 徐汇区 · 星巴克")
+        let asked = await lookup.asked
+        XCTAssertEqual(asked.count, 1)
+    }
+
+    /// Offline, throttled, or simply slow.  A name that did not arrive is not a
+    /// failure to send — the photo goes, still carrying its own date.
+    func testAPlaceThatNeverArrivesDoesNotHoldThePhotoBack() async {
+        let api = RoomAPI()
+        let model = makeModel(
+            api: api, provenance: shelfPhoto, placeLookup: StubPlaceLookup(answer: nil)
+        )
+        model.open()
+        await settle { model.phase == .listening }
+        let sent = await api.calls.first?.provenance
+        XCTAssertNil(sent?.place)
+        XCTAssertEqual(sent?.shotAt, shelfPhoto.shotAt)
+    }
+
+    /// A coordinate leaves this phone only for a photo that has one.
+    func testAPhotoWithNoCoordinateIsNeverGeocoded() async {
+        let api = RoomAPI()
+        let lookup = StubPlaceLookup(answer: "不该被问到")
+        let model = makeModel(
+            api: api,
+            provenance: PhotoProvenance(shotAt: Date()),
+            placeLookup: lookup
+        )
+        model.open()
+        await settle { model.phase == .listening }
+        let asked = await lookup.asked
+        XCTAssertTrue(asked.isEmpty)
+        let sent = await api.calls.first?.provenance
+        XCTAssertNil(sent?.place)
+    }
+
+    /// A room opened on something that is not an old photo off the shelf says
+    /// nothing about when or where, rather than saying "now" and "here".
+    func testARoomWithNoShelfPhotoClaimsNothing() async {
+        let api = RoomAPI()
+        let model = makeModel(api: api)
+        model.open()
+        await settle { model.phase == .listening }
+        let sent = await api.calls.first?.provenance
+        XCTAssertNil(sent)
     }
 
     private func settle(_ condition: @escaping () -> Bool) async {
@@ -487,6 +570,21 @@ final class PhotoRoomModelTests: XCTestCase {
     }
 }
 
+/// A geocoder that never leaves the process.  `answer: nil` is the ordinary
+/// unhappy path — offline, throttled, or slower than the send is willing to
+/// wait — not a broken test.
+private actor StubPlaceLookup: MurmurPlaceLookup {
+    private let answer: String?
+    private(set) var asked: [(latitude: Double, longitude: Double)] = []
+
+    init(answer: String?) { self.answer = answer }
+
+    func name(latitude: Double, longitude: Double) async -> String? {
+        asked.append((latitude, longitude))
+        return answer
+    }
+}
+
 private actor RoomAPI: MurmurAPIClient {
     enum Mode {
         case normal, failsFirstUpload, failsSecondSend, failsSecondStream
@@ -499,6 +597,7 @@ private actor RoomAPI: MurmurAPIClient {
         let idempotencyKey: String
         let intent: MurmurMomentIntent?
         let contextMomentIDs: [String]
+        let provenance: PhotoProvenance?
     }
 
     private let mode: Mode
@@ -522,7 +621,8 @@ private actor RoomAPI: MurmurAPIClient {
         calls.append(.init(
             note: note, hasPhoto: photo != nil,
             idempotencyKey: idempotencyKey, intent: intent,
-            contextMomentIDs: contextMomentIDs
+            contextMomentIDs: contextMomentIDs,
+            provenance: photo?.provenance
         ))
         if mode == .failsFirstUpload, calls.count == 1 {
             throw MurmurFailure(code: "network_error", message: "没连上。", retryable: true)

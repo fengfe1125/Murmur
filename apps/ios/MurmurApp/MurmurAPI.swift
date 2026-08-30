@@ -486,7 +486,11 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         return url
     }
 
-    private func makeMultipartBody(
+    /// Internal rather than private so the encoding itself can be asserted on.
+    /// Every field here is one the server parses by name: a rename that only a
+    /// client double ever sees is a green test suite over a feature the server
+    /// never receives.
+    func makeMultipartBody(
         boundary: String,
         note: String?,
         photo: PhotoAttachment?,
@@ -526,6 +530,23 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             try field("context_moment_ids", value)
         }
         if let note, !note.isEmpty { try field("note", note) }
+        // What the photo says about itself.  It rides as its own field rather
+        // than being written back into the JPEG: the bytes going up are a
+        // downsampled derivative, and forging EXIF into a derivative so the
+        // server can "discover" what this app already knows is one indirection
+        // too many.
+        if let provenance = photo?.provenance, !provenance.isEmpty {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let value = String(data: try encoder.encode(provenance), encoding: .utf8) else {
+                throw MurmurFailure(
+                    code: "upload_prepare_failed",
+                    message: "无法准备这张照片的信息。",
+                    retryable: false
+                )
+            }
+            try field("provenance", value)
+        }
         if let photo {
             try write("--\(boundary)\r\n")
             try write("Content-Disposition: form-data; name=\"image\"; filename=\"\(photo.filename)\"\r\n")
