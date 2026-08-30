@@ -58,22 +58,29 @@ import com.sakura.murmur.NotificationPermission
  * The settings pane — the Android counterpart of `MurmurSettingsView` in
  * `MurmurChatView.swift`: connection state, devices, proactive preferences,
  * notifications, clearing the current moment, and account deletion.
+ *
+ * It is the 我的 tab inside `MurmurShell`, so [onClose] is optional: with no
+ * close handler there is no 完成 button, and losing the identity (removing
+ * the current device or deleting the account) leaves the close to the shell's
+ * enrollment gate.  The non-null path only survives for a full-pane overlay.
  */
 @Composable
-fun MurmurSettingsScreen(session: MurmurSessionModel, onClose: () -> Unit) {
+fun MurmurSettingsScreen(session: MurmurSessionModel, onClose: (() -> Unit)? = null) {
     val state by session.uiState.collectAsState()
     val colors = MurmurTheme.colors
     val context = LocalContext.current
     var permissionRefresh by remember { mutableIntStateOf(0) }
+    var confirmClearTranscript by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         session.loadPreferences()
         session.refreshDevices()
     }
     // Removing the current device or deleting the account lands back on the
-    // enrollment screen; the settings pane closes with it (iOS dismisses too).
+    // enrollment screen, which owns the whole screen from the shell; only a
+    // full-pane overlay has a close of its own to run (iOS dismisses too).
     LaunchedEffect(state.identity) {
-        if (state.identity == null) onClose()
+        if (state.identity == null) onClose?.invoke()
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -100,9 +107,11 @@ fun MurmurSettingsScreen(session: MurmurSessionModel, onClose: () -> Unit) {
             Text("Murmur", style = MaterialTheme.typography.headlineMedium, color = colors.ink)
             Spacer(Modifier.width(MurmurSpacing.md))
             Text("设置", color = colors.secondaryInk, fontSize = 15.sp)
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = onClose, modifier = Modifier.height(48.dp)) {
-                Text("完成", color = colors.olive)
+            if (onClose != null) {
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onClose, modifier = Modifier.height(48.dp)) {
+                    Text("完成", color = colors.olive)
+                }
             }
         }
         HorizontalDivider(color = colors.rule)
@@ -214,10 +223,36 @@ fun MurmurSettingsScreen(session: MurmurSessionModel, onClose: () -> Unit) {
                 ) {
                     Text("清空这一刻", color = colors.ink)
                 }
+            }
+
+            // ---- 聊天记录 ------------------------------------------------------
+            SettingsSection(title = "聊天记录") {
+                OutlinedButton(
+                    onClick = { confirmClearTranscript = true },
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("clear-transcript"),
+                    enabled = state.messages.isNotEmpty(),
+                ) {
+                    Text("清空聊天记录", color = colors.coral)
+                }
                 Text(
-                    "App 不会保存聊天列表；冷启动时始终从空白开始。",
+                    "聊天记录连同其中的照片只存在这台设备上，删除 App 就一并消失。服务端保存的是私有记忆，不是对话本身。",
                     color = colors.secondaryInk,
                     fontSize = 13.sp,
+                )
+            }
+            if (confirmClearTranscript) {
+                MurmurConfirmDialog(
+                    title = "清空聊天记录？",
+                    message = "这台设备上的对话和其中的照片会被删除，服务端的记忆不受影响。",
+                    confirmTitle = "确认清空",
+                    destructive = true,
+                    onConfirm = {
+                        confirmClearTranscript = false
+                        session.clearTranscript()
+                    },
+                    onDismiss = { confirmClearTranscript = false },
                 )
             }
 

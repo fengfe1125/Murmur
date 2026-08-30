@@ -15,6 +15,7 @@ import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -119,6 +120,26 @@ class OkHttpMurmurApiClientTest {
         """data: {"text":"尾巴"}""",
     ).joinToString("\n") + "\n"
 
+    /** 当年今日 读图的服务端事件序列：accepted → guess 气泡 → 三个话头 → done。 */
+    private val photoReadingSseBody: String = listOf(
+        "id: 1",
+        "event: accepted",
+        """data: {"moment_id":"moment-1"}""",
+        "",
+        "id: 2",
+        "event: bubble",
+        """data: {"text":"你翻到了一张旧照片。"}""",
+        "",
+        "id: 3",
+        "event: angles",
+        """data: {"angles":["去年的今天在做什么？","还留着那时的味道吗？","想回去看看吗？"]}""",
+        "",
+        "id: 4",
+        "event: done",
+        """data: {"move":"speak","scene":"on_this_day"}""",
+        "",
+    ).joinToString("\n") + "\n"
+
     private fun client(authenticator: RecordingAuthenticator) = OkHttpMurmurApiClient(
         baseURL = server.url("/").toString(),
         authenticator = authenticator,
@@ -190,12 +211,43 @@ class OkHttpMurmurApiClientTest {
                 when (it) {
                     is MurmurStreamEvent.Accepted -> "accepted(${it.id})"
                     is MurmurStreamEvent.Bubble -> "bubble(${it.id}, ${it.text})"
+                    is MurmurStreamEvent.Angles -> "angles(${it.id}, ${it.texts})"
                     is MurmurStreamEvent.Quiet -> "quiet(${it.id})"
                     is MurmurStreamEvent.Done -> "done(${it.id}, ${it.move}, ${it.scene})"
                     is MurmurStreamEvent.Failure -> "failure(${it.id})"
                 }
             },
         )
+    }
+
+    @Test
+    fun sseStreamDecodesAnglesBetweenTheGuessAndDone() = runTest {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
+                "/v1/auth/challenges" -> MockResponse()
+                    .setResponseCode(200)
+                    .setHeader("Content-Type", "application/json")
+                    .setBody("""{"challenge_id":"c-1","challenge":"Y2hhbGxlbmdl"}""")
+                "/v1/moments/moment-1/events" -> MockResponse()
+                    .setResponseCode(200)
+                    .setHeader("Content-Type", "text/event-stream")
+                    .setBody(photoReadingSseBody)
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        val client = client(RecordingAuthenticator())
+        val received = mutableListOf<MurmurStreamEvent>()
+        client.events("moment-1", lastEventID = null).collect { received += it }
+
+        assertEquals(4, received.size)
+        assertTrue(received[0] is MurmurStreamEvent.Accepted)
+        val guess = received[1] as MurmurStreamEvent.Bubble
+        assertEquals("你翻到了一张旧照片。", guess.text)
+        // 话头事件：payload 是 {"angles": [三个字符串]}，跟在 guess 后、done 前。
+        val angles = received[2] as MurmurStreamEvent.Angles
+        assertEquals("3", angles.id)
+        assertEquals(listOf("去年的今天在做什么？", "还留着那时的味道吗？", "想回去看看吗？"), angles.texts)
+        assertTrue(received[3] is MurmurStreamEvent.Done)
     }
 
     @Test
@@ -235,6 +287,43 @@ class OkHttpMurmurApiClientTest {
             assertEquals(Base64Url.encode(expected), Base64Url.encode(signed))
             // And the authenticator saw the same digest the client computed.
             assertEquals(Base64Url.encode(expected), Base64Url.encode(authenticator.recordedDigests.last()))
+        } finally {
+            photo.delete()
+        }
+    }
+
+    @Test
+    fun createMomentWithIntentAndContextSendsTheMultipartFields() = runTest {
+        val client = client(RecordingAuthenticator())
+        val photo = File.createTempFile("murmur-photo", ".jpg").apply {
+            writeBytes(ByteArray(32) { it.toByte() })
+        }
+        try {
+            client.createMoment(
+                note = null,
+                photo = PhotoAttachment(file = photo, preview = null, filename = "photo.jpg", mimeType = "image/jpeg", byteCount = photo.length()),
+                idempotencyKey = "key-photo",
+                intent = "photo_reading",
+                contextMomentIDs = listOf("moment-a", "moment-b"),
+            )
+            server.takeRequest() // the challenge
+            val momentRequest = server.takeRequest()
+            assertEquals("/v1/moments", momentRequest.path)
+            val body = momentRequest.body.readUtf8()
+
+            // 字段名与值必须与服务端契约一致（app_api.py：`intent` 是普通
+            // 字符串，`context_moment_ids` 用 json.loads 解成字符串数组，
+            // 编码与 iOS 的 JSONEncoder 输出同为紧凑 JSON 数组）。
+            assertTrue(
+                body.contains("Content-Disposition: form-data; name=\"intent\"\r\n\r\nphoto_reading\r\n"),
+            )
+            assertTrue(
+                body.contains("Content-Disposition: form-data; name=\"context_moment_ids\"\r\n\r\n[\"moment-a\",\"moment-b\"]\r\n"),
+            )
+            // 读图只接受一张不带文字的照片：note 缺席、image 在场、幂等键照常。
+            assertFalse(body.contains("name=\"note\""))
+            assertTrue(body.contains("name=\"image\"; filename=\"photo.jpg\""))
+            assertTrue(body.contains("name=\"idempotency_key\"\r\n\r\nkey-photo\r\n"))
         } finally {
             photo.delete()
         }

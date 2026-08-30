@@ -23,9 +23,10 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Port of `MurmurSessionModelTests.swift`'s state-machine matrix. The
- * transcript-store tests are deliberately absent: the Android product keeps
- * nothing locally.
+ * Port of `MurmurSessionModelTests.swift`'s state-machine matrix, plus the
+ * transcript assertions the bubble paradigm adds: every send lands a row in
+ * the store before anything is queued, a relaunch reads it back, resend
+ * reuses the row's idempotency key and photo, and cancel marks the row.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class MurmurSessionModelTest {
@@ -45,13 +46,17 @@ class MurmurSessionModelTest {
 
     private fun model(
         api: MurmurApiClient,
-        loader: PhotoLoader = FakePhotoLoader(),
+        loader: PhotoLoader = SessionFakePhotoLoader(),
         requestTimeoutSeconds: Double = 45.0,
         uploadTimeoutSeconds: Double = 300.0,
+        transcriptStore: MurmurTranscriptStore = MurmurTranscriptStore(
+            kotlin.io.path.createTempDirectory("murmur-session-test").toFile(),
+        ),
     ) = MurmurSessionModel(
         api = api,
         configurationFailure = null,
         photoLoader = loader,
+        transcriptStore = transcriptStore,
         requestTimeoutSeconds = requestTimeoutSeconds,
         uploadTimeoutSeconds = uploadTimeoutSeconds,
         deviceNameProvider = { "Test Phone · Android 15" },
@@ -65,7 +70,7 @@ class MurmurSessionModelTest {
         throw AssertionError("Timed out waiting for state")
     }
 
-    private fun writeTestFile(loader: FakePhotoLoader, size: Int = 64): File {
+    private fun writeTestFile(loader: SessionFakePhotoLoader, size: Int = 64): File {
         val file = File(loader.directory, "murmur-upload-${UUID.randomUUID()}.jpg")
         file.writeBytes(ByteArray(size))
         return file
@@ -80,6 +85,7 @@ class MurmurSessionModelTest {
         assertEquals(MurmurPhase.Idle, session.uiState.value.phase)
         assertFalse(session.uiState.value.hasCurrentMoment)
         assertTrue(session.uiState.value.bubbles.isEmpty())
+        assertTrue(session.uiState.value.messages.isEmpty())
         assertEquals(0, api.proactiveCalls)
     }
 
@@ -298,15 +304,26 @@ class MurmurSessionModelTest {
         assertEquals("proactive-1", api.acknowledgements[1].first)
         assertEquals("我看见了", api.acknowledgements[1].second)
         assertEquals(listOf("reply-1"), session.uiState.value.bubbles.map { it.text })
+        // The proactive message and the streamed reply are already in the
+        // scrollback, on either side of the person's reply.
+        assertEquals(
+            listOf(MurmurMessageAuthor.murmur, MurmurMessageAuthor.you, MurmurMessageAuthor.murmur),
+            session.uiState.value.messages.map { it.author },
+        )
+        assertEquals("想到你了", session.uiState.value.messages[0].text)
+        assertEquals("reply-1", session.uiState.value.messages[2].text)
     }
 
     @Test
     fun successfulMomentDeletesOriginalPhotoButKeepsPreview() = runTest(dispatcher) {
-        val loader = FakePhotoLoader()
-        val source = writeTestFile(loader)
+        val loader = SessionFakePhotoLoader()
         val api = FakeMurmurApiClient()
         val session = model(api, loader)
         advanceUntilIdle()
+        // The source lands after bootstrap's stale-file sweep: written any
+        // earlier, cleanupStaleFiles would eat it and the loader's leniency
+        // would let the whole test run against a phantom file.
+        val source = writeTestFile(loader)
 
         session.preparePhoto(PhotoInput.FromFile(source))
         advanceUntilIdle()
@@ -318,7 +335,14 @@ class MurmurSessionModelTest {
         assertFalse(managed.exists())
         assertTrue(session.uiState.value.currentPhoto != null)
         assertTrue(loader.leftoverFiles().isEmpty())
+        // The transcript owns its own copy of the photo now; the temporary
+        // original was the only thing the send cleaned up.
+        val row = session.uiState.value.messages.first()
+        assertTrue(row.imageFile != null)
+        assertTrue(storeOf(session).imageFile(row.imageFile!!).exists())
     }
+
+    private fun storeOf(session: MurmurSessionModel): MurmurTranscriptStore = session.transcriptStore
 
     @Test
     fun bootstrapLoadsServerPreferences() = runTest(dispatcher) {
@@ -386,11 +410,11 @@ class MurmurSessionModelTest {
 
     @Test
     fun cancelDuringPhotoPrepareDiscardsFileAndIgnoresLateResult() = runTest(dispatcher) {
-        val loader = FakePhotoLoader(loadDelayMs = 200)
-        val source = writeTestFile(loader)
+        val loader = SessionFakePhotoLoader(loadDelayMs = 200)
         val api = FakeMurmurApiClient()
         val session = model(api, loader)
         advanceUntilIdle()
+        val source = writeTestFile(loader)
         session.preparePhoto(PhotoInput.FromFile(source))
         assertEquals(MurmurPhase.PreparingPhoto, session.uiState.value.phase)
         session.cancelCurrentOperation()
@@ -413,11 +437,11 @@ class MurmurSessionModelTest {
 
     @Test
     fun preparePhotoDoesNotBlockBeforeBackgroundDecodeFinishes() = runTest(dispatcher) {
-        val loader = FakePhotoLoader(loadDelayMs = 500)
-        val source = writeTestFile(loader)
+        val loader = SessionFakePhotoLoader(loadDelayMs = 500)
         val api = FakeMurmurApiClient()
         val session = model(api, loader)
         advanceUntilIdle()
+        val source = writeTestFile(loader)
         session.preparePhoto(PhotoInput.FromFile(source))
         // Phase flips before the decode runs; the load resolves later.
         assertEquals(MurmurPhase.PreparingPhoto, session.uiState.value.phase)
@@ -426,10 +450,11 @@ class MurmurSessionModelTest {
     }
 
     @Test
-    fun thirtyCompletedMomentsLeaveNoHistoryOrTemporaryFiles() = runTest(dispatcher) {
-        val loader = FakePhotoLoader()
+    fun thirtyCompletedMomentsPersistTranscriptAndLeaveNoTemporaryFiles() = runTest(dispatcher) {
+        val loader = SessionFakePhotoLoader()
         val api = FakeMurmurApiClient()
-        val session = model(api, loader)
+        val store = MurmurTranscriptStore(kotlin.io.path.createTempDirectory("murmur-session-30").toFile())
+        val session = model(api, loader, transcriptStore = store)
         advanceUntilIdle()
         for (index in 1..30) {
             val source = writeTestFile(loader)
@@ -445,6 +470,197 @@ class MurmurSessionModelTest {
         assertEquals("第30刻", session.uiState.value.currentNote)
         assertFalse(session.uiState.value.currentPhoto!!.file.exists())
         assertTrue(loader.leftoverFiles().isEmpty())
+        // The bubble paradigm keeps the conversation instead of sweeping it:
+        // 30 outgoing rows + 30 replies, durable in the store.
+        assertEquals(60, session.uiState.value.messages.size)
+        assertEquals(60, store.load().size)
+        assertEquals("第30刻", store.load().last { it.author == MurmurMessageAuthor.you }.text)
+    }
+
+    @Test
+    fun submitPersistsTheOutgoingRowBeforeAnythingIsQueued() = runTest(dispatcher) {
+        val api = FakeMurmurApiClient()
+        val store = MurmurTranscriptStore(kotlin.io.path.createTempDirectory("murmur-session-persist").toFile())
+        val session = model(api, transcriptStore = store)
+        advanceUntilIdle()
+        session.updateDraftText("第一句话")
+
+        session.submit()
+        // The row is on screen the instant the button is pressed — before
+        // the reply has streamed back.  (store.load() would read `failed`
+        // here by design: a send still spinning on disk means the process
+        // died mid-flight, so the in-memory truth is checked instead.)
+        assertEquals(1, session.uiState.value.messages.size)
+        val midFlight = session.uiState.value.messages[0]
+        assertEquals("第一句话", midFlight.text)
+        assertEquals(MurmurMessageAuthor.you, midFlight.author)
+        assertEquals(MurmurDeliveryState.sending, midFlight.delivery)
+        advanceUntilIdle()
+
+        val rows = store.load()
+        assertEquals(2, rows.size)
+        // The outgoing row reached its final state: server took the moment,
+        // Murmur answered it.
+        assertEquals(MurmurDeliveryState.answered, rows[0].delivery)
+        assertEquals("moment-1", rows[0].momentID)
+        assertTrue(rows[0].idempotencyKey != null)
+        // The reply is a murmur row of the same moment.
+        assertEquals(MurmurMessageAuthor.murmur, rows[1].author)
+        assertEquals("reply-1", rows[1].text)
+        assertEquals("moment-1", rows[1].momentID)
+        assertEquals(rows.map { it.id }, session.uiState.value.messages.map { it.id })
+    }
+
+    @Test
+    fun relaunchRestoresTheTranscriptFromTheStore() = runTest(dispatcher) {
+        val api = FakeMurmurApiClient()
+        val directory = kotlin.io.path.createTempDirectory("murmur-session-relaunch").toFile()
+        val store = MurmurTranscriptStore(directory)
+        val first = model(api, transcriptStore = store)
+        advanceUntilIdle()
+        first.updateDraftText("重启前的留言")
+        first.submit()
+        advanceUntilIdle()
+        assertEquals(MurmurPhase.Complete, first.uiState.value.phase)
+
+        // A cold start constructs a fresh model over the same directory.
+        val second = model(api, transcriptStore = MurmurTranscriptStore(directory))
+        advanceUntilIdle()
+
+        val restored = second.uiState.value.messages
+        assertEquals(2, restored.size)
+        assertEquals("重启前的留言", restored[0].text)
+        assertEquals(MurmurDeliveryState.answered, restored[0].delivery)
+        assertEquals("moment-1", restored[0].momentID)
+        assertEquals("reply-1", restored[1].text)
+        // Loading again must not duplicate anything.
+        assertEquals(2, store.load().size)
+    }
+
+    @Test
+    fun resendReusesTheRowIdempotencyKeyAndRebuildsThePhotoFromTheStore() = runTest(dispatcher) {
+        val loader = SessionFakePhotoLoader()
+        val api = FakeMurmurApiClient(mode = FakeMurmurApiClient.Mode.FirstCreateFails)
+        val store = MurmurTranscriptStore(kotlin.io.path.createTempDirectory("murmur-session-resend").toFile())
+        val session = model(api, loader, transcriptStore = store)
+        advanceUntilIdle()
+        val source = writeTestFile(loader)
+        session.preparePhoto(PhotoInput.FromFile(source))
+        advanceUntilIdle()
+        session.updateDraftText("带图重发")
+        session.submit()
+        advanceUntilIdle()
+
+        // The first attempt died on a retryable network error.
+        assertEquals(MurmurPhase.Error, session.uiState.value.phase)
+        val row = session.uiState.value.messages.single { it.author == MurmurMessageAuthor.you }
+        assertEquals(MurmurDeliveryState.failed, row.delivery)
+        assertEquals(true, session.uiState.value.sendFailures[row.id]?.canResend)
+        // The photo was adopted into transcript storage while the send ran.
+        val storedImage = store.imageFile(row.imageFile!!)
+        assertTrue(storedImage.exists())
+
+        session.resend(row.id)
+        advanceUntilIdle()
+
+        // Same moment, not a second one: the key went up unchanged, and the
+        // photo the server saw on the retry was copied back out of the
+        // transcript — the store's own copy is still there.
+        assertEquals(2, api.idempotencyKeys.size)
+        assertEquals(1, api.idempotencyKeys.toSet().size)
+        assertTrue(api.photos[1] != null)
+        assertTrue(storedImage.exists())
+        assertEquals(MurmurPhase.Complete, session.uiState.value.phase)
+        val resent = session.uiState.value.messages.first { it.id == row.id }
+        assertEquals(MurmurDeliveryState.answered, resent.delivery)
+        assertEquals(row.imageFile, resent.imageFile)
+        assertFalse(session.uiState.value.sendFailures.containsKey(row.id))
+    }
+
+    @Test
+    fun cancelAfterReceiptKeepsTheSingleTickAndNoFailureMark() = runTest(dispatcher) {
+        val api = FakeMurmurApiClient(mode = FakeMurmurApiClient.Mode.NeverStreams)
+        val session = model(api)
+        advanceUntilIdle()
+        session.updateDraftText("发了一半的那句")
+        session.submit()
+        advanceUntilIdle()
+        // The server took the moment (one tick) but never started composing.
+        assertEquals(MurmurPhase.Responding, session.uiState.value.phase)
+        assertEquals(MurmurDeliveryState.sent, session.uiState.value.messages[0].delivery)
+
+        session.cancelCurrentOperation()
+        advanceUntilIdle()
+
+        // Cancel only abandons the wait for the reply: the moment did reach
+        // the server, so the row keeps its single tick and carries no
+        // failure mark — failed would claim it never left.
+        val row = session.uiState.value.messages[0]
+        assertEquals(MurmurDeliveryState.sent, row.delivery)
+        assertFalse(session.uiState.value.sendFailures.containsKey(row.id))
+    }
+
+    @Test
+    fun cancelBeforeReceiptMarksTheRowFailedAndItSurvivesRelaunch() = runTest(dispatcher) {
+        val api = FakeMurmurApiClient(mode = FakeMurmurApiClient.Mode.NeverCreates)
+        val directory = kotlin.io.path.createTempDirectory("murmur-session-cancel").toFile()
+        val store = MurmurTranscriptStore(directory)
+        val session = model(api, transcriptStore = store)
+        advanceUntilIdle()
+        session.updateDraftText("发不出去的那句")
+        session.submit()
+        // Cancel while the upload itself is still in flight, before any
+        // receipt could land.
+        session.cancelCurrentOperation()
+        advanceUntilIdle()
+
+        val failed = session.uiState.value.messages[0]
+        assertEquals(MurmurDeliveryState.failed, failed.delivery)
+        val verdict = session.uiState.value.sendFailures[failed.id]
+        assertEquals("已取消发送。", verdict?.message)
+        assertEquals(false, verdict?.canResend)
+        // The verdict is durable; the wording stays in memory only.
+        assertEquals(MurmurDeliveryState.failed, store.load()[0].delivery)
+
+        // Relaunching must not resurrect the cancelled row as "sending".
+        val restarted = model(api, transcriptStore = MurmurTranscriptStore(directory))
+        advanceUntilIdle()
+        assertEquals(MurmurDeliveryState.failed, restarted.uiState.value.messages[0].delivery)
+    }
+
+    @Test
+    fun clearTranscriptEmptiesTheRowsAndTheStore() = runTest(dispatcher) {
+        val api = FakeMurmurApiClient()
+        val store = MurmurTranscriptStore(kotlin.io.path.createTempDirectory("murmur-session-clear").toFile())
+        val session = model(api, transcriptStore = store)
+        advanceUntilIdle()
+        session.updateDraftText("等下被清掉")
+        session.submit()
+        advanceUntilIdle()
+        assertEquals(2, store.load().size)
+
+        session.clearTranscript()
+        advanceUntilIdle()
+
+        assertTrue(session.uiState.value.messages.isEmpty())
+        assertTrue(session.uiState.value.sendFailures.isEmpty())
+        assertTrue(store.load().isEmpty())
+    }
+
+    @Test
+    fun proactiveBubblesLandInTheTranscript() = runTest(dispatcher) {
+        val api = FakeMurmurApiClient(mode = FakeMurmurApiClient.Mode.ProactiveReply)
+        val session = model(api)
+        advanceUntilIdle()
+
+        session.handleNotification(momentID = "proactive-1")
+        advanceUntilIdle()
+
+        val rows = session.uiState.value.messages
+        assertEquals(1, rows.size)
+        assertEquals(MurmurMessageAuthor.murmur, rows[0].author)
+        assertEquals("想到你了", rows[0].text)
+        assertEquals("proactive-1", rows[0].momentID)
     }
 
     @Test
@@ -465,11 +681,12 @@ private class FakeMurmurApiClient(
     enum class Mode {
         Normal, StreamFailsOnce, DisconnectThenResume, TerminalFailureThenSuccess,
         IdempotencyConflict, ProactiveReply, AttestationKeyUnknown, SlowCreates,
-        NeverCreates, NeverStreams, OrderedBubbles, StreamEndsSilently,
+        NeverCreates, NeverStreams, OrderedBubbles, StreamEndsSilently, FirstCreateFails,
     }
 
     val idempotencyKeys = mutableListOf<String>()
     val lastEventIDs = mutableListOf<String?>()
+    val photos = mutableListOf<PhotoAttachment?>()
     var proactiveCalls = 0
         private set
     val removedDeviceIDs = mutableListOf<String>()
@@ -487,11 +704,21 @@ private class FakeMurmurApiClient(
     override suspend fun enroll(inviteCode: String, deviceName: String): MurmurIdentity =
         MurmurIdentity("test-user", "test-device", "test-key")
 
-    override suspend fun createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String): MomentReceipt {
+    override suspend fun createMoment(
+        note: String?,
+        photo: PhotoAttachment?,
+        idempotencyKey: String,
+        intent: String?,
+        contextMomentIDs: List<String>?,
+    ): MomentReceipt {
         idempotencyKeys += idempotencyKey
+        photos += photo
         createCount += 1
         if (mode == Mode.IdempotencyConflict) {
             throw MurmurFailure("idempotency_conflict", "幂等键与不同内容冲突。", retryable = false)
+        }
+        if (mode == Mode.FirstCreateFails && createCount == 1) {
+            throw MurmurFailure("network_error", "暂时没有连上 Murmur。", retryable = true)
         }
         if (mode == Mode.NeverCreates) delay(10_000)
         if (mode == Mode.SlowCreates) delay(90)
@@ -504,7 +731,7 @@ private class FakeMurmurApiClient(
         val call = streamCount
         val currentCreate = createCount
         when (mode) {
-            Mode.Normal, Mode.ProactiveReply, Mode.SlowCreates -> {
+            Mode.Normal, Mode.ProactiveReply, Mode.SlowCreates, Mode.FirstCreateFails -> {
                 emit(MurmurStreamEvent.Accepted("accepted-$currentCreate"))
                 emit(MurmurStreamEvent.Bubble("bubble-$currentCreate", "reply-$currentCreate"))
                 emit(MurmurStreamEvent.Done("done-$currentCreate", null, null))
@@ -589,7 +816,7 @@ private class FakeMurmurApiClient(
 }
 
 /** Mirrors AndroidPhotoLoader.loadFromFile's managed-file semantics on the JVM. */
-private class FakePhotoLoader(
+private class SessionFakePhotoLoader(
     val directory: File = kotlin.io.path.createTempDirectory("murmur-test").toFile(),
     val loadDelayMs: Long = 0,
 ) : PhotoLoader {
@@ -599,6 +826,7 @@ private class FakePhotoLoader(
         val source = when (input) {
             is PhotoInput.FromFile -> input.file
             is PhotoInput.FromUri -> error("Uri input is not expected in JVM tests")
+            is PhotoInput.FromBitmap -> error("Bitmap input is not expected in JVM tests")
         }
         val managed = if (source.parentFile == directory && source.name.startsWith("murmur-upload-")) {
             source

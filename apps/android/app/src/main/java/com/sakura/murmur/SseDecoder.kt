@@ -62,6 +62,10 @@ internal class SseEventDecoder(
             }
             MurmurStreamEvent.Done(id, done.move, done.scene)
         }
+        "angles" -> MurmurStreamEvent.Angles(
+            id,
+            json.decodeFromString(AnglesPayload.serializer(), data).angles,
+        )
         "error" -> {
             val failure = json.decodeFromString(StreamFailurePayload.serializer(), data)
             MurmurStreamEvent.Failure(id, MurmurFailure(failure.code, failure.message, failure.retryable))
@@ -75,6 +79,9 @@ internal data class BubblePayload(val text: String)
 
 @Serializable
 internal data class DonePayload(val move: String? = null, val scene: String? = null)
+
+@Serializable
+internal data class AnglesPayload(val angles: List<String>)
 
 @Serializable
 internal data class StreamFailurePayload(val code: String, val message: String, val retryable: Boolean)

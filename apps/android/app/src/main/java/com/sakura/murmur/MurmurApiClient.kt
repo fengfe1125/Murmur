@@ -124,6 +124,8 @@ class OkHttpMurmurApiClient(
         note: String?,
         photo: PhotoAttachment?,
         idempotencyKey: String,
+        intent: String?,
+        contextMomentIDs: List<String>?,
     ): MomentReceipt = guard {
         val boundary = "Murmur-${UUID.randomUUID()}"
         val bodyFile = File(cacheDir, "murmur-multipart-${UUID.randomUUID()}")
@@ -131,6 +133,13 @@ class OkHttpMurmurApiClient(
         try {
             bodyFile.outputStream().buffered().use { output ->
                 writer.field(output, "idempotency_key", idempotencyKey)
+                // Field order and the compact JSON array spelling mirror the
+                // iOS multipart body (MurmurAPI.swift makeMultipartBody); the
+                // server json.loads the value back into a list of moment IDs.
+                if (!intent.isNullOrEmpty()) writer.field(output, "intent", intent)
+                if (!contextMomentIDs.isNullOrEmpty()) {
+                    writer.field(output, "context_moment_ids", json.encodeToString(contextMomentIDs))
+                }
                 if (!note.isNullOrEmpty()) writer.field(output, "note", note)
                 photo?.let { writer.image(output, it.filename, it.mimeType, it.file) }
                 writer.finish(output)

@@ -77,6 +77,45 @@ class SseEventDecoderTest {
     }
 
     @Test
+    fun anglesEventDecodesThreeTexts() {
+        val decoder = SseEventDecoder()
+        assertNull(decoder.feed(": keep-alive"))
+        assertNull(decoder.feed("id: 7"))
+        assertNull(decoder.feed("event: angles"))
+        assertNull(decoder.feed("""data: {"angles":["去年的今天在做什么？","还留着那时的味道吗？","想回去看看吗？"]}"""))
+        val event = decoder.feed("") as MurmurStreamEvent.Angles
+        assertEquals("7", event.id)
+        assertEquals(listOf("去年的今天在做什么？", "还留着那时的味道吗？", "想回去看看吗？"), event.texts)
+    }
+
+    @Test
+    fun anglesFrameDoesNotDispatchBeforeTheBlankLine() {
+        val decoder = SseEventDecoder()
+        // 分帧到达：每一行单独 feed，空行之前不许出事件。
+        assertNull(decoder.feed("event: angles"))
+        assertNull(decoder.feed("""data: {"angles":["a","b","c"]}"""))
+        val event = decoder.feed("") as MurmurStreamEvent.Angles
+        assertEquals(listOf("a", "b", "c"), event.texts)
+    }
+
+    @Test
+    fun anglesFollowedByDoneKeepsTheFramesSeparate() {
+        val decoder = SseEventDecoder()
+        decoder.feed("id: 5")
+        decoder.feed("event: angles")
+        decoder.feed("""data: {"angles":["x","y","z"]}""")
+        val first = decoder.feed("") as MurmurStreamEvent.Angles
+        assertEquals("5", first.id)
+        assertEquals(listOf("x", "y", "z"), first.texts)
+        // 下一个帧不带 id：不能从上一次继承。
+        decoder.feed("event: done")
+        decoder.feed("""data: {"move":"speak"}""")
+        val second = decoder.feed("") as MurmurStreamEvent.Done
+        assertEquals("speak", second.move)
+        assertNull(second.id)
+    }
+
+    @Test
     fun flushEmitsATrailingUnterminatedEventOnce() {
         val decoder = SseEventDecoder()
         decoder.feed("id: 9")

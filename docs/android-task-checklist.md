@@ -294,3 +294,143 @@ W1–W5（独立轨道，随时做）
 成立）✅ 已完成 → **M2 = T1.3–T1.6 全部**（功能对齐完成，模拟器开发模式全流程）
 ✅ 已完成 → **M3 = T2.1+T2.2+T2.3**（真机双链路 + VPS 生产配置）→
 **M4 = Phase 3**（发布）。
+
+## Phase 4 — 对齐 iOS 三入口 + 转录聊天（2026-08-29 立项，用户确认全量对齐）
+
+> iOS 基准在 Phase 1–3 之后又演进出一批功能（约 4200 行），安卓为零实现：
+> 聊天已改为本地转录气泡式（持久化消息、送达勾、按天分隔、失败重发），
+> 新增三标签外壳（聊天/当年今日/我的）、照片房间（intent=photo_reading +
+> angles 话头）、按天存档（含旧日期续聊 context_moment_ids）、当年今日
+> （本地相册扫描 + 随机回落）。服务端已支持全部新契约，**无需服务端改动**。
+> 契约基准：`Tests/OnThisDayTests.swift`（14 条）、`Tests/PhotoRoomModelTests.swift`
+> （18 条）、`MurmurSessionModel.swift` 转录持久化语义。用户已拍板聊天全量
+> 转录化（不保留工作台）。
+
+### T4.0 API 客户端扩展
+
+- [x] T4.0.1 `MurmurModels.kt`：`createMoment` 加 `intent: String? = null`、
+  `contextMomentIDs: List<String>? = null`；`MurmurStreamEvent` 加 `Angles` 分支。
+- [x] T4.0.2 `MurmurApiClient.kt` multipart 加 `intent` / `context_moment_ids` 字段；
+  `SseDecoder.kt` 识别 `angles` 事件。
+- [x] T4.0.3 wire 测试：假 server 走通「带 intent 上传 → angles → done」。
+
+### T4.1 本地转录存储（对照 `MurmurTranscript.swift`）
+
+- [x] T4.1.1 `MurmurTranscriptStore.kt`：`MurmurMessage`（JSON 字段名对齐 iOS）、
+  `filesDir/transcript.json` + `images/`；聊天 600 / 存档 6000 行上限；
+  启动时 sending→failed；save 剪枝未被引用图片；`archive()` 独立目录。
+- [x] T4.1.2 JVM 测试：往返、截断、重启语义、剪枝、旧数据按 sentAt 分组。
+
+### T4.2 聊天转录化（对照 `MurmurSessionModel.swift` + `MurmurTranscriptView.swift`）
+
+- [x] T4.2.1 会话模型持久化 `messages`：发送先落行、adoptImage、凭转录重发、
+  取消标 failed、accepted/bubble 推进送达态；状态机内核（幂等/续传/取消）不动。
+- [x] T4.2.2 `ui/MurmurTranscriptView.kt`：气泡、单双勾、失败重发/取消、
+  DaySeparator（中文日期）、TypingIndicator、空态、图片气泡；删除工作台三组件。
+- [x] T4.2.3 `MurmurPhotoView.kt`：LRU 缓存（900/2600px）、Lightbox（捏合/双击/下拉关闭）。
+- [x] T4.2.4 既有测试更新：`MurmurSessionModelTest.kt` 24 条、`MurmurChatScreenTest.kt`
+  5 条逐条核对更新 + 新增持久化/重发断言。
+
+### T4.3 三标签外壳（对照 `MurmurShell.swift`）
+
+- [x] T4.3.1 `ui/MurmurShell.kt`：chat/onThisDay/me，单胶囊底栏（键盘弹起折叠）、
+  checking/identity nil/requiresDeviceReconnect 门槛。
+- [x] T4.3.2 `MainActivity` 改挂 Shell；设置迁入「我的」，聊天顶栏设置入口移除；
+  Shell 持有 OnThisDayModel（M6 填实，先占位）。
+
+### T4.4 照片房间（对照 `MurmurPhotoRoom.swift`）
+
+- [x] T4.4.1 `PhotoRoomModel.kt`：Phase 状态机、open 带 intent、收据落存档、
+  撤回+回灌、原图生命周期、幂等键保留。
+- [x] T4.4.2 共享 SSE 消费器：气泡 id 去重、0.075s/字 pacing（0.7–2.8s 钳制）、
+  angles→openers。
+- [x] T4.4.3 `ui/PhotoRoomView.kt`：220dp 照片条、气泡、话头行、composer。
+- [x] T4.4.4 `PhotoRoomModelTests` 18 条逐条移植。
+
+### T4.5 按天存档（对照 `MurmurArchive.swift` + `MurmurArchiveViews.swift`）
+
+- [x] T4.5.1 `MurmurArchive.kt`：RoomRecorder 协议、daysWithRooms/rows/photoCount/
+  recentDays、contextMomentIDs（最新照片行后、去重、≤8）。
+- [x] T4.5.2 `ArchiveDayModel.kt`：续聊 composer、行归选中日 sentAt 真实、
+  mid-send 离开标 failed、无收据撤回+恢复草稿。
+- [x] T4.5.3 `ui/MurmurMonthView.kt`（周一起、圆点/空心环不合并）+
+  `ui/ArchiveDayView.kt`（「接着这天说」）。
+
+### T4.6 当年今日（对照 `MurmurOnThisDay.swift` + `OnThisDayTabView.swift`）
+
+- [x] T4.6.1 MediaStore 扫描器：往年同日 ±1 天窗口（5 年）、排除截图/云端/短边<600、
+  每年留 6 张（窗口 60）、randomCandidates（200 次封顶）、内存 LruCache(12)。
+- [x] T4.6.2 权限四态门（未决定/拒绝/受限(API 34 部分访问)/已授权）。
+- [x] T4.6.3 `OnThisDayModel.kt` 货架：不循环、候补 <3 补 6、掏空只问一次。
+- [x] T4.6.4 `ui/OnThisDayFlowView.kt`：上滑发送（渐变替代粒子 shader）/下滑换张/
+  手势门限/溶解期可取消；文案「去年的今天 / N 年前的今天 / 相册里翻到的」。
+- [x] T4.6.5 `OnThisDayTabView`：月历 + 入口卡 + 旧日期续聊入口；DEBUG stub。
+- [x] T4.6.6 `OnThisDayTests` 14 条语义等价移植（Picking 12 + Model 6，
+  存档分组/周一起两条由存档与月历侧既有测试覆盖，shader 用例改仪器化等待卡片）。
+
+### T4.7 测试矩阵与文档同步
+
+- [x] T4.7.1 Compose UI 测试：月历、转录气泡、照片房间话头、深色/2.4x、双栏
+  （27 条仪器化用例：Shell 5 + ChatScreen 13 + OnThisDayFlow 9）。
+- [ ] T4.7.2 全量回归：`gradlew test` + 模拟器 `connectedAndroidTest` 全绿（最终回归进行中）。
+- [x] T4.7.3 更新 `docs/product/current-state.md` Android 行与本清单状态。
+- 过程修复（2026-08-30 模拟器验收实录）：
+  1. 空会话 composer 0 高——`EmptyTranscript` 丢弃外部 `weight(1f)` modifier，
+     已修（真机可见缺陷）。
+  2. 三屏幕根布局缺 `imePadding`（聊天/照片房间/存档天），真机键盘会盖住
+     输入区，已补；真实 Activity 截图验证布局正确。
+  3. 首次完整回复弹通知权限对话框抢测试舞台——测试类 `@Before` 预授权
+     POST_NOTIFICATIONS。
+  4. ui-test-manifest 宿主 `adjustResize` + Compose `imePadding` 双位移——
+     androidTest manifest 覆盖宿主 `adjustNothing`。
+  5. `clear-transcript` 在滚动区外时 `performClick` 静默落空——测试补
+     `performScrollTo`（产品无缺陷）。
+
+## Phase 4.5 — 缺陷驱动加固（2026-08-30，模拟器验收缺陷的同类清除）
+
+> 依据：Phase 4 验收当天修掉的 5 个问题（2 个真机可见产品缺陷 + 3 个测试
+> 基建缺陷）与流程根因（12 条仪器化用例只编译验证就当完成、实跑全红）。
+> 本阶段按「同类排查 → 覆盖补齐 → 流程固化」执行，全部完成。
+
+### A. 同类布局缺陷排查（已完成）
+
+- [x] A1 早退/空态 modifier 巡检（ui/ 全 10 文件）：规则=早退分支必须透传
+  入参 modifier 或显式 fillMaxSize 并注释。结论：仅 `EmptyTranscript` 曾违例
+  （T4.7 已修）；`MurmurMonthView.MonthCell` 等其余全部合规。
+- [x] A2 Insets 补漏（4 文件，仅加不改）：`MurmurShell` 三门槛视图补
+  safeDrawingPadding（EnrollmentPane 另补 imePadding，ReconnectPane 注释记录
+  不补理由）；`OnThisDayTabView`、`OnThisDayFlowView` 根布局补
+  safeDrawingPadding；`ArchiveDayView` 补 safeDrawingPadding（原日期栏会顶进
+  状态栏）。技术依据：insets padding 修饰符向下消费，嵌套 cover 链不会
+  双重内边距。截图验证：注册页各元素均在系统栏之外。
+- [x] A3 设置页评估结论：全页无文本输入（TimePicker 在 AlertDialog 内不弹
+  键盘），imePadding 不补，记录在案。
+- [x] A4 已修两处（空态 composer、三屏 imePadding）随本轮回归确认。
+
+### B. 仪器化测试补齐（已完成，全部模拟器实跑非编译级）
+
+- [x] B1 `PhotoRoomViewTest` 3 条：照片条/guess/三话头落地、点话头填
+  composer 不发送、深色渲染。fakes 增 `angles`/`replyText`/`preview` 可选参数。
+- [x] B2 `ArchiveViewsTest` 3 条：记录日圆点与今天空心环各自成节点不合并、
+  ArchiveDayView 标题/预置行/composer。
+- [x] B3 `OnThisDayTabTest` 2 条：入口卡拉起浏览器 cover 且底栏隐退、有记录日
+  拉起存档天 cover；stub 旗标走 MainActivity 同款接线。
+- [x] B4 仪器化套件 27 → 35 条，全量模拟器回归绿；深色/双栏/XXXL 覆盖清点无缺口。
+- 结论：新覆盖首跑全绿，未发现新产品缺陷。
+
+### C. 流程固化（已完成）
+
+- [x] C1 `scripts/dev/emulator-check.sh`：封装 AVD_HOME 冷启动
+  （murmur_api35）、等待 boot_completed、跑仪器化验收；README「测试」一节
+  给出两级验收标准命令。
+- [x] C2 事故规则入库（apps/android/README.md）：仪器化用例合并前必须模拟器
+  实跑全绿，「编译通过」不得作为 UI 测试验收证据。
+- [x] C3 CI 门槛：`.github/workflows/repository.yml` android job 增加
+  `./gradlew test`（JVM 141 条进每次 PR）；connectedAndroidTest 明确留本地。
+- [x] C4 最终回归（2026-08-30）：JVM 单测 + 模拟器 35/35 全绿。
+
+### 遗留（不属本阶段）
+
+- 真机键盘遮挡观感、当年今日/存档天 cover 在带软键盘模拟器或真机上的
+  实际体验——建议真机验收时复核。
+- 真机 Key Attestation、FCM 端到端、Play 发布——仍阻塞原 Phase 2/3 运维项。

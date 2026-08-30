@@ -8,7 +8,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.sakura.murmur.ui.MurmurChatScreen
+import com.sakura.murmur.ui.MurmurShell
 import com.sakura.murmur.ui.MurmurTheme
 
 class MainActivity : ComponentActivity() {
@@ -20,6 +20,7 @@ class MainActivity : ComponentActivity() {
                 api = app.container.apiClient,
                 configurationFailure = app.container.configurationFailure,
                 photoLoader = AndroidPhotoLoader(app),
+                transcriptStore = MurmurTranscriptStore(java.io.File(app.filesDir, "transcript")),
             )
         }
     }
@@ -32,7 +33,7 @@ class MainActivity : ComponentActivity() {
         session = ViewModelProvider(this, sessionFactory)[MurmurSessionModel::class.java]
         setContent {
             MurmurTheme {
-                MurmurChatScreen(session = session)
+                MurmurShell(session = session)
             }
         }
         handleIntent(intent)

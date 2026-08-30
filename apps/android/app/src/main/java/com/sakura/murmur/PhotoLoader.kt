@@ -11,12 +11,14 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
-/** The source of a photo about to be staged. Production only ever hands a
- *  Photo Picker [Uri]; [FromFile] exists for tests and for parity with the
- *  iOS `PhotoLoader.load(fileURL:)` entry point. */
+/** The source of a photo about to be staged. Production picks arrive as a
+ *  Photo Picker [Uri]; a swipe-up out of 当年今日 hands over a decoded
+ *  [Bitmap] already in memory; [FromFile] exists for tests and for parity
+ *  with the iOS `PhotoLoader.load(fileURL:)` entry point. */
 sealed interface PhotoInput {
     data class FromUri(val uri: Uri) : PhotoInput
     data class FromFile(val file: File) : PhotoInput
+    data class FromBitmap(val bitmap: Bitmap) : PhotoInput
 }
 
 /**
@@ -79,6 +81,33 @@ class AndroidPhotoLoader(context: Context) : PhotoLoader {
         when (input) {
             is PhotoInput.FromUri -> loadFromUri(input.uri)
             is PhotoInput.FromFile -> loadFromFile(input.file)
+            is PhotoInput.FromBitmap -> loadFromBitmap(input.bitmap)
+        }
+    }
+
+    /** 当年今日 hands over a decoded bitmap; it is encoded once into the same
+     *  managed `murmur-upload-` file every other path sweeps, so no stage of
+     *  it can leak. */
+    private fun loadFromBitmap(bitmap: Bitmap): PhotoAttachment {
+        val managed = File(cacheDir, "murmur-upload-${UUID.randomUUID()}.jpg")
+        return try {
+            managed.outputStream().buffered().use { output ->
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, output)) {
+                    throw MurmurFailure("photo_unreadable", "这张照片读不出来，换一张试试。", retryable = true)
+                }
+            }
+            PhotoPolicies.checkSize(managed.length())
+            val preview = decodePreview(managed)
+            PhotoAttachment(
+                file = managed,
+                preview = preview,
+                filename = PhotoPolicies.safeFilename("moment", "jpg"),
+                mimeType = "image/jpeg",
+                byteCount = managed.length(),
+            )
+        } catch (error: Throwable) {
+            managed.delete()
+            throw error
         }
     }
 
