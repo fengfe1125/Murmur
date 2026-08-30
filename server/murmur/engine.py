@@ -282,11 +282,13 @@ def _salvage_bubbles(raw: str, limit: int) -> list[str]:
 
 # ---- 当年今日的读图（reading） -----------------------------------------------
 
-READING_TIMEOUT = 45.0  # 一次尝试的上限。mimo 想 20-30 秒还接得住，
-# 而成功的读图 2 秒就回来了：45 秒还在跑的那次，几乎一定是在烧隐藏思考、
-# 最后交白卷。早点认输去重试，比干等第二个 45 秒划算。
+READING_TIMEOUT = 45.0  # 一次尝试的上限。成功的读图 2 秒就回来了：
+# 45 秒还在跑的那次，几乎一定是在烧隐藏思考、最后交白卷。早点认输去
+# 重试，比干等第二个 45 秒划算。上限留得宽，是为了容下慢一档的多模态
+# 模型（mimo 系想 20-30 秒还接得住），不是给当前这档留的。
 READING_ATTEMPTS = 2  # 两次的最坏总时长仍是原来单次的 90 秒
-READING_MAX_TOKENS = 2500  # mimo-v2.5 的思考先烧掉约 1100，500/900 档实测全部截断
+READING_MAX_TOKENS = 2500  # 隐藏思考先烧掉一大截才轮到正文；500/900 档
+# 实测（mimo-v2.5，思考约 1100）全部截断，2500 才稳。换模型别下调。
 ANGLES_MAX_CHARS = 14  # 硬约束是 ≤12 个汉字，字符数留两格兜底
 GUESS_MAX_CHARS = 40  # 硬约束是 ≤30 个汉字，同上
 
@@ -715,10 +717,10 @@ def _fallback_attempts(
 ) -> list[tuple[str, bool, str | None, str | None]]:
     """(模型, 是否带 json_schema, base_url, api_key) 的尝试序列。
 
-    降级模型一律不带 json_schema——deepseek-v4-flash / mimo-v2.5 在
-    不支持 response_format，靠 SYSTEM 提示词里的
-    「只返回 JSON」约束输出，_extract_json 负责剥代码块。主模型是否
-    带由 MURMUR_JSON_SCHEMA 决定（glm / deepseek 系都不支持）。
+    降级模型一律不带 json_schema——deepseek-v4-flash 不支持
+    response_format，靠 SYSTEM 提示词里的「只返回 JSON」约束输出，
+    _extract_json 负责剥代码块。主模型是否带由 MURMUR_JSON_SCHEMA
+    决定（glm / deepseek 系都不支持）。
 
     后两个字段是第二家网关的端点与 key（MURMUR_FALLBACK_BASE_URL /
     MURMUR_FALLBACK_API_KEY）。不配就是 None = 跟主网关同一家——能用，
@@ -923,7 +925,7 @@ def respond(
 
     传了 on_bubble 就走流式：每写完一条气泡立刻回调，第一条不用等全部生成完。
 
-    降级备案：带图消息走 MURMUR_IMAGE_MODEL（mimo-v2.5，能看图）；
+    降级备案：带图消息走 MURMUR_IMAGE_MODEL（deepseek-v4-flash-vision-exp，能看图）；
     任何模型抛网关错误或吐不出 JSON 时，自动换 MURMUR_FALLBACK_MODEL
     （deepseek-v4-flash）再试一次——降级模型不支持 json_schema、
     也不看图，所以降级调用去掉 response_format，带图消息降级时退回
@@ -950,7 +952,8 @@ def respond(
         }
 
     if image_block is not None and (cfg.image_model or "").strip():
-        # 带图消息：mimo 系多模态模型（不支持 json_schema，靠提示词约束）
+        # 带图消息：多模态模型（deepseek-v4-flash-vision-exp，
+        # 不支持 json_schema，靠提示词约束）
         attempts = _fallback_attempts(cfg, primary=cfg.image_model, use_schema=False)
     else:
         attempts = _fallback_attempts(

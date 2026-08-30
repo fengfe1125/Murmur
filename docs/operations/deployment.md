@@ -289,9 +289,10 @@ sudo -u murmur test -w /opt/murmur/logs/murmur_app_worker.log
 - `MURMUR_JSON_SCHEMA=0` 可让主模型也走「不带 response_format」模式——
   glm / deepseek 系传 json_schema 会 400 或把 token 全烧进思考，关掉后靠
   SYSTEM 提示词约束输出，实测 glm-5.3 合规。qwen/kimi 系保持 1。
-- 带图消息直接走 `MURMUR_IMAGE_MODEL`（默认 `mimo-v2.5`，多模态）；它同样
-  不支持 json_schema。mimo 也挂掉时退回 `MURMUR_FALLBACK_MODEL`，**不带图**
-  纯文本重试——EXIF/时间/文字仍会进上下文，回复质量下降但不会断。
+- 带图消息直接走 `MURMUR_IMAGE_MODEL`（默认 `deepseek-v4-flash-vision-exp`，多模态）；
+  它同样不支持 json_schema。它也挂掉时退回 `MURMUR_FALLBACK_MODEL`，
+  **不带图** 纯文本重试——EXIF/时间/地点/文字仍会进上下文，回复质量下降
+  但不会断。
 - 选主模型时避开与降级模型同一厂商线路（deepseek 主 + deepseek 降级没有
   隔离意义）；glm-5.3 主 + deepseek-v4-flash 降级是 2026-08-17 Kimi 上游
   中断后的生产组合。

@@ -203,7 +203,7 @@ class ReadPhotoTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.cfg = make_config(
             db_path=str(Path(self.tmp.name) / "m.db"),
-            image_model="mimo-v2.5",
+            image_model="deepseek-v4-flash-vision-exp",
             fallback_model="deepseek-v4-flash",
         )
         self.moment = Moment.text_only(self.cfg.tz)
@@ -220,7 +220,7 @@ class ReadPhotoTests(unittest.TestCase):
         reading = self._call(client)
         self.assertEqual(reading.guess, "这是……刚下过雨？")
         self.assertEqual(len(client.calls), 1)
-        self.assertEqual(client.calls[0]["model"], "mimo-v2.5")
+        self.assertEqual(client.calls[0]["model"], "deepseek-v4-flash-vision-exp")
         # 不支持 json_schema 的那档，靠 READING_SYSTEM 约束输出。
         self.assertNotIn("response_format", client.calls[0])
         parts = client.calls[0]["messages"][-1]["content"]
@@ -234,7 +234,7 @@ class ReadPhotoTests(unittest.TestCase):
         # 重试是「同一个模型再来一次」，不是「换一个模型」：降级档看不见图，
         # 这一屏没有它的位置。
         self.assertEqual(len(client.calls), READING_ATTEMPTS)
-        self.assertEqual({c["model"] for c in client.calls}, {"mimo-v2.5"})
+        self.assertEqual({c["model"] for c in client.calls}, {"deepseek-v4-flash-vision-exp"})
 
     def test_a_transient_blank_is_rescued_by_the_retry(self):
         # 实测最常见的死法：finish_reason=stop，正文长度 0，重试几乎必中。
@@ -298,7 +298,7 @@ class WorkerReadingTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.settings = app_settings(self.root)
         self.settings.upload_dir.mkdir()
-        self.cfg = make_config(self.settings.memory_db_path, image_model="mimo-v2.5")
+        self.cfg = make_config(self.settings.memory_db_path, image_model="deepseek-v4-flash-vision-exp")
         self.store = AppStore(self.settings.db_path)
         code = self.store.create_invite()
         self.enrollment = self.store.redeem_invite(
@@ -399,7 +399,7 @@ class ProcessorFallbackTests(unittest.TestCase):
         self.image = self.root / "murmur-upload-fallback.jpg"
         Image.new("RGB", (24, 24), "coral").save(self.image, "JPEG")
         self.cfg = make_config(
-            db_path=str(self.root / "m.db"), image_model="mimo-v2.5"
+            db_path=str(self.root / "m.db"), image_model="deepseek-v4-flash-vision-exp"
         )
         self.processor = EngineMomentProcessor(self.cfg, self.root)
         self.job = type(

@@ -334,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("reply", help="对一张图作出回应")
     r.add_argument("photo")
     r.add_argument("--note", help="随图附的一句话")
-    r.add_argument("--model", help="临时换个模型试试，比如 mimo-v2.5 / kimi-k2.6")
+    r.add_argument("--model", help="临时换个模型试试，比如 deepseek-v4-pro / kimi-k2.6")
     r.add_argument("--dry-run", action="store_true", help="只打印上下文，不调 API")
     r.add_argument("--no-save", action="store_true", help="不写进记忆")
     r.add_argument("-v", "--verbose", action="store_true", help="打印 move 和画面描述")
