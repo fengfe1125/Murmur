@@ -33,6 +33,12 @@ from .app_auth import (
     InvalidAttestation,
 )
 from .app_lock import UserOperationLock
+from .app_music import (
+    MusicError,
+    MusicTrackInvalid,
+    normalize_playback_track,
+    parse_music_track,
+)
 from .app_settings import AppSettings
 from .app_store import (
     MOMENT_INTENTS,
@@ -149,6 +155,16 @@ def _translate_error(exc: Exception) -> APIError:
         return APIError(409, exc.code, "最多只能绑定三台设备。")
     if isinstance(exc, LastDevice):
         return APIError(409, exc.code, "不能移除最后一台设备；请改为删除账号。")
+    if isinstance(exc, MusicTrackInvalid):
+        return APIError(400, exc.code, "这首歌的信息无效。")
+    if isinstance(exc, MusicError):
+        # Catalog lookups and planning are best-effort dependencies; the client
+        # is told to try again rather than being handed a 500.
+        return APIError(
+            503 if exc.retryable else 400, exc.code,
+            "音乐服务暂时不可用。" if exc.retryable else "这首歌暂时不可用。",
+            retryable=exc.retryable,
+        )
     if isinstance(exc, IdempotencyConflict):
         return APIError(409, exc.code, "这个幂等键已经用于其他内容。")
     if isinstance(exc, MomentInFlight):
@@ -324,6 +340,20 @@ def apply_stop_preference(store: AppStore, user_id: str, text: str | None) -> bo
         user_id, daily_frequency=0,
         quiet_start=prefs["quiet_start"], quiet_end=prefs["quiet_end"],
     )
+    return True
+
+
+def music_enabled_for(settings: AppSettings, user_id: str) -> bool:
+    """Whether this account may use the music wire at all.
+
+    Two independent gates: the deployment switch, then the rollout allowlist.
+    An empty allowlist means "everyone the switch already allows" rather than
+    "nobody", so a full rollout does not require enumerating every account.
+    """
+    if not settings.music_enabled:
+        return False
+    if settings.music_user_allowlist:
+        return user_id in settings.music_user_allowlist
     return True
 
 
@@ -713,7 +743,7 @@ def create_app(
             auth = await authenticate(request, None, body_digest=wire_digest)
             try:
                 form = await request.form(
-                    max_files=1, max_fields=6, max_part_size=64 * 1024
+                    max_files=1, max_fields=7, max_part_size=64 * 1024
                 )
             except Exception as exc:
                 raise APIError(400, "validation_error", "multipart 内容无效。") from exc
@@ -764,6 +794,19 @@ def create_app(
                 # 事实一起送来：拍摄时间、坐标，以及机上反解好的地名。
                 # 这些不从图里猜——重新编码过的 JPEG 早就没有 EXIF 了。
                 provenance = _parse_provenance(form.get("provenance"))
+                # One song, as its own turn.  The client also sends a text
+                # fallback in `note`, so an older server — and an older client
+                # reading a newer server — still has something to show.
+                music_value = form.get("music_track")
+                if music_value is not None and hasattr(music_value, "read"):
+                    raise APIError(
+                        400, "validation_error", "music_track 必须是文本字段。"
+                    )
+                if music_value not in (None, "") and not music_enabled_for(
+                    settings, auth.user_id
+                ):
+                    raise APIError(403, "music_unavailable", "音乐功能未开启。")
+                music_track, music_canonical = parse_music_track(music_value)
                 upload = form.get("image")
                 image_hash = hashlib.sha256()
                 image_size = 0
@@ -800,9 +843,15 @@ def create_app(
                         raise APIError(
                             400, "validation_error", "上传内容不是支持的图片。"
                         )
-                if not note and not temp_path:
+                if not note and not temp_path and not music_track:
                     raise APIError(
-                        400, "validation_error", "文字和图片至少要有一个。"
+                        400, "validation_error", "文字、图片和歌曲至少要有一个。"
+                    )
+                # A song is a turn of its own in this version: pairing it with a
+                # photo would make one moment mean two different things.
+                if music_track and temp_path:
+                    raise APIError(
+                        400, "invalid_music_attachment", "歌曲不能和照片一起发送。"
                     )
                 if provenance is not None and not temp_path:
                     raise APIError(
@@ -828,6 +877,11 @@ def create_app(
                     ).encode("utf-8")
                 if provenance is not None:
                     digest_input += b"\x00" + provenance.encode("utf-8")
+                # The song is part of what the key promises.  Reusing one key
+                # for a different track has to be a conflict, not a silent
+                # no-op that returns the first song's receipt.
+                if music_canonical is not None:
+                    digest_input += b"\x00" + music_canonical.encode("utf-8")
                 digest = hashlib.sha256(digest_input).hexdigest()
                 result = await asyncio.to_thread(
                     store.create_moment,
@@ -839,6 +893,7 @@ def create_app(
                     intent=intent,
                     context_moment_ids=context_moment_ids,
                     provenance=provenance,
+                    music_track=music_canonical,
                 )
                 if not result.created and temp_path:
                     temp_path.unlink(missing_ok=True)
@@ -1003,6 +1058,66 @@ def create_app(
             )
         except ValueError as exc:
             raise APIError(400, "validation_error", str(exc)) from exc
+
+    @app.get("/v1/music/config")
+    async def music_config(request: Request):
+        auth = await authenticate(request, b"")
+        enabled = music_enabled_for(settings, auth.user_id)
+        return {
+            "enabled": enabled,
+            "provider": "audius",
+            # Never advertise reporting to a client that is not allowed the
+            # feature at all: "off" must read the same from both gates.
+            "playback_reporting": enabled and settings.music_playback_reporting,
+        }
+
+    @app.put("/v1/music/playback-state")
+    async def update_playback_state(request: Request):
+        raw = await limited_json_body(request)
+        auth = await authenticate(request, raw)
+        if not music_enabled_for(settings, auth.user_id):
+            raise APIError(403, "music_unavailable", "音乐功能未开启。")
+        data = _json(raw)
+        if data.get("version") != 1:
+            raise APIError(400, "validation_error", "playback-state 版本不支持。")
+        session_id = str(data.get("session_id") or "").strip()
+        if not 8 <= len(session_id) <= 64:
+            raise APIError(400, "validation_error", "session_id 无效。")
+        sequence = data.get("sequence")
+        if (not isinstance(sequence, int) or isinstance(sequence, bool)
+                or not 0 <= sequence <= 1_000_000):
+            raise APIError(400, "validation_error", "sequence 无效。")
+        state = data.get("state")
+        if state not in {"started", "paused", "resumed", "completed", "stopped"}:
+            raise APIError(400, "validation_error", "state 无效。")
+        # Validated for shape and then dropped: TTL is measured on the server's
+        # own clock, so a client timestamp can never extend how long a listening
+        # state stays visible to the model.
+        occurred_at = data.get("occurred_at")
+        if not isinstance(occurred_at, str) or not 1 <= len(occurred_at) <= 64:
+            raise APIError(400, "validation_error", "occurred_at 无效。")
+        try:
+            datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise APIError(400, "validation_error", "occurred_at 无效。") from exc
+        track = normalize_playback_track(data.get("track"))
+        # Reporting can be turned off on its own while the rest of music stays
+        # on.  Accept and drop, so a client that has not refetched its config
+        # is not stuck retrying a request it is told is retryable.
+        if not settings.music_playback_reporting:
+            return {"accepted": False, "active": False, "expires_at": None}
+        return await asyncio.to_thread(
+            store.update_playback_state,
+            user_id=auth.user_id,
+            device_id=auth.device_id,
+            session_id=session_id,
+            sequence=sequence,
+            state=state,
+            track_json=json.dumps(
+                track, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ),
+            duration_seconds=track.get("duration_seconds"),
+        )
 
     @app.delete("/v1/account", status_code=204)
     async def delete_account(request: Request):
