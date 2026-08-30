@@ -26,6 +26,14 @@ from . import counters
 from .affect import apply_message as preview_affect
 from .affect import prompt_context
 from .app_lock import UserOperationLock
+from .app_music import (
+    MUSIC_NOT_FOUND_LINE,
+    AppMusic,
+    load_music_track,
+    music_fallback_text,
+    music_prompt_line,
+    playback_prompt_line,
+)
 from .app_settings import AppSettings
 from .app_store import AccountDeleting, AppStore, Job, NotFound
 from .config import Config
@@ -89,6 +97,15 @@ class ProcessedMoment:
     # 当年今日 的读图才有：三个递到他手边的话头，跟着 guess 一起发。
     # 普通 moment 永远是空的——聊天窗口里没有这一行。
     angles: list[str] = field(default_factory=list)
+    # 这一轮的歌，最多一首。role 说明它是谁发的：'in' 是他附上的，
+    # 'out' 是它被点名之后找出来的。一条 moment 不会两者都有。
+    music_track: dict | None = None
+    music_track_role: str | None = None
+
+    @property
+    def music_card(self) -> dict | None:
+        """要作为一张卡片发出去的那首歌——只有它自己挑的那首才发。"""
+        return self.music_track if self.music_track_role == "out" else None
 
 
 class MomentProcessor(Protocol):
@@ -140,11 +157,21 @@ def _apply_provenance(photo: Photo, provenance: dict) -> Photo:
 
 class EngineMomentProcessor:
     def __init__(
-        self, cfg: Config, data_root: Path, *, max_image_pixels: int = 100_000_000
+        self,
+        cfg: Config,
+        data_root: Path,
+        *,
+        max_image_pixels: int = 100_000_000,
+        music: AppMusic | None = None,
+        playback_state: Callable[[str], dict | None] | None = None,
     ):
         self.cfg = cfg
         self.data_root = data_root
         self.max_image_pixels = max_image_pixels
+        # None 就是这台部署没开音乐。整条音乐路径靠这一个 None 关掉，
+        # 不需要在下面每一处再问一次开关。
+        self.music = music
+        self.playback_state = playback_state
 
     def __call__(
         self, job: Job, memory: Memory, on_bubble: Callable[[str], None]
@@ -182,6 +209,33 @@ class EngineMomentProcessor:
             if tone := prompt_context(state):
                 prompt_parts.append(tone)
         prompt_dossier = "\n\n".join(prompt_parts) or None
+        # 歌先定下来，模型后说话。定在这里有两个原因：它要进这一轮的
+        # prompt（不然它会答一句和卡片无关的话），而且点歌那一轮必须关掉
+        # 逐条气泡流——先把曲目确定并落库，再一次性输出文字和卡片。
+        shared = self.music.verify_shared(job.music_track) if self.music else None
+        choice = (
+            self.music.choose_for(job.note)
+            if self.music and shared is None
+            else None
+        )
+        chosen = choice.track if choice else None
+        context_extra: list[str] = []
+        if shared is not None:
+            context_extra.append(music_prompt_line(shared, actor="他"))
+        if chosen is not None:
+            context_extra.append(
+                music_prompt_line(chosen, actor="你")
+                + "（这首歌会作为卡片和你的话一起发出去，"
+                "所以说一句把它递过去的话，不要复述标题和艺人。）"
+            )
+        elif choice is not None and choice.not_found:
+            context_extra.append(
+                "（他点了歌，但一首都没找到。别编一首出来，"
+                "顺着他的话说下去就行，那句说明会另外发。）"
+            )
+        if self.playback_state is not None:
+            if line := playback_prompt_line(self.playback_state(job.user_id)):
+                context_extra.append(line)
         if job.intent == "photo_reading" and photo is not None:
             reading = self._read(
                 job, moment, photo, prompt_dossier,
@@ -196,11 +250,29 @@ class EngineMomentProcessor:
                 return reading
         reply = respond(
             moment, memory, self.cfg, photo=photo, note=job.note, chat_id=chat_id,
-            on_bubble=on_bubble,
+            # 点歌那一轮不流式：一条崩溃后重来的 moment 不能换一首歌，也不能
+            # 把同一张卡片发两次。曲目落库之后才由调用方一次性发出去。
+            on_bubble=None if chosen is not None else on_bubble,
             dossier=prompt_dossier,
             history_entries=self._archive_context(memory, job),
+            context_extra=context_extra or None,
         )
-        return ProcessedMoment(reply, moment, photo)
+        if choice is not None and choice.not_found:
+            # 他点了歌却一首都没找到。那句说明是固定的，而且要跟它自己的话
+            # 一起进 `say`：这样它会被落库、被崩溃后的重放原样带回来，不必在
+            # 发事件那一层再单独记一件事。这一轮也不许沉默。
+            reply = Reply(
+                scene=reply.scene,
+                move="speak",
+                say=[*reply.say, MUSIC_NOT_FOUND_LINE],
+            )
+        track = chosen if chosen is not None else shared
+        return ProcessedMoment(
+            reply, moment, photo,
+            music_track=track,
+            music_track_role=("out" if chosen is not None
+                              else "in" if shared is not None else None),
+        )
 
     @staticmethod
     def _archive_context(memory: Memory, job: Job) -> list[Entry] | None:
@@ -347,8 +419,9 @@ class AppWorker:
             cur = memory.conn.execute(
                 """INSERT INTO entries
                    (chat_id,thread,logged_at,shot_at,bucket,weekday,spot,
-                    scene,move,said,note,kind,intent,has_photo)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    scene,move,said,note,kind,intent,has_photo,
+                    music_track,music_track_role)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     chat_id,
                     label,
@@ -365,6 +438,12 @@ class AppWorker:
                     "in",
                     None,
                     1 if result.photo is not None else 0,
+                    # 落的是服务端核验过的那一份，不是客户端提交的快照。
+                    (json.dumps(
+                        result.music_track, ensure_ascii=False,
+                        separators=(",", ":"), sort_keys=True,
+                    ) if result.music_track else None),
+                    result.music_track_role,
                 ),
             )
             entry_id = int(cur.lastrowid)
@@ -441,6 +520,19 @@ class AppWorker:
                     lost.set()
                     return False
                 emitted.add(bubble)
+            # 上一次崩溃前已经选好并落库的那首歌。从库里读回来重发，绝不
+            # 重新调模型、也绝不重新选一首——那样他会收到两首不同的歌。
+            keys = linked.keys()
+            card = (
+                load_music_track(linked["music_track"])
+                if "music_track" in keys and "music_track_role" in keys
+                and linked["music_track_role"] == "out"
+                else None
+            )
+            if card is not None:
+                self._append_music_card(job, card, emitted, lost)
+                if lost.is_set():
+                    return False
             preview_path: str | None = None
             if linked["has_photo"] and job.image_path and Path(job.image_path).is_file():
                 photo = load_app_photo(job.image_path, self.settings.max_image_pixels)
@@ -455,7 +547,8 @@ class AppWorker:
                 move=linked["move"] or "quiet",
                 memory_entry_id=int(linked["id"]),
                 preview_path=preview_path,
-                quiet=(linked["move"] == "quiet" or not bubbles),
+                quiet=((linked["move"] == "quiet" or not bubbles)
+                       and card is None),
             )
             if completed:
                 # Raw originals have a shorter lifetime than sleep-time dossier
@@ -464,6 +557,25 @@ class AppWorker:
                 self._refresh_continuity(memory, job, int(linked["id"]))
                 self._refresh_dossier(memory, job)
             return completed
+
+    def _append_music_card(
+        self, job: Job, track: dict, emitted: set[str], lost: threading.Event
+    ) -> None:
+        """把这一轮的歌作为一条普通气泡发出去。
+
+        故意仍然是 `bubble`，而不是一种新事件：旧客户端会忽略多出来的字段，
+        只显示文字兜底那一行，音乐不必自带一条事件流。发在文字之后、done
+        之前，而且和文字气泡走同一套去重——崩溃重来时不能发出第二张卡片。
+        """
+        text = music_fallback_text(track)
+        if lost.is_set() or text in emitted:
+            return
+        if self.store.append_job_event(
+            job, self.worker_id, "bubble", {"text": text, "music_track": track}
+        ):
+            emitted.add(text)
+        else:
+            lost.set()
 
     def _append_angles(self, job: Job, result: ProcessedMoment,
                        lost: threading.Event) -> None:
@@ -583,10 +695,16 @@ class AppWorker:
                     )
                     return True
                 result = self.processor(job, memory, on_bubble)
+                card = result.music_card
                 # A fake/non-streaming processor, or a model response salvaged after
                 # truncated JSON, can return bubbles that were not emitted live.
-                for bubble in result.reply.say:
-                    on_bubble(bubble)
+                #
+                # 点歌那一轮一条都不在这里发：曲目要先跟这条 entry 一起落库，
+                # 否则中途崩掉之后重来的那一次可能换一首歌，或者把同一张卡片
+                # 发第二次。下面拿到锁、写完 Memory 之后再一次性发。
+                if card is None:
+                    for bubble in result.reply.say:
+                        on_bubble(bubble)
                 # 三个话头在 done 之前发：读图已经把它们一起带回来了，
                 # 这里只是把它们放上事件流，普通 moment 到这里什么都不做。
                 self._append_angles(job, result, lost)
@@ -598,6 +716,12 @@ class AppWorker:
                     if lost.is_set() or not self.store.owns_job(job, self.worker_id):
                         return True
                     entry_id = self._record_memory_once(memory, job, result)
+                    if card is not None:
+                        # 歌已经在库里了，现在才发。重来的那一次会从
+                        # `_complete_linked` 读回同一首，不会重新选。
+                        for bubble in result.reply.say:
+                            on_bubble(bubble)
+                        self._append_music_card(job, card, emitted, lost)
                     preview_path: str | None = None
                     if result.photo is not None:
                         preview_path = str(save_preview(
@@ -610,7 +734,9 @@ class AppWorker:
                         move=result.reply.move,
                         memory_entry_id=entry_id,
                         preview_path=preview_path,
-                        quiet=result.reply.silent,
+                        # 发出过一张卡片就不算这一轮没说话，哪怕模型自己选了
+                        # quiet：屏幕上确实多了一条东西。
+                        quiet=result.reply.silent and card is None,
                     )
                     if cleaned_by_terminal_owner:
                         self._safe_remove_upload(job.image_path)
@@ -671,6 +797,9 @@ class AppWorker:
         from datetime import timedelta
 
         self.store.cleanup_events(timedelta(hours=self.settings.event_ttl_hours))
+        # 听歌状态只是这一阵子的上下文。读的时候会顺手清掉过期的那一行，但一个
+        # 不再打开 App 的人不会再被读到——所以这里也扫一遍。
+        self.store.cleanup_playback_states()
         self.settings.upload_dir.mkdir(parents=True, exist_ok=True)
         cutoff = time.time() - 24 * 60 * 60
         for path in self.settings.upload_dir.glob("murmur-upload-*"):
@@ -758,7 +887,37 @@ def run() -> None:
             ), lock_root=settings.data_root,
             delivery_budget_seconds=settings.push_delivery_budget_seconds,
         )
-        AppWorker(store, cfg, settings, scheduler=scheduler).serve_forever()
+        AppWorker(
+            store, cfg, settings, processor=build_processor(cfg, settings, store),
+            scheduler=scheduler,
+        ).serve_forever()
+
+
+def build_processor(
+    cfg: Config, settings: AppSettings, store: AppStore
+) -> EngineMomentProcessor:
+    """The processor this deployment actually runs, music included or not.
+
+    Music is off unless the switch is on and a catalog key exists, so a worker
+    on a machine without one behaves exactly as it did before the feature.
+    """
+    music = None
+    if settings.music_enabled and settings.audius_api_key:
+        from .app_music import AppMusicPlanner, AudiusCatalogClient
+
+        music = AppMusic(
+            AudiusCatalogClient(
+                settings.audius_api_key, base_url=settings.audius_api_base_url
+            ),
+            AppMusicPlanner(cfg),
+        )
+    return EngineMomentProcessor(
+        cfg, settings.data_root,
+        max_image_pixels=settings.max_image_pixels,
+        music=music,
+        # 播放状态只是这一轮的上下文，过期就没有了。取不到不算错。
+        playback_state=(store.current_playback if music is not None else None),
+    )
 
 
 def _start_balance_poller(cfg: Config) -> None:
