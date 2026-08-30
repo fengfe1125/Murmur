@@ -284,11 +284,12 @@ def _salvage_bubbles(raw: str, limit: int) -> list[str]:
 
 READING_TIMEOUT = 45.0  # 一次尝试的上限。成功的读图 2 秒就回来了：
 # 45 秒还在跑的那次，几乎一定是在烧隐藏思考、最后交白卷。早点认输去
-# 重试，比干等第二个 45 秒划算。上限留得宽，是为了容下慢一档的多模态
-# 模型（mimo 系想 20-30 秒还接得住），不是给当前这档留的。
+# 重试，比干等第二个 45 秒划算。上限留得比当前模型需要的宽得多，是给
+# 思考重、一想二三十秒的多模态模型留的余量。
 READING_ATTEMPTS = 2  # 两次的最坏总时长仍是原来单次的 90 秒
-READING_MAX_TOKENS = 2500  # 隐藏思考先烧掉一大截才轮到正文；500/900 档
-# 实测（mimo-v2.5，思考约 1100）全部截断，2500 才稳。换模型别下调。
+READING_MAX_TOKENS = 2500  # 隐藏思考先烧一截才轮到正文。当前读图模型只
+# 烧几十个（实测 reasoning≈74、completion≈157），这个额度绰绰有余；留这么
+# 宽是因为思考重的模型能烧掉上千，500/900 档实测全部截断。换模型别下调。
 ANGLES_MAX_CHARS = 14  # 硬约束是 ≤12 个汉字，字符数留两格兜底
 GUESS_MAX_CHARS = 40  # 硬约束是 ≤30 个汉字，同上
 
@@ -952,8 +953,9 @@ def respond(
         }
 
     if image_block is not None and (cfg.image_model or "").strip():
-        # 带图消息：多模态模型（deepseek-v4-flash-vision-exp，
-        # 不支持 json_schema，靠提示词约束）
+        # 带图消息：多模态模型（deepseek-v4-flash-vision-exp）。它不吃
+        # json_schema——传 response_format 直接 400「This response_format
+        # type is unavailable now」，所以靠提示词约束输出。
         attempts = _fallback_attempts(cfg, primary=cfg.image_model, use_schema=False)
     else:
         attempts = _fallback_attempts(
