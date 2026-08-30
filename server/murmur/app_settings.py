@@ -82,6 +82,13 @@ class AppSettings:
     event_ttl_hours: int = 24
     push_delivery_budget_seconds: float = 30.0
     timezone: ZoneInfo = ZoneInfo("Asia/Shanghai")
+    # The music vertical slice is deliberately dark by default.  OAuth stays
+    # on the device; the server key is used only for public catalog lookups.
+    music_enabled: bool = False
+    music_playback_reporting: bool = True
+    music_user_allowlist: frozenset[str] = frozenset()
+    audius_api_key: str | None = None
+    audius_api_base_url: str = "https://api.audius.co/v1"
 
     @property
     def production(self) -> bool:
@@ -181,6 +188,19 @@ class AppSettings:
                 "MURMUR_APP_PUSH_DELIVERY_BUDGET_SECONDS", "30"
             )),
             timezone=tz,
+            music_enabled=_bool(os.getenv("MURMUR_APP_MUSIC_ENABLED")),
+            music_playback_reporting=_bool(
+                os.getenv("MURMUR_APP_MUSIC_PLAYBACK_REPORTING"), True
+            ),
+            music_user_allowlist=frozenset(
+                item.strip() for item in
+                os.getenv("MURMUR_APP_MUSIC_USER_ALLOWLIST", "").split(",")
+                if item.strip()
+            ),
+            audius_api_key=os.getenv("MURMUR_AUDIUS_API_KEY") or None,
+            audius_api_base_url=os.getenv(
+                "MURMUR_AUDIUS_API_BASE_URL", "https://api.audius.co/v1"
+            ).rstrip("/"),
         )
 
     def validate(self) -> None:
@@ -224,6 +244,19 @@ class AppSettings:
             raise RuntimeError("invalid App API rate limiter settings")
         if self.push_delivery_budget_seconds <= 0:
             raise RuntimeError("push delivery budget must be positive")
+        if self.music_enabled:
+            missing = [
+                name for name, value in (
+                    ("MURMUR_AUDIUS_API_KEY", self.audius_api_key),
+                ) if not value
+            ]
+            if missing:
+                raise RuntimeError("Audius music integration missing: " + ", ".join(missing))
+            for name, value in (
+                ("MURMUR_AUDIUS_API_BASE_URL", self.audius_api_base_url),
+            ):
+                if not value.startswith("https://"):
+                    raise RuntimeError(f"{name} must use HTTPS")
 
     def validate_android(self) -> None:
         missing = [

@@ -15,6 +15,7 @@ from openai import BadRequestError, OpenAI, OpenAIError
 
 from . import counters
 from .affect import has_negative_affect
+from .app_music import load_music_track, music_prompt_line
 from .config import Config
 from .memory import Entry, Memory
 from .moment import Moment
@@ -51,12 +52,16 @@ def history_turns(recent: list[Entry]) -> list[dict]:
     """
     turns: list[dict] = []
     for e in recent:
+        track = load_music_track(e.music_track)
         # 它主动开口的记录没有"他"那一轮：只有它说的话 + 他可能回的话。
         # 之前这里会把它拼成一条"[图：...]"的 user 消息——等于把它的
         # 主动消息算在了他头上，后面的模型会以为是他发了张图。
         if e.kind == "out":
-            if e.said:
-                turns.append({"role": "assistant", "content": e.said})
+            assistant_bits = [e.said] if e.said else []
+            if track:
+                assistant_bits.append(music_prompt_line(track, actor="Murmur"))
+            if assistant_bits:
+                turns.append({"role": "assistant", "content": "\n".join(assistant_bits)})
             if e.reply:
                 turns.append({"role": "user", "content": e.reply})
             continue
@@ -66,15 +71,20 @@ def history_turns(recent: list[Entry]) -> list[dict]:
             bits.append(f"[图：{e.scene}]")
         if e.note:
             bits.append(e.note)
+        if track and e.music_track_role == "in":
+            bits.append(music_prompt_line(track, actor="他"))
         if not bits:
             continue
         turns.append({"role": "user", "content": " ".join(bits)})
 
         # 它那一轮
-        if e.move == "quiet" or not e.said:
+        assistant_bits = [e.said] if e.said else []
+        if track and e.music_track_role == "out":
+            assistant_bits.append(music_prompt_line(track, actor="Murmur"))
+        if e.move == "quiet" or not assistant_bits:
             turns.append({"role": "assistant", "content": "（这次没说话）"})
         else:
-            turns.append({"role": "assistant", "content": e.said})
+            turns.append({"role": "assistant", "content": "\n".join(assistant_bits)})
 
         # 他之后又回的话，单独算一轮
         if e.reply:
@@ -87,6 +97,7 @@ def build_context(
     visits: int,
     note: str | None,
     has_photo: bool = True,
+    extra: list[str] | None = None,
 ) -> str:
     """只描述"这一条"消息。历史走 history_turns()。"""
     # 旧照片不能叫「此刻」。读图失败退回这里的那条路走的也是这个函数，
@@ -108,6 +119,8 @@ def build_context(
         lines.append(f"他随图说了：{note}" if has_photo else f"他说：{note}")
     if not has_photo:
         lines.append("（这次没有图，只有他这句话。必须回，不要选 quiet。）")
+    if extra:
+        lines.extend(extra)
 
     return "\n".join(lines)
 
@@ -921,6 +934,7 @@ def respond(
     on_bubble=None,
     dossier: str | None = None,
     history_entries: list[Entry] | None = None,
+    context_extra: list[str] | None = None,
 ) -> Reply:
     """photo 为 None 时是纯文字消息——照样要回。
 
@@ -937,6 +951,7 @@ def respond(
         mem.spot_visits(chat_id, moment.spot, moment.bucket),
         note,
         has_photo=photo is not None,
+        extra=context_extra,
     )
     history = history_turns(
         history_entries if history_entries is not None
