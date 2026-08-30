@@ -22,4 +22,12 @@
 照片房间开场可以返回 bubble 和 angles；失败回落时客户端必须容忍没有 angles。
 旧日期续聊使用现有上下文关联，不在本轮发明新的日记 API。
 
+音乐（Audius）是同一条 wire 上的可选扩展，默认关闭，不新增 SSE 事件类型：
+`POST /v1/moments` 多一个可选的 `music_track` 文本字段，歌曲与照片不能同条发送，
+纯歌曲消息必须同时带文字兜底；歌曲卡片挂在既有 `bubble` 事件的额外字段上，
+旧客户端忽略该字段后仍能显示那行文字。新增 `GET /v1/music/config` 与
+`PUT /v1/music/playback-state` 两个认证接口，前者是客户端唯一的功能开关来源。
+OAuth 不在服务端：用户的 Audius 令牌只存在手机 Keychain，服务端只用自己的
+应用 key 查公开曲库元数据，且不代理音频。
+
 现有存档与未来日记之间的领域区别见 [术语](../../CONTEXT.md)；数据流见 [数据生命周期](data-lifecycle.md)。
