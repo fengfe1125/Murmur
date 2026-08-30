@@ -41,6 +41,10 @@
 		A10000000000000000000305 /* AudiusClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000306 /* AudiusClient.swift */; };
 		A10000000000000000000307 /* AudiusAccountModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000308 /* AudiusAccountModel.swift */; };
 		A10000000000000000000309 /* MusicPlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030A /* MusicPlaybackController.swift */; };
+		A1000000000000000000030B /* MusicModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030C /* MusicModule.swift */; };
+		A1000000000000000000030D /* MusicPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030E /* MusicPickerView.swift */; };
+		A1000000000000000000030F /* MusicPlayerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000310 /* MusicPlayerViews.swift */; };
+		A10000000000000000000311 /* MusicCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000312 /* MusicCardView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -104,6 +108,10 @@
 		A10000000000000000000306 /* AudiusClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudiusClient.swift; sourceTree = "<group>"; };
 		A10000000000000000000308 /* AudiusAccountModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudiusAccountModel.swift; sourceTree = "<group>"; };
 		A1000000000000000000030A /* MusicPlaybackController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlaybackController.swift; sourceTree = "<group>"; };
+		A1000000000000000000030C /* MusicModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicModule.swift; sourceTree = "<group>"; };
+		A1000000000000000000030E /* MusicPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPickerView.swift; sourceTree = "<group>"; };
+		A10000000000000000000310 /* MusicPlayerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlayerViews.swift; sourceTree = "<group>"; };
+		A10000000000000000000312 /* MusicCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicCardView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -168,6 +176,10 @@
 				A10000000000000000000306 /* AudiusClient.swift */,
 				A10000000000000000000308 /* AudiusAccountModel.swift */,
 				A1000000000000000000030A /* MusicPlaybackController.swift */,
+				A1000000000000000000030C /* MusicModule.swift */,
+				A1000000000000000000030E /* MusicPickerView.swift */,
+				A10000000000000000000310 /* MusicPlayerViews.swift */,
+				A10000000000000000000312 /* MusicCardView.swift */,
 				A1000000000000000000001A /* Assets.xcassets */,
 				A1000000000000000000001B /* PrivacyInfo.xcprivacy */,
 				A10000000000000000000034 /* Config */,
@@ -369,6 +381,10 @@
 				A10000000000000000000207 /* MurmurArchiveViews.swift in Sources */,
 				A10000000000000000000203 /* OnThisDayTabView.swift in Sources */,
 				A100000000000000000000F5 /* MurmurPhotoRoom.swift in Sources */,
+				A10000000000000000000311 /* MusicCardView.swift in Sources */,
+				A1000000000000000000030F /* MusicPlayerViews.swift in Sources */,
+				A1000000000000000000030D /* MusicPickerView.swift in Sources */,
+				A1000000000000000000030B /* MusicModule.swift in Sources */,
 				A10000000000000000000309 /* MusicPlaybackController.swift in Sources */,
 				A10000000000000000000307 /* AudiusAccountModel.swift in Sources */,
 				A10000000000000000000305 /* AudiusClient.swift in Sources */,

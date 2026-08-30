@@ -225,7 +225,11 @@ private struct MessageRow: View {
     /// keep the question on it.
     let onMarkFrame: (CGRect) -> Void
     let onAsk: () -> Void
+    /// What the one player is doing, already narrowed to this row's song.
+    var musicPlayback: MusicCardPlayback = .stopped
+    var onPlayMusic: (MusicTrackAttachmentV1) -> Void = { _ in }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openURL) private var openURL
 
     private var isOutgoing: Bool { message.author == .you }
 
@@ -251,7 +255,19 @@ private struct MessageRow: View {
                             }
                             .accessibilityLabel(isOutgoing ? "你发送的照片，轻点放大" : "Murmur 发来的照片，轻点放大")
                         }
-                        if !message.text.isEmpty {
+                        if let track = message.musicTrack {
+                            MusicCardView(
+                                track: track,
+                                isOutgoing: isOutgoing,
+                                playback: musicPlayback,
+                                onPlay: { onPlayMusic(track) },
+                                onOpenInAudius: { openURL(track.canonicalURL) }
+                            )
+                        }
+                        // A song carries a text fallback so an older client has
+                        // something to show. Here the card already says all of
+                        // it, and printing both would be the same message twice.
+                        if !message.text.isEmpty, message.musicTrack == nil {
                             Text(message.text)
                                 .font(MurmurTheme.body(.body))
                                 .foregroundStyle(isOutgoing ? MurmurTheme.onAccent : MurmurTheme.ink)
@@ -398,6 +414,10 @@ struct MurmurTranscriptView: View {
     var keyboardIsFocused = false
     let onOpenImage: (MurmurPhotoPreview) -> Void
     var onDismissKeyboard: () -> Void = {}
+    /// Passed down rather than observed per row: one player, one value, and a
+    /// screenful of rows that only compare it against their own song.
+    var nowPlaying: MusicNowPlaying = .none
+    var onPlayMusic: (MusicTrackAttachmentV1) -> Void = { _ in }
 
     /// Whether the reader is resting on the newest line.  Kept from the
     /// scroll geometry stream; only then may a resize carry the transcript
@@ -468,7 +488,9 @@ struct MurmurTranscriptView: View {
                                     id: message.id,
                                     reason: sendFailure(for: message)?.message ?? ""
                                 )
-                            }
+                            },
+                            musicPlayback: message.musicTrack.map(nowPlaying.playback) ?? .stopped,
+                            onPlayMusic: onPlayMusic
                         )
                         .id(message.id)
                     }

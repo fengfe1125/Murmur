@@ -157,6 +157,7 @@ extension View {
 /// conversation and the one disc that says whether the wire is good.
 struct MurmurChatView: View {
     @ObservedObject var model: MurmurSessionModel
+    @ObservedObject var music: MusicModule
     @EnvironmentObject private var notifications: MurmurNotificationBridge
     @State private var showCamera = false
     @State private var topChromeHeight: CGFloat = 0
@@ -171,7 +172,7 @@ struct MurmurChatView: View {
         // of the scene draws all the way up behind the status bar, and the
         // conversation ends up tangled in the clock.
         VStack(spacing: 0) {
-            MomentWorkbench(model: model, showCamera: $showCamera)
+            MomentWorkbench(model: model, showCamera: $showCamera, music: music)
                 .safeAreaPadding(.top, topChromeHeight)
         }
         // A scroll view draws all the way up behind the status bar whatever
@@ -481,7 +482,9 @@ struct EnrollmentView: View {
 private struct MomentWorkbench: View {
     @ObservedObject var model: MurmurSessionModel
     @Binding var showCamera: Bool
+    @ObservedObject var music: MusicModule
     @State private var showPhotoSource = false
+    @State private var showMusicPicker = false
     @State private var openPhoto: MurmurPhotoPreview?
     /// Bumped whenever the field takes focus.  The keyboard notification alone
     /// is not enough: tapping a field that is already first responder raises no
@@ -534,7 +537,9 @@ private struct MomentWorkbench: View {
                 MurmurDiagnostics.record("tapped conversation")
 #endif
                 composerFocused = false
-            }
+            },
+            nowPlaying: music.nowPlaying,
+            onPlayMusic: { music.player.tap($0) }
         )
             // A tap anywhere off the menu closes it, the way a popover does.
             // The catcher covers the transcript and nothing else: over the
@@ -593,6 +598,10 @@ private struct MomentWorkbench: View {
                         showPhotoSource: $showPhotoSource,
                         onFocus: { focusPulse += 1 },
                         onPickFromLibrary: { showLibrary = true },
+                        // Two gates, and both have to be open: this build has
+                        // an Audius registration, and Murmur's server says this
+                        // account may use music at all.
+                        onPickMusic: music.isAvailable ? { showMusicPicker = true } : nil,
                         focused: $composerFocused
                     )
                 }
@@ -606,6 +615,13 @@ private struct MomentWorkbench: View {
                 )
             }
         .photosPicker(isPresented: $showLibrary, selection: $selectedItem, matching: .images)
+        .sheet(isPresented: $showMusicPicker) {
+            MusicPickerView(
+                client: music.library,
+                account: music.account,
+                onSend: { model.submitMusic($0) }
+            )
+        }
         .fullScreenCover(item: $openPhoto) { photo in
             MurmurPhotoLightbox(url: photo.url)
         }
@@ -699,6 +715,7 @@ private struct MomentComposer: View {
     @Binding var showPhotoSource: Bool
     let onFocus: () -> Void
     let onPickFromLibrary: () -> Void
+    var onPickMusic: (() -> Void)?
     /// Owned by the workbench, so tapping the conversation can drop focus in the
     /// same turn the tap is seen rather than a pass later.
     @FocusState.Binding var focused: Bool
@@ -794,6 +811,7 @@ private struct MomentComposer: View {
                     PhotoSourceMenu(
                         onLibrary: onPickFromLibrary,
                         onCamera: { showCamera = true },
+                        onMusic: onPickMusic,
                         onDismiss: { closePhotoSource() }
                     )
                     // Lift by its own measured height so the card's bottom
@@ -869,6 +887,7 @@ private final class FocusClock {
 
 struct MurmurSettingsView: View {
     @ObservedObject var model: MurmurSessionModel
+    @ObservedObject var music: MusicModule
     @EnvironmentObject private var notifications: MurmurNotificationBridge
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDelete = false
@@ -894,6 +913,13 @@ struct MurmurSettingsView: View {
                     Text("每个邀请用户最多可绑定 3 台设备。新增设备需要管理员签发设备码。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+
+                // Only when the server has actually turned music on for this
+                // account: an account that has never seen the feature should
+                // not be offered a music setting it cannot use.
+                if music.isAvailable {
+                    AudiusSection(music: music)
                 }
 
                 Section("设备") {
@@ -1230,9 +1256,75 @@ private struct DraftPhotoTile: View {
 
 /// The add-photo menu, drawn in the app's own paper instead of system chrome
 /// so it belongs to the composer it rises out of.
+/// The Audius account, in 我的.
+///
+/// Connecting is what unlocks 收藏 and 歌单 in the picker; public search works
+/// without it. Disconnecting clears the credential on this device whether or
+/// not Audius can be reached to revoke it.
+private struct AudiusSection: View {
+    @ObservedObject var music: MusicModule
+    @State private var working = false
+
+    var body: some View {
+        Section("音乐") {
+            switch music.account.state {
+            case let .signedIn(user):
+                LabeledContent("Audius", value: user.handle.isEmpty ? user.name : "@\(user.handle)")
+                Button("断开 Audius", role: .destructive) {
+                    working = true
+                    Task {
+                        await music.account.logout()
+                        working = false
+                    }
+                }
+                .disabled(working)
+            case .authorizing:
+                HStack {
+                    ProgressView()
+                    Text("正在连接 Audius")
+                }
+                .foregroundStyle(.secondary)
+            case .needsReconnect:
+                Text("Audius 授权已失效，需要重新连接。")
+                    .font(.footnote)
+                    .foregroundStyle(MurmurTheme.coral)
+                connectButton(title: "重新连接 Audius")
+            case let .failed(message):
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(MurmurTheme.coral)
+                connectButton(title: "再试一次")
+            case .signedOut:
+                connectButton(title: "连接 Audius")
+            case .unavailable:
+                Text("这个版本还没有配置 Audius。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Text("连接后可以在聊天里发送你的 Audius 收藏和歌单。搜索公开曲库不需要连接。Murmur 不会收到你的 Audius 授权或完整收听记录。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func connectButton(title: String) -> some View {
+        Button(title) {
+            working = true
+            Task {
+                await music.account.login()
+                working = false
+            }
+        }
+        .disabled(working)
+    }
+}
+
 private struct PhotoSourceMenu: View {
     let onLibrary: () -> Void
     let onCamera: () -> Void
+    /// nil when music is off for this build or this account, in which case the
+    /// menu is exactly what it was before songs existed.
+    var onMusic: (() -> Void)?
     let onDismiss: () -> Void
 
     private var hasCamera: Bool {
@@ -1253,6 +1345,16 @@ private struct PhotoSourceMenu: View {
                 row("拍照", icon: "camera") {
                     onDismiss()
                     onCamera()
+                }
+            }
+            if let onMusic {
+                Rectangle()
+                    .fill(MurmurTheme.rule)
+                    .frame(height: 1)
+                    .padding(.leading, 48)
+                row("音乐", icon: "music.note") {
+                    onDismiss()
+                    onMusic()
                 }
             }
         }
@@ -1403,7 +1505,11 @@ private struct CameraPicker: UIViewControllerRepresentable {
 
 #if DEBUG
 #Preview {
-    MurmurChatView(model: MurmurSessionModel(api: PreviewMurmurAPIClient()))
+    let api = PreviewMurmurAPIClient()
+    MurmurChatView(
+        model: MurmurSessionModel(api: api),
+        music: MusicModule(api: api, configuration: nil)
+    )
         .environmentObject(MurmurNotificationBridge.shared)
         .environmentObject(MurmurKeyboardState())
         .environment(\.murmurTabBarClearance, 72)
