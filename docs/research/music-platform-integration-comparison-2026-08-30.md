@@ -1,6 +1,6 @@
 # 全球音乐平台完整双向会话集成对比（2026-08-30）
 
-> 状态：产品与技术可行性调研，不代表任何平台已批准 Murmur
+> 状态：产品与技术可行性调研｜适用：Murmur 全球音乐平台选型｜核验：2026-08-30｜依据：平台官方开发文档、政策、支持页与官方代码仓库；不代表平台授权或生产验收
 > 核验日期：2026-08-30（Asia/Shanghai）
 > 证据口径：只引用平台官方开发者文档、官方政策、官方支持页或平台官方 GitHub 组织；公开文档存在不等于生产准入、内容转授权或商店审核通过
 > 范围：Apple Music / MusicKit、Audius、Spotify、YouTube Music / YouTube、SoundCloud、Amazon Music、TIDAL、Deezer，并补充 Jamendo、Bandcamp、用户自有音乐与中国平台

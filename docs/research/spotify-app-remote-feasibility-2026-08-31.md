@@ -1,6 +1,6 @@
 # Murmur 使用 Spotify App Remote 遥控放歌可行性（2026-08-31）
 
-> 状态：产品、技术与政策可行性调研，不代表 Spotify 已批准 Murmur
+> 状态：产品、技术与政策可行性调研｜适用：Murmur Spotify App Remote 方案选型｜核验：2026-08-31｜依据：Spotify 官方文档、条款、政策、SDK 与支持页；不代表平台授权或生产验收
 > 核验日期：2026-08-31（Asia/Shanghai）
 > 证据口径：Spotify 官方开发者文档、Developer Terms、Developer Policy、官方 SDK/GitHub 与官方支持页
 > 目标口径：音频始终由设备上的 Spotify 官方 App 播放；Murmur 只负责登录授权、搜索/选歌、聊天歌曲卡和遥控

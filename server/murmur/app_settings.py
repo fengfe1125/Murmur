@@ -89,10 +89,24 @@ class AppSettings:
     music_user_allowlist: frozenset[str] = frozenset()
     audius_api_key: str | None = None
     audius_api_base_url: str = "https://api.audius.co/v1"
+    # NetEase is a separate, experimental vertical slice.  Catalog cards may
+    # be enabled without ever enabling the much riskier room protocol.
+    netease_catalog_enabled: bool = False
+    netease_catalog_base_url: str = "https://music.163.com"
+    netease_room_experiment_enabled: bool = False
+    netease_room_user_allowlist: frozenset[str] = frozenset()
+    netease_bot_secret_path: Path | None = None
+    netease_room_protocol_base_url: str | None = None
+    netease_room_disconnect_grace_seconds: float = 10 * 60
 
     @property
     def production(self) -> bool:
         return self.attest_mode == "production"
+
+    @property
+    def netease_room_socket_path(self) -> Path:
+        """Private app-api ↔ worker transport; never exposed over TCP."""
+        return self.data_root / "netease-listen-together.sock"
 
     @classmethod
     def from_env(cls, cfg=None) -> AppSettings:
@@ -201,6 +215,33 @@ class AppSettings:
             audius_api_base_url=os.getenv(
                 "MURMUR_AUDIUS_API_BASE_URL", "https://api.audius.co/v1"
             ).rstrip("/"),
+            netease_catalog_enabled=_bool(
+                os.getenv("MURMUR_NETEASE_CATALOG_ENABLED")
+            ),
+            netease_catalog_base_url=os.getenv(
+                "MURMUR_NETEASE_CATALOG_BASE_URL", "https://music.163.com"
+            ).rstrip("/"),
+            netease_room_experiment_enabled=_bool(
+                os.getenv("MURMUR_NETEASE_ROOM_EXPERIMENT_ENABLED")
+            ),
+            netease_room_user_allowlist=frozenset(
+                item.strip() for item in
+                os.getenv("MURMUR_NETEASE_ROOM_USER_ALLOWLIST", "").split(",")
+                if item.strip()
+            ),
+            netease_bot_secret_path=(
+                Path(value).expanduser()
+                if (value := os.getenv("MURMUR_NETEASE_BOT_SECRET_PATH"))
+                else None
+            ),
+            netease_room_protocol_base_url=(
+                value.rstrip("/")
+                if (value := os.getenv("MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL"))
+                else None
+            ),
+            netease_room_disconnect_grace_seconds=float(os.getenv(
+                "MURMUR_NETEASE_ROOM_DISCONNECT_GRACE_SECONDS", "600"
+            )),
         )
 
     def validate(self) -> None:
@@ -257,6 +298,39 @@ class AppSettings:
             ):
                 if not value.startswith("https://"):
                     raise RuntimeError(f"{name} must use HTTPS")
+        if self.netease_catalog_enabled and not self.netease_catalog_base_url.startswith(
+            "https://"
+        ):
+            raise RuntimeError("MURMUR_NETEASE_CATALOG_BASE_URL must use HTTPS")
+        if self.netease_room_disconnect_grace_seconds <= 0:
+            raise RuntimeError("NetEase room disconnect grace must be positive")
+        if self.netease_room_experiment_enabled:
+            if not self.netease_catalog_enabled:
+                raise RuntimeError(
+                    "NetEase room experiment requires MURMUR_NETEASE_CATALOG_ENABLED=1"
+                )
+            if not self.netease_room_user_allowlist:
+                raise RuntimeError(
+                    "NetEase room experiment requires a non-empty user allowlist"
+                )
+            if not self.netease_bot_secret_path:
+                raise RuntimeError(
+                    "NetEase room experiment requires MURMUR_NETEASE_BOT_SECRET_PATH"
+                )
+            if not self.netease_bot_secret_path.is_absolute():
+                raise RuntimeError("NetEase bot secret path must be absolute")
+            if not self.netease_bot_secret_path.is_file():
+                raise RuntimeError("NetEase bot secret file does not exist")
+            if self.netease_bot_secret_path.stat().st_mode & 0o077:
+                raise RuntimeError("NetEase bot secret file must use mode 0600 or stricter")
+            if not self.netease_room_protocol_base_url:
+                raise RuntimeError(
+                    "NetEase room experiment requires a protocol base URL"
+                )
+            if not self.netease_room_protocol_base_url.startswith("https://"):
+                raise RuntimeError(
+                    "MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL must use HTTPS"
+                )
 
     def validate_android(self) -> None:
         missing = [

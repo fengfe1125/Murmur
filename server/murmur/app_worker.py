@@ -164,6 +164,8 @@ class EngineMomentProcessor:
         max_image_pixels: int = 100_000_000,
         music: AppMusic | None = None,
         playback_state: Callable[[str], dict | None] | None = None,
+        rooms=None,
+        room_user_allowlist: frozenset[str] = frozenset(),
     ):
         self.cfg = cfg
         self.data_root = data_root
@@ -172,6 +174,11 @@ class EngineMomentProcessor:
         # 不需要在下面每一处再问一次开关。
         self.music = music
         self.playback_state = playback_state
+        # The worker owns this process-local manager.  Keeping it optional is
+        # the feature gate: ordinary deployments never parse or execute room
+        # commands at all.
+        self.rooms = rooms
+        self.room_user_allowlist = room_user_allowlist
 
     def __call__(
         self, job: Job, memory: Memory, on_bubble: Callable[[str], None]
@@ -209,6 +216,8 @@ class EngineMomentProcessor:
             if tone := prompt_context(state):
                 prompt_parts.append(tone)
         prompt_dossier = "\n\n".join(prompt_parts) or None
+        if controlled := self._control_existing_room(job, moment):
+            return controlled
         # 歌先定下来，模型后说话。定在这里有两个原因：它要进这一轮的
         # prompt（不然它会答一句和卡片无关的话），而且点歌那一轮必须关掉
         # 逐条气泡流——先把曲目确定并落库，再一次性输出文字和卡片。
@@ -219,6 +228,8 @@ class EngineMomentProcessor:
             else None
         )
         chosen = choice.track if choice else None
+        if room_turn := self._apply_music_to_room(job, moment, chosen):
+            return room_turn
         context_extra: list[str] = []
         if shared is not None:
             context_extra.append(music_prompt_line(shared, actor="他"))
@@ -273,6 +284,105 @@ class EngineMomentProcessor:
             music_track_role=("out" if chosen is not None
                               else "in" if shared is not None else None),
         )
+
+    def _control_existing_room(
+        self, job: Job, moment: Moment
+    ) -> ProcessedMoment | None:
+        """Execute only the small, explicit room-control vocabulary."""
+        if self.rooms is None or job.user_id not in self.room_user_allowlist:
+            return None
+        from .app_listen_together import (
+            ListenTogetherError,
+            parse_room_chat_intent,
+        )
+
+        intent = parse_room_chat_intent(job.note)
+        if intent is None:
+            return None
+        try:
+            current = self.rooms.current(user_id=job.user_id, refresh=False)
+            if current is None:
+                line = "现在还没有一起听房间。先选一首网易云歌曲，再点「和 Murmur 一起听」。"
+            elif intent.action == "close":
+                self.rooms.close(
+                    user_id=job.user_id,
+                    room_handle=current.room_handle,
+                    idempotency_key=f"chat:{job.moment_id}:close",
+                )
+                line = "好，这次一起听结束了。"
+            else:
+                result = self.rooms.command(
+                    user_id=job.user_id,
+                    room_handle=current.room_handle,
+                    command=intent.action,
+                    idempotency_key=f"chat:{job.moment_id}:{intent.action}",
+                )
+                line = self._room_command_line(result.status)
+        except ListenTogetherError:
+            # A room control is a permanent conversational result, not a model
+            # job worth retrying.  The typed API/UI path still exposes the safe
+            # error code; chat only says what the person can act on.
+            line = "这次没能和网易云同步，你可以在房间卡片里再试一次。"
+        return ProcessedMoment(
+            Reply(scene="（一起听控制）", move="speak", say=[line]),
+            moment,
+            None,
+        )
+
+    def _apply_music_to_room(
+        self, job: Job, moment: Moment, chosen: dict | None
+    ) -> ProcessedMoment | None:
+        """Create a room on an explicit request, or change an active room."""
+        if (
+            self.rooms is None
+            or job.user_id not in self.room_user_allowlist
+            or chosen is None
+            or chosen.get("provider") != "netease"
+        ):
+            return None
+        from .app_listen_together import (
+            ListenTogetherError,
+            explicitly_requests_listen_together,
+        )
+
+        explicit = explicitly_requests_listen_together(job.note)
+        try:
+            current = self.rooms.current(user_id=job.user_id, refresh=False)
+            if current is None and not explicit:
+                return None
+            if current is None:
+                self.rooms.create(
+                    user_id=job.user_id,
+                    initial_track=chosen,
+                    idempotency_key=f"chat:{job.moment_id}:create",
+                )
+                line = "房间准备好了。点歌曲卡片里的邀请，去网易云加入。"
+            else:
+                result = self.rooms.command(
+                    user_id=job.user_id,
+                    room_handle=current.room_handle,
+                    command="play_track",
+                    track=chosen,
+                    idempotency_key=f"chat:{job.moment_id}:play-track",
+                )
+                line = self._room_command_line(result.status, changing_track=True)
+        except ListenTogetherError:
+            line = "一起听现在没有连上；这首歌我先发给你。"
+        return ProcessedMoment(
+            Reply(scene="（一起听点歌）", move="speak", say=[line]),
+            moment,
+            None,
+            music_track=chosen,
+            music_track_role="out",
+        )
+
+    @staticmethod
+    def _room_command_line(status: str, *, changing_track: bool = False) -> str:
+        if status == "synchronized":
+            return "已经换好了。" if changing_track else "好，已经同步了。"
+        if status == "accepted":
+            return "命令已发出，还在等网易云确认。"
+        return "这次没有同步成功，房间卡片会保留真实状态。"
 
     @staticmethod
     def _archive_context(memory: Memory, job: Job) -> list[Entry] | None:
@@ -340,6 +450,7 @@ class AppWorker:
         processor: MomentProcessor | None = None,
         scheduler=None,
         *,
+        rooms=None,
         worker_id: str | None = None,
         heartbeat_interval: float = 30.0,
         lease_seconds: float = 180.0,
@@ -351,6 +462,9 @@ class AppWorker:
             cfg, settings.data_root, max_image_pixels=settings.max_image_pixels
         )
         self.scheduler = scheduler
+        # Listen-together rooms live only in this process.  The manager is
+        # optional so every existing deployment keeps the worker it had.
+        self.rooms = rooms
         self.worker_id = worker_id or f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         if heartbeat_interval <= 0 or lease_seconds <= heartbeat_interval * 2:
             raise ValueError("worker lease must exceed two heartbeat intervals")
@@ -358,6 +472,7 @@ class AppWorker:
         self.lease = timedelta(seconds=lease_seconds)
         self._next_proactive_check = 0.0
         self._next_cleanup = 0.0
+        self._stopping = threading.Event()
 
     def _safe_remove_upload(self, raw_path: str | None) -> None:
         if not raw_path:
@@ -824,13 +939,37 @@ class AppWorker:
                 log.error("proactive scheduler cycle failed error_type=%s",
                           type(error).__name__)
             self._next_proactive_check = clock + 30.0
+        if self.rooms is not None:
+            # `maintain` decides for itself which rooms are due, so calling it
+            # every cycle costs one lock.  A room that cannot be confirmed is
+            # ended inside the manager; nothing here has to know how.
+            try:
+                self.rooms.maintain()
+            except Exception as error:
+                log.error("room maintenance cycle failed error_type=%s",
+                          type(error).__name__)
         return did_work
 
     def serve_forever(self, poll_interval: float = 0.75) -> None:
         log.info("App worker %s started", self.worker_id)
-        while True:
-            if not self.run_cycle():
-                time.sleep(poll_interval)
+        try:
+            while not self._stopping.is_set():
+                if not self.run_cycle():
+                    time.sleep(poll_interval)
+        finally:
+            # A room outlives this process only as far as NetEase is concerned,
+            # so leaving without trying to close it strands the other person in
+            # a room nothing is driving any more.
+            if self.rooms is not None:
+                try:
+                    self.rooms.shutdown()
+                except Exception as error:
+                    log.error("room shutdown failed error_type=%s",
+                              type(error).__name__)
+
+    def stop(self) -> None:
+        """Ask ``serve_forever`` to finish the current cycle and return."""
+        self._stopping.set()
 
 
 def run() -> None:
@@ -887,37 +1026,126 @@ def run() -> None:
             ), lock_root=settings.data_root,
             delivery_budget_seconds=settings.push_delivery_budget_seconds,
         )
-        AppWorker(
-            store, cfg, settings, processor=build_processor(cfg, settings, store),
-            scheduler=scheduler,
-        ).serve_forever()
+        rooms, room_ipc = _start_listen_together(settings)
+        worker = AppWorker(
+            store, cfg, settings,
+            processor=build_processor(cfg, settings, store, rooms=rooms),
+            scheduler=scheduler, rooms=rooms,
+        )
+        try:
+            if rooms is not None:
+                _install_room_shutdown(worker)
+            worker.serve_forever()
+        finally:
+            if room_ipc is not None:
+                room_ipc.close()
+
+
+def build_catalog(settings: AppSettings):
+    """Whatever catalogs this deployment has switched on, or ``None``.
+
+    NetEase is the chat recommendation provider whenever its explicit gate is
+    on.  Audius remains registered so old cards and its native picker keep
+    working, but enabling the PoC must actually make Murmur's "放首歌" path
+    return the provider the experiment is about.
+    """
+    from .app_music import (
+        AudiusCatalogAdapter,
+        MusicCatalog,
+        NeteaseCatalogAdapter,
+    )
+
+    adapters = []
+    if settings.netease_catalog_enabled:
+        adapters.append(NeteaseCatalogAdapter(
+            base_url=settings.netease_catalog_base_url
+        ))
+    if settings.music_enabled and settings.audius_api_key:
+        adapters.append(AudiusCatalogAdapter(
+            settings.audius_api_key, base_url=settings.audius_api_base_url
+        ))
+    if not adapters:
+        return None
+    return MusicCatalog(adapters, default_provider=adapters[0].provider)
 
 
 def build_processor(
-    cfg: Config, settings: AppSettings, store: AppStore
+    cfg: Config, settings: AppSettings, store: AppStore, *, rooms=None
 ) -> EngineMomentProcessor:
     """The processor this deployment actually runs, music included or not.
 
-    Music is off unless the switch is on and a catalog key exists, so a worker
-    on a machine without one behaves exactly as it did before the feature.
+    Music is off unless a switch is on and that provider is configured, so a
+    worker on a machine without one behaves exactly as it did before.
     """
     music = None
-    if settings.music_enabled and settings.audius_api_key:
-        from .app_music import AppMusicPlanner, AudiusCatalogClient
+    catalog = build_catalog(settings)
+    if catalog is not None:
+        from .app_music import AppMusicPlanner
 
-        music = AppMusic(
-            AudiusCatalogClient(
-                settings.audius_api_key, base_url=settings.audius_api_base_url
-            ),
-            AppMusicPlanner(cfg),
-        )
+        music = AppMusic(catalog, AppMusicPlanner(cfg))
     return EngineMomentProcessor(
         cfg, settings.data_root,
         max_image_pixels=settings.max_image_pixels,
         music=music,
         # 播放状态只是这一轮的上下文，过期就没有了。取不到不算错。
         playback_state=(store.current_playback if music is not None else None),
+        rooms=rooms,
+        room_user_allowlist=(
+            settings.netease_room_user_allowlist if rooms is not None else frozenset()
+        ),
     )
+
+
+def _start_listen_together(settings: AppSettings):
+    """Start the room manager and its private socket, or return ``(None, None)``.
+
+    Rooms are held by this process and nowhere else: no database table, no
+    restart recovery, and a socket only the App API user can open.  The adapter
+    is constructed without a transport, so with the switch on but no reviewed
+    transport injected every room request fails closed with a typed error
+    instead of pretending a room exists.
+    """
+    if not settings.netease_room_experiment_enabled:
+        return None, None
+    from .app_listen_together import (
+        ExperimentalNeteaseRoomAdapter,
+        ListenTogetherRoomManager,
+        RoomIPCServer,
+    )
+
+    grace = settings.netease_room_disconnect_grace_seconds
+    manager = ListenTogetherRoomManager(
+        ExperimentalNeteaseRoomAdapter(
+            enabled=True, unreachable_timeout_seconds=grace
+        ),
+        unreachable_timeout_seconds=grace,
+    )
+    server = RoomIPCServer(manager, settings.netease_room_socket_path)
+    server.start()
+    log.info("listen-together room manager started")
+    return manager, server
+
+
+def _install_room_shutdown(worker: AppWorker) -> None:
+    """Turn SIGTERM into a normal loop exit so rooms get closed on the way out.
+
+    Only installed when the room experiment is on: every other deployment keeps
+    the default disposition it has always had.  A second signal is left to the
+    default handler, so a stuck close can still be killed.
+    """
+    import signal
+
+    def handle(signum, _frame):
+        signal.signal(signum, signal.SIG_DFL)
+        worker.stop()
+
+    for name in ("SIGTERM", "SIGINT"):
+        try:
+            signal.signal(getattr(signal, name), handle)
+        except (ValueError, OSError, AttributeError):
+            # Not the main thread, or no such signal here: the finally in
+            # serve_forever still runs on a normal exit.
+            log.warning("could not install %s handler for room shutdown", name)
 
 
 def _start_balance_poller(cfg: Config) -> None:

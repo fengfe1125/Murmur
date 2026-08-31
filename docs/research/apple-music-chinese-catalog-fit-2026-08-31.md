@@ -1,6 +1,6 @@
 # Apple Music / MusicKit 对 Murmur 中文音乐需求的适配性核验
 
-> 核验日期：2026-08-31  
+> 状态：调研结论｜适用：Murmur 中文音乐平台选型｜核验：2026-08-31｜依据：Apple 官方开发文档、条款、官网与中国区页面；不代表平台授权或生产验收
 > 资料范围：仅使用 Apple 官方开发者文档、App Store Review Guidelines、Apple Developer Program License Agreement、Apple 中国官网及 Apple Music 中国区页面。  
 > 核验目标：正式账号授权、读取用户资料库、Murmur 与用户在聊天中双向发送结构化歌曲卡、iOS/Android App 内完整播放、中文歌曲覆盖。
 
@@ -268,4 +268,3 @@ Apple 明确禁止要求付费或间接变现 Apple Music 服务访问，例子�
 - [Apple Music 中国区类别](https://music.apple.com/cn/search)
 - [Apple Music 中国区排行榜](https://music.apple.com/cn/new/top-charts)
 - [Apple 与中国移动合作公告](https://www.apple.com.cn/newsroom/2024/10/apple-music-comes-to-china-mobile-customers/)
-

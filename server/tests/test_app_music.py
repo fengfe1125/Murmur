@@ -339,15 +339,17 @@ class StubCatalog:
         self.results = results or []
         self.error = error
         self.searches: list[str] = []
+        self.lookups: list[tuple[str, str]] = []
 
-    def get_track(self, track_id):
+    def resolve(self, provider, track_id):
+        self.lookups.append((provider, track_id))
         if self.error:
             raise self.error
         if self.track is None:
             raise MusicTrackUnavailable("gone")
         return self.track
 
-    def search_tracks(self, query, limit=5):
+    def search(self, query, limit=5):
         self.searches.append(query)
         if self.error:
             raise self.error
@@ -373,6 +375,17 @@ class AppMusicTests(unittest.TestCase):
         stale = json.dumps({**TRACK, "title": "Whatever The Client Said"})
         music = AppMusic(StubCatalog(track=TRACK), StubPlanner())
         self.assertEqual(music.verify_shared(stale)["title"], "Rainy Night")
+
+    def test_a_shared_song_is_looked_up_on_its_own_provider(self):
+        """同一个 id 在两家是两首歌，核验必须带着 provider 走。"""
+        catalog_stub = StubCatalog(track=TRACK)
+        music = AppMusic(catalog_stub, StubPlanner())
+        netease = json.dumps({
+            **TRACK, "provider": "netease",
+            "canonical_url": "https://music.163.com/song?id=abc123",
+        })
+        music.verify_shared(netease)
+        self.assertEqual(catalog_stub.lookups, [("netease", "abc123")])
 
     def test_shared_track_falls_back_to_the_snapshot_when_gone(self):
         """歌下架了也不该让他发出的这条消息整条失败。"""
