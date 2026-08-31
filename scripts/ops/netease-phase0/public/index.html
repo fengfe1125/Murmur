@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>网易云一起听 Phase 0</title>
+    <link rel="stylesheet" href="style.css">
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>网易云一起听 · 隔离测试</h1>
+      <p class="notice">页面只通过 SSH 隧道访问。不会显示或传出账号 Cookie，也不会获取音频。</p>
+      <section>
+        <h2>1. 登录机器人测试账号</h2>
+        <p id="login-state">尚未开始</p>
+        <button id="login-start">生成一次性二维码</button>
+        <div id="qr" class="qr" hidden></div>
+      </section>
+      <section>
+        <h2>2. 创建房间</h2>
+        <label>歌曲 ID 列表（逗号分隔，最多 50 首）
+          <input id="song-ids" value="1372188635" inputmode="numeric">
+        </label>
+        <label>第一首歌曲 ID
+          <input id="initial-song-id" value="1372188635" inputmode="numeric">
+        </label>
+        <button id="room-create" disabled>创建一起听房间</button>
+        <button id="playlist-replace" disabled>更新当前房间歌单</button>
+        <p id="room-state">房间未创建</p>
+        <a id="invite" hidden rel="noreferrer">在 iPhone 网易云中打开邀请</a>
+        <div id="invite-qr" class="qr" hidden></div>
+      </section>
+      <section>
+        <h2>3. 同步控制</h2>
+        <div class="controls">
+          <button data-command="PREVIOUS" disabled>上一首</button>
+          <button data-command="PLAY" disabled>播放</button>
+          <button data-command="PAUSE" disabled>暂停</button>
+          <button data-command="NEXT" disabled>下一首</button>
+        </div>
+        <label>切换到歌曲 ID
+          <input id="goto-song-id" inputmode="numeric">
+        </label>
+        <button id="goto" disabled>切换指定歌曲</button>
+        <button id="refresh" disabled>刷新房间状态</button>
+        <button id="end" class="danger" disabled>结束房间</button>
+      </section>
+      <p id="error" role="alert"></p>
+    </main>
+  </body>
+</html>

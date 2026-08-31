@@ -12,6 +12,14 @@
 `room_protocol_unsupported`，不会创建假房间或伪报同步成功。因此当前可直接验收的是
 搜歌、发歌和分享流程；真正的“一起听”仍停在 Phase 0 协议研究闸门。
 
+仓库自带的隔离测试工具位于 `scripts/ops/netease-phase0/`。它与 Murmur worker 完全分离，
+只监听 VPS 回环地址，并通过 SSH 隧道提供二维码登录和房间控制页面。专用测试账号的 Cookie
+不会进入聊天、浏览器、日志或正式 Murmur 进程。
+
+测试工具固定参考 `NeteaseCloudMusicApiEnhanced/api-enhanced` 提交
+`f5ce55bcb46e29c8e5350ca796fb1cc9d9914acd`（MIT）；它只作为 Phase 0 研究依赖，不链接进
+正式 Murmur 服务，也不代表网易云已授权。
+
 第一段只在独立测试 VPS 验证房间协议。测试实例不得使用 Murmur 生产数据库、生产
 `.env`、用户照片或长期记忆。只有双账号真机验收通过，才允许把相同 adapter 接入现有
 `murmur-app-worker`；接入发布时两个网易开关仍保持关闭。
