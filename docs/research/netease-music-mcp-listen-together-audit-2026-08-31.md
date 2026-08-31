@@ -1,12 +1,6 @@
 # `netease-music-mcp` “一起听”源码审计
 
-> 状态：技术与产品可行性调研，不代表生产验收
->
-> 核验日期：2026-08-31
->
-> 目标仓库：[`tianyupaipai-cmd/netease-music-mcp`](https://github.com/tianyupaipai-cmd/netease-music-mcp)
->
-> 审计提交：[`0e27816d6ad8dac59ae54fcfc71b69cb5a41171b`](https://github.com/tianyupaipai-cmd/netease-music-mcp/tree/0e27816d6ad8dac59ae54fcfc71b69cb5a41171b)（仓库 `package.json` 标记 `0.6.0`）
+> 状态：技术与产品可行性调研，不代表生产验收｜适用：`netease-music-mcp`「一起听」源码审计｜核验：2026-08-31｜依据：目标仓库 [`tianyupaipai-cmd/netease-music-mcp`](https://github.com/tianyupaipai-cmd/netease-music-mcp) 审计提交 [`0e27816d6ad8dac59ae54fcfc71b69cb5a41171b`](https://github.com/tianyupaipai-cmd/netease-music-mcp/tree/0e27816d6ad8dac59ae54fcfc71b69cb5a41171b)（仓库 `package.json` 标记 `0.6.0`）
 
 ## 一句话结论
 

@@ -1,12 +1,8 @@
 # Murmur 网易云音乐四项能力可行性分析（VPS + 手机主路径）
 
-> 状态：产品与技术调研，不代表网易云音乐已向 Murmur 授权
->
-> 核验日期：2026-08-31（Asia/Shanghai）
+> 状态：产品与技术调研，不代表网易云音乐已向 Murmur 授权｜适用：网易云音乐四项能力（VPS + 手机主路径）｜核验：2026-08-31（Asia/Shanghai）｜依据：网易云官方公开资料与 [`tianyupaipai-cmd/netease-music-mcp`](https://github.com/tianyupaipai-cmd/netease-music-mcp) 锁定提交 [`0e27816d6ad8dac59ae54fcfc71b69cb5a41171b`](https://github.com/tianyupaipai-cmd/netease-music-mcp/tree/0e27816d6ad8dac59ae54fcfc71b69cb5a41171b)
 >
 > 目标部署：Murmur 服务与 MCP 在 VPS；主要入口是 iOS/Android Murmur App
->
-> 目标参考：[`tianyupaipai-cmd/netease-music-mcp`](https://github.com/tianyupaipai-cmd/netease-music-mcp)，锁定提交 [`0e27816d6ad8dac59ae54fcfc71b69cb5a41171b`](https://github.com/tianyupaipai-cmd/netease-music-mcp/tree/0e27816d6ad8dac59ae54fcfc71b69cb5a41171b)
 
 ## 结论
 

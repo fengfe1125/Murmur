@@ -1,7 +1,7 @@
 # Apple Music / MusicKit 对 Murmur 中文音乐需求的适配性核验
 
-> 核验日期：2026-08-31  
-> 资料范围：仅使用 Apple 官方开发者文档、App Store Review Guidelines、Apple Developer Program License Agreement、Apple 中国官网及 Apple Music 中国区页面。  
+> 状态：调研笔记｜适用：中文曲库音乐平台选型｜核验：2026-08-31｜依据：Apple 官方开发者文档、App Store Review Guidelines、Apple Developer Program License Agreement、Apple 中国官网及 Apple Music 中国区页面；不代表 Apple 已向 Murmur 授权
+>
 > 核验目标：正式账号授权、读取用户资料库、Murmur 与用户在聊天中双向发送结构化歌曲卡、iOS/Android App 内完整播放、中文歌曲覆盖。
 
 ## 一、结论
