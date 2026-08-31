@@ -228,6 +228,9 @@ private struct MessageRow: View {
     /// What the one player is doing, already narrowed to this row's song.
     var musicPlayback: MusicCardPlayback = .stopped
     var onPlayMusic: (MusicTrackAttachmentV1) -> Void = { _ in }
+    /// Absent whenever the room experiment is off for this account, which is
+    /// how the card knows not to offer a button that cannot work.
+    var onListenTogether: ((MusicTrackAttachmentV1) -> Void)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openURL) private var openURL
 
@@ -261,7 +264,10 @@ private struct MessageRow: View {
                                 isOutgoing: isOutgoing,
                                 playback: musicPlayback,
                                 onPlay: { onPlayMusic(track) },
-                                onOpenInAudius: { openURL(track.canonicalURL) }
+                                onOpenProvider: { openURL(track.canonicalURL) },
+                                onListenTogether: onListenTogether.map { start in
+                                    { start(track) }
+                                }
                             )
                         }
                         // A song carries a text fallback so an older client has
@@ -418,6 +424,7 @@ struct MurmurTranscriptView: View {
     /// screenful of rows that only compare it against their own song.
     var nowPlaying: MusicNowPlaying = .none
     var onPlayMusic: (MusicTrackAttachmentV1) -> Void = { _ in }
+    var onListenTogether: ((MusicTrackAttachmentV1) -> Void)?
 
     /// Whether the reader is resting on the newest line.  Kept from the
     /// scroll geometry stream; only then may a resize carry the transcript
@@ -490,7 +497,8 @@ struct MurmurTranscriptView: View {
                                 )
                             },
                             musicPlayback: message.musicTrack.map(nowPlaying.playback) ?? .stopped,
-                            onPlayMusic: onPlayMusic
+                            onPlayMusic: onPlayMusic,
+                            onListenTogether: onListenTogether
                         )
                         .id(message.id)
                     }

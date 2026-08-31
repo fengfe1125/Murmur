@@ -115,6 +115,28 @@ enum MusicFixtures {
         explicit: false
     )
 
+    static let netease = MusicTrackAttachmentV1(
+        provider: "netease",
+        trackID: "186016",
+        title: "夜曲",
+        artists: ["周杰伦"],
+        artworkURL: nil,
+        canonicalURL: URL(string: "https://music.163.com/song?id=186016")!,
+        durationSeconds: 226,
+        explicit: false
+    )
+
+    static let neteaseOther = MusicTrackAttachmentV1(
+        provider: "netease",
+        trackID: "186017",
+        title: "反方向的钟",
+        artists: ["周杰伦"],
+        artworkURL: nil,
+        canonicalURL: URL(string: "https://music.163.com/song?id=186017")!,
+        durationSeconds: 268,
+        explicit: false
+    )
+
     /// What the provider would hand back for a given id.
     static func catalogued(_ trackID: String) -> MusicTrackAttachmentV1 {
         [track, other].first { $0.trackID == trackID } ?? track
@@ -901,6 +923,309 @@ private actor RecordingMurmurAPIClient: MurmurAPIClient {
 
     struct Unused: Error {}
     func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws { reported += 1 }
+    func storedIdentity() async throws -> MurmurIdentity? { nil }
+    func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity {
+        throw Unused()
+    }
+    func createMoment(
+        note: String?, photo: PhotoAttachment?, idempotencyKey: String,
+        intent: MurmurMomentIntent?, contextMomentIDs: [String]
+    ) async throws -> MomentReceipt { throw Unused() }
+    func events(momentID: String, lastEventID: String?)
+        async -> AsyncThrowingStream<MurmurStreamEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+    func currentProactive() async throws -> ProactiveMoment? { nil }
+    func acknowledge(momentID: String, reply: String?) async throws {}
+    func updateDevice(
+        apnsToken: String?, environment: String, timezone: String, deviceName: String
+    ) async throws {}
+    func devices() async throws -> [MurmurDevice] { [] }
+    func removeDevice(deviceID: String) async throws {}
+    func preferences() async throws -> MurmurPreferences { throw Unused() }
+    func updatePreferences(_ preferences: MurmurPreferences) async throws {}
+    func resetLocalIdentity() async throws {}
+    func deleteAccount() async throws {}
+}
+
+// MARK: - NetEase: shares, drafts and rooms
+
+final class NeteaseSharedTextDetectorTests: XCTestCase {
+    func testTheSupportedShareShapesAreRecognised() {
+        let shares = [
+            "https://music.163.com/song?id=186016",
+            "https://music.163.com/#/song?id=186016",
+            "https://music.163.com/m/song?id=186016&userid=1",
+            "分享周杰伦的单曲《夜曲》 https://163cn.tv/abcdef (来自网易云音乐)",
+        ]
+        for share in shares {
+            XCTAssertTrue(
+                NeteaseSharedTextDetector.containsCandidate(in: share), share
+            )
+        }
+    }
+
+    func testOrdinaryTalkAndOtherPagesAreNotShares() {
+        let notShares = [
+            "今天下雨了，想听点安静的",
+            "https://music.163.com/user/home?id=1",
+            "https://example.com/song?id=186016",
+            "music.163.com/song?id=186016",
+        ]
+        for text in notShares {
+            XCTAssertFalse(
+                NeteaseSharedTextDetector.containsCandidate(in: text), text
+            )
+        }
+    }
+
+    func testAnAbsurdlyLongPasteIsNotScanned() {
+        let huge = String(repeating: "x", count: 20_000)
+            + " https://music.163.com/song?id=186016"
+        XCTAssertFalse(NeteaseSharedTextDetector.containsCandidate(in: huge))
+    }
+}
+
+final class SharedMusicDraftStoreTests: XCTestCase {
+    private var directory: URL!
+
+    override func setUpWithError() throws {
+        directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    func testADraftSurvivesTheHandoffToTheApp() throws {
+        let store = SharedMusicDraftStore(directory: directory)
+        let draft = SharedMusicDraftV1(rawText: "https://music.163.com/song?id=186016")
+        try store.save(draft)
+        let loaded = try store.load()
+        XCTAssertEqual(loaded?.id, draft.id)
+        XCTAssertEqual(loaded?.rawText, draft.rawText)
+        XCTAssertEqual(loaded?.version, SharedMusicDraftV1.currentVersion)
+        // ISO-8601 keeps whole seconds, so the two Dates are close rather than
+        // identical. Nothing about a draft depends on finer than that.
+        XCTAssertEqual(
+            loaded?.createdAt.timeIntervalSince1970 ?? 0,
+            draft.createdAt.timeIntervalSince1970,
+            accuracy: 1
+        )
+    }
+
+    func testANewerShareReplacesAnUnconfirmedOne() throws {
+        let store = SharedMusicDraftStore(directory: directory)
+        try store.save(SharedMusicDraftV1(rawText: "first"))
+        let second = SharedMusicDraftV1(rawText: "second")
+        try store.save(second)
+        XCTAssertEqual(try store.load()?.id, second.id)
+    }
+
+    func testRemovingByIdOnlyRemovesThatDraft() throws {
+        let store = SharedMusicDraftStore(directory: directory)
+        let kept = SharedMusicDraftV1(rawText: "kept")
+        try store.save(kept)
+        try store.remove(id: UUID())
+        XCTAssertEqual(try store.load()?.id, kept.id, "别人的 id 不该删掉这一份")
+        try store.remove(id: kept.id)
+        XCTAssertNil(try store.load())
+    }
+
+    func testNothingStoredReadsAsNothingRatherThanAFailure() throws {
+        XCTAssertNil(try SharedMusicDraftStore(directory: directory).load())
+    }
+}
+
+@MainActor
+final class NeteaseMusicModelTests: XCTestCase {
+    // XCTest's setup/teardown overrides are nonisolated even though the test
+    // body is MainActor-isolated. The runner mutates this only serially.
+    nonisolated(unsafe) private var directory: URL!
+
+    override func setUpWithError() throws {
+        directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private func model(_ api: ScriptedMurmurAPIClient) -> NeteaseMusicModel {
+        NeteaseMusicModel(
+            api: api, draftStore: SharedMusicDraftStore(directory: directory)
+        )
+    }
+
+    func testOrdinaryTypingIsNeverSentAnywhere() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        XCTAssertFalse(model.recognizePastedText("今天走了很久"))
+        let calls = await api.calls
+        XCTAssertEqual(calls, [])
+    }
+
+    func testAPastedLinkBecomesAPreviewTheServerResolved() async throws {
+        let api = ScriptedMurmurAPIClient()
+        await api.setSharedTrack(MusicFixtures.netease)
+        let model = model(api)
+        XCTAssertTrue(model.recognizePastedText(
+            "《随便什么名字》https://music.163.com/song?id=186016"
+        ))
+        try await waitFor { model.preview != nil }
+        XCTAssertEqual(model.preview?.track.title, MusicFixtures.netease.title)
+    }
+
+    func testConfirmingHandsTheSongOverAndClearsTheDraft() async throws {
+        let api = ScriptedMurmurAPIClient()
+        await api.setSharedTrack(MusicFixtures.netease)
+        let model = model(api)
+        model.recognizePastedText("https://music.163.com/song?id=186016")
+        try await waitFor { model.preview != nil }
+        let confirmed = model.confirmPreview()
+        XCTAssertEqual(confirmed?.trackID, MusicFixtures.netease.trackID)
+        XCTAssertNil(model.preview)
+        XCTAssertNil(try SharedMusicDraftStore(directory: directory).load())
+    }
+
+    func testAResolutionThatIsNotNeteaseIsRefusedAndTheDraftIsKept() async throws {
+        let api = ScriptedMurmurAPIClient()
+        await api.setSharedTrack(MusicFixtures.track)
+        let model = model(api)
+        model.recognizePastedText("https://music.163.com/song?id=186016")
+        try await waitFor { model.failureMessage != nil }
+        XCTAssertNil(model.preview)
+        XCTAssertNotNil(
+            try SharedMusicDraftStore(directory: directory).load(),
+            "解析失败不该把他明确分享的这一条弄丢"
+        )
+    }
+
+    func testAnAudiusCardNeverAsksForARoom() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        let invite = await model.createRoom(for: MusicFixtures.track)
+        XCTAssertNil(invite)
+        let calls = await api.calls
+        XCTAssertEqual(calls, [])
+    }
+
+    func testAFirstRoomIsCreatedAndASecondSongSwitchesInsideIt() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        _ = await model.createRoom(for: MusicFixtures.netease)
+        XCTAssertEqual(model.room?.state, .waitingForUser)
+        _ = await model.createRoom(for: MusicFixtures.neteaseOther)
+        let calls = await api.calls
+        XCTAssertEqual(calls, ["create", "command:play_track"], "已经有房间就换歌，不再开一个")
+    }
+
+    func testACommandThatFailedIsNeverShownAsSynchronised() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        _ = await model.createRoom(for: MusicFixtures.netease)
+        await api.setFailing(true)
+        await model.command(.pause)
+        XCTAssertEqual(model.commandStatus, .failed)
+        XCTAssertNotNil(model.failureMessage)
+    }
+
+    func testWithoutARoomThereIsNothingToCommand() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        await model.command(.next)
+        let calls = await api.calls
+        XCTAssertEqual(calls, [])
+    }
+}
+
+/// The player is an Audius stream player; a NetEase card is an external
+/// control surface and must not reach it.
+@MainActor
+final class NeteasePlayerGuardTests: XCTestCase {
+    func testANeteaseCardIsNeverLoadedIntoThePlayer() async throws {
+        let engine = FakeAudioPlayerEngine()
+        let controller = MusicPlaybackController(
+            engine: engine, resolver: StubStreamResolver(),
+            reporter: RecordingPlaybackReporter(), session: StubAudioSession()
+        )
+        controller.play(MusicFixtures.netease)
+        controller.tap(MusicFixtures.netease)
+        XCTAssertEqual(engine.loadedURLs, [])
+        XCTAssertEqual(controller.state, .idle)
+    }
+}
+
+private actor ScriptedMurmurAPIClient: MurmurAPIClient {
+    private(set) var calls: [String] = []
+    private var sharedTrack: MusicTrackAttachmentV1?
+    private var failing = false
+    private var room: ListenTogetherRoomSnapshotV1?
+
+    struct Unused: Error {}
+    struct Refused: Error {}
+
+    func setSharedTrack(_ track: MusicTrackAttachmentV1?) { sharedTrack = track }
+    func setFailing(_ value: Bool) { failing = value }
+
+    func resolveSharedMusic(
+        text: String, idempotencyKey: String
+    ) async throws -> MusicTrackAttachmentV1 {
+        calls.append("resolve")
+        guard !failing, let sharedTrack else { throw Refused() }
+        return sharedTrack
+    }
+
+    func createListenTogetherRoom(
+        initialTrack: MusicTrackAttachmentV1, idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        calls.append("create")
+        if failing { throw Refused() }
+        let snapshot = ListenTogetherRoomSnapshotV1(
+            roomHandle: "handle-1", state: .waitingForUser, currentTrack: initialTrack,
+            inviteURL: URL(string: "https://music.163.com/listen-together/invite/1"),
+            updatedAt: "2026-08-31T00:00:00Z"
+        )
+        room = snapshot
+        return snapshot
+    }
+
+    func currentListenTogetherRoom() async throws -> ListenTogetherRoomSnapshotV1? {
+        calls.append("current")
+        if failing { throw Refused() }
+        return room
+    }
+
+    func commandListenTogetherRoom(
+        handle: String, command: ListenTogetherCommand,
+        track: MusicTrackAttachmentV1?, idempotencyKey: String
+    ) async throws -> ListenTogetherCommandResultV1 {
+        calls.append("command:\(command.rawValue)")
+        if failing { throw Refused() }
+        let snapshot = ListenTogetherRoomSnapshotV1(
+            roomHandle: handle, state: .connected,
+            currentTrack: track ?? room?.currentTrack, userJoined: true,
+            updatedAt: "2026-08-31T00:00:01Z"
+        )
+        room = snapshot
+        return ListenTogetherCommandResultV1(status: .synchronized, room: snapshot)
+    }
+
+    func closeListenTogetherRoom(
+        handle: String,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        calls.append("close")
+        if failing { throw Refused() }
+        let snapshot = ListenTogetherRoomSnapshotV1(
+            roomHandle: handle, state: .ended, updatedAt: "2026-08-31T00:00:02Z"
+        )
+        room = nil
+        return snapshot
+    }
+
     func storedIdentity() async throws -> MurmurIdentity? { nil }
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity {
         throw Unused()

@@ -35,7 +35,8 @@ struct MusicCardView: View {
     let isOutgoing: Bool
     let playback: MusicCardPlayback
     let onPlay: () -> Void
-    let onOpenInAudius: () -> Void
+    let onOpenProvider: () -> Void
+    var onListenTogether: (() -> Void)?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var artworkSide: CGFloat = 56
@@ -61,24 +62,34 @@ struct MusicCardView: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                if playback != .unavailable { playButton }
+                if track.isAudius, playback != .unavailable { playButton }
             }
-            if playback == .unavailable {
+            if track.isAudius, playback == .unavailable {
                 // The card stays; only the sound is gone. Saying so beats a
                 // play button that does nothing.
                 Text("这首歌现在不可播放")
                     .font(MurmurTheme.body(.caption))
                     .foregroundStyle(isOutgoing ? MurmurTheme.onAccent.opacity(0.8) : MurmurTheme.coral)
             }
-            // Audius is where this came from and where it can be opened. Both
-            // are required of anyone using their catalogue.
-            Button(action: onOpenInAudius) {
-                Text("在 Audius 打开")
-                    .font(MurmurTheme.body(.caption2, weight: .medium))
-                    .foregroundStyle(isOutgoing ? MurmurTheme.onAccent : MurmurTheme.accentInk)
+            HStack(spacing: 14) {
+                Button(action: onOpenProvider) {
+                    Text(track.isNetease ? "在网易云打开" : "在 Audius 打开")
+                        .font(MurmurTheme.body(.caption2, weight: .medium))
+                        .foregroundStyle(isOutgoing ? MurmurTheme.onAccent : MurmurTheme.accentInk)
+                }
+                .buttonStyle(.plain)
+                .frame(minHeight: 44, alignment: .leading)
+
+                if track.isNetease, let onListenTogether {
+                    Button(action: onListenTogether) {
+                        Text("和 Murmur 一起听")
+                            .font(MurmurTheme.body(.caption2, weight: .semibold))
+                            .foregroundStyle(isOutgoing ? MurmurTheme.onAccent : MurmurTheme.accentInk)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(minHeight: 44, alignment: .leading)
+                }
             }
-            .buttonStyle(.plain)
-            .frame(minHeight: 44, alignment: .leading)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -95,9 +106,17 @@ struct MusicCardView: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { if playback != .unavailable { onPlay() } }
-        .accessibilityAction(named: "在 Audius 打开", onOpenInAudius)
+        .accessibilityAddTraits(track.isAudius ? .isButton : [])
+        .accessibilityAction {
+            if track.isAudius, playback != .unavailable { onPlay() }
+        }
+        .accessibilityAction(
+            named: track.isNetease ? "在网易云打开" : "在 Audius 打开",
+            onOpenProvider
+        )
+        .accessibilityAction(named: "和 Murmur 一起听") {
+            if track.isNetease { onListenTogether?() }
+        }
     }
 
     @ViewBuilder
@@ -151,12 +170,17 @@ struct MusicCardView: View {
     private var accessibilityLabel: String {
         let who = isOutgoing ? "你分享的歌曲" : "Murmur 分享的歌曲"
         let names = track.artists.joined(separator: "、")
-        let status = switch playback {
-        case .playing: "，正在播放"
-        case .paused: "，已暂停"
-        case .loading: "，正在载入"
-        case .unavailable: "，现在不可播放"
-        case .stopped: ""
+        let status: String
+        if track.isAudius {
+            status = switch playback {
+            case .playing: "，正在播放"
+            case .paused: "，已暂停"
+            case .loading: "，正在载入"
+            case .unavailable: "，现在不可播放"
+            case .stopped: ""
+            }
+        } else {
+            status = "，在网易云中播放"
         }
         return "\(who)，\(track.title)，\(names)\(status)"
     }

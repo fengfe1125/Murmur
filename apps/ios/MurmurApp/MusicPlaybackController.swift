@@ -158,6 +158,10 @@ final class MusicPlaybackController: ObservableObject {
 
     /// Start this song. Only ever called because somebody tapped it.
     func play(_ requested: MusicTrackAttachmentV1) {
+        // This player resolves Audius streams and feeds AVFoundation. A
+        // NetEase card is an external-app control surface; letting it reach
+        // this point would silently ask the wrong provider for the same id.
+        guard requested.isAudius else { return }
         if track?.id == requested.id, state == .paused {
             resume()
             return
@@ -181,6 +185,7 @@ final class MusicPlaybackController: ObservableObject {
     /// button under the finger was a pause button and pressing it must not
     /// throw the song away and fetch it again.
     func tap(_ requested: MusicTrackAttachmentV1) {
+        guard requested.isAudius else { return }
         if track?.id == requested.id, state.isActive {
             togglePlayPause()
         } else {

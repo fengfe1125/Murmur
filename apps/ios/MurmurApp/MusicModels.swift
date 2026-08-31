@@ -17,6 +17,9 @@ struct MusicTrackAttachmentV1: Codable, Equatable, Identifiable, Sendable {
     let explicit: Bool?
 
     var id: String { "\(provider):\(trackID)" }
+    var providerKind: MusicProvider? { MusicProvider(rawValue: provider) }
+    var isAudius: Bool { providerKind == .audius }
+    var isNetease: Bool { providerKind == .netease }
 
     init(
         version: Int = Self.currentVersion,
@@ -51,6 +54,14 @@ struct MusicTrackAttachmentV1: Codable, Equatable, Identifiable, Sendable {
         case durationSeconds = "duration_seconds"
         case explicit
     }
+}
+
+/// Providers understood by this client. The wire stays a string so an older
+/// build can preserve a future provider's card instead of failing to decode
+/// the whole transcript.
+enum MusicProvider: String, Codable, Sendable {
+    case audius
+    case netease
 }
 
 struct MusicFeatureConfiguration: Equatable, Sendable {
@@ -101,11 +112,48 @@ struct MusicFeatureAvailability: Codable, Equatable, Sendable {
     let enabled: Bool
     let provider: String
     let playbackReporting: Bool
+    let providers: [MusicProviderCapabilityV1]
+    let listenTogether: ListenTogetherCapabilityV1?
+
+    init(
+        enabled: Bool,
+        provider: String,
+        playbackReporting: Bool,
+        providers: [MusicProviderCapabilityV1] = [],
+        listenTogether: ListenTogetherCapabilityV1? = nil
+    ) {
+        self.enabled = enabled
+        self.provider = provider
+        self.playbackReporting = playbackReporting
+        self.providers = providers
+        self.listenTogether = listenTogether
+    }
 
     enum CodingKeys: String, CodingKey {
-        case enabled, provider
+        case enabled, provider, providers
         case playbackReporting = "playback_reporting"
+        case listenTogether = "listen_together"
     }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try values.decode(Bool.self, forKey: .enabled)
+        provider = try values.decode(String.self, forKey: .provider)
+        playbackReporting = try values.decode(Bool.self, forKey: .playbackReporting)
+        providers = try values.decodeIfPresent([MusicProviderCapabilityV1].self, forKey: .providers) ?? []
+        listenTogether = try values.decodeIfPresent(ListenTogetherCapabilityV1.self, forKey: .listenTogether)
+    }
+}
+
+struct MusicProviderCapabilityV1: Codable, Equatable, Sendable {
+    let id: String
+    let capabilities: [String]
+}
+
+struct ListenTogetherCapabilityV1: Codable, Equatable, Sendable {
+    let enabled: Bool
+    let provider: String
+    let commands: [String]
 }
 
 struct AudiusUser: Codable, Equatable, Sendable {

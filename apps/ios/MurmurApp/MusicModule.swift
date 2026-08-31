@@ -73,6 +73,10 @@ final class MusicModule: ObservableObject {
     /// Mirrored off the player so one observer covers both: a screen that holds
     /// the module sees playback change without also subscribing to the player.
     @Published private(set) var nowPlaying = MusicNowPlaying.none
+    @Published private(set) var isNeteaseCatalogAvailable = false
+    @Published private(set) var isListenTogetherAvailable = false
+
+    let netease: NeteaseMusicModel
 
     let account: AudiusAccountModel
     let player: MusicPlaybackController
@@ -91,6 +95,7 @@ final class MusicModule: ObservableObject {
         configuration: MusicFeatureConfiguration? = .from()
     ) {
         self.isConfigured = configuration != nil
+        self.netease = NeteaseMusicModel(api: api)
         let client = AudiusClient(configuration: configuration ?? .unconfigured)
         let transport = MurmurPlaybackTransport(api: api)
         self.library = client
@@ -112,6 +117,12 @@ final class MusicModule: ObservableObject {
         let allowed = isConfigured && availability.enabled
             && availability.provider == "audius"
         isAvailable = allowed
+        isNeteaseCatalogAvailable = availability.providers.contains {
+            $0.id == MusicProvider.netease.rawValue
+                && $0.capabilities.contains("resolve_shared")
+        }
+        isListenTogetherAvailable = availability.listenTogether?.enabled == true
+            && availability.listenTogether?.provider == MusicProvider.netease.rawValue
         let reporting = allowed && availability.playbackReporting
         // Ordered inside one task: whatever the player has been holding since
         // launch is only now allowed to go — or to be dropped.

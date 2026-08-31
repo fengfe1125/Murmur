@@ -321,6 +321,22 @@ protocol MurmurAPIClient: Sendable {
     func updatePreferences(_ preferences: MurmurPreferences) async throws
     func musicAvailability() async throws -> MusicFeatureAvailability
     func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws
+    func resolveSharedMusic(text: String, idempotencyKey: String) async throws -> MusicTrackAttachmentV1
+    func createListenTogetherRoom(
+        initialTrack: MusicTrackAttachmentV1,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1
+    func currentListenTogetherRoom() async throws -> ListenTogetherRoomSnapshotV1?
+    func commandListenTogetherRoom(
+        handle: String,
+        command: ListenTogetherCommand,
+        track: MusicTrackAttachmentV1?,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherCommandResultV1
+    func closeListenTogetherRoom(
+        handle: String,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1
     func resetLocalIdentity() async throws
     func deleteAccount() async throws
 }
@@ -333,6 +349,35 @@ extension MurmurAPIClient {
     }
 
     func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws {}
+
+    func resolveSharedMusic(text: String, idempotencyKey: String) async throws -> MusicTrackAttachmentV1 {
+        throw MurmurFailure(code: "netease_unavailable", message: "网易云音乐功能尚未开启。", retryable: false)
+    }
+
+    func createListenTogetherRoom(
+        initialTrack: MusicTrackAttachmentV1,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        throw MurmurFailure(code: "listen_together_unavailable", message: "一起听功能尚未开启。", retryable: false)
+    }
+
+    func currentListenTogetherRoom() async throws -> ListenTogetherRoomSnapshotV1? { nil }
+
+    func commandListenTogetherRoom(
+        handle: String,
+        command: ListenTogetherCommand,
+        track: MusicTrackAttachmentV1?,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherCommandResultV1 {
+        throw MurmurFailure(code: "listen_together_unavailable", message: "一起听功能尚未开启。", retryable: false)
+    }
+
+    func closeListenTogetherRoom(
+        handle: String,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        throw MurmurFailure(code: "listen_together_unavailable", message: "一起听功能尚未开启。", retryable: false)
+    }
 
     /// Compatibility seam for clients and test doubles that predate song
     /// attachments.  Real transports override this requirement; old callers

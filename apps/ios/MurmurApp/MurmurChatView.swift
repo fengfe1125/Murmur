@@ -483,6 +483,7 @@ private struct MomentWorkbench: View {
     @ObservedObject var model: MurmurSessionModel
     @Binding var showCamera: Bool
     @ObservedObject var music: MusicModule
+    @ObservedObject private var netease: NeteaseMusicModel
     @State private var showPhotoSource = false
     @State private var showMusicPicker = false
     @State private var openPhoto: MurmurPhotoPreview?
@@ -512,6 +513,14 @@ private struct MomentWorkbench: View {
     @Environment(\.murmurTabBarClearance) private var tabBarClearance
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openURL) private var openURL
+
+    init(model: MurmurSessionModel, showCamera: Binding<Bool>, music: MusicModule) {
+        self.model = model
+        self._showCamera = showCamera
+        self.music = music
+        self.netease = music.netease
+    }
 
     private var keyboardSupplement: CGFloat {
         MurmurKeyboardClearance.supplemental(
@@ -539,7 +548,14 @@ private struct MomentWorkbench: View {
                 composerFocused = false
             },
             nowPlaying: music.nowPlaying,
-            onPlayMusic: { music.player.tap($0) }
+            onPlayMusic: { music.player.tap($0) },
+            onListenTogether: music.isListenTogetherAvailable ? { track in
+                Task {
+                    if let inviteURL = await netease.createRoom(for: track) {
+                        openURL(inviteURL)
+                    }
+                }
+            } : nil
         )
             // A tap anywhere off the menu closes it, the way a popover does.
             // The catcher covers the transcript and nothing else: over the
@@ -588,6 +604,18 @@ private struct MomentWorkbench: View {
             // arrives — on the keyboard's own curve, not SwiftUI's.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
+                    if let room = netease.room, room.isActive {
+                        NeteaseListenTogetherCard(
+                            room: room,
+                            commandStatus: netease.commandStatus,
+                            isChanging: netease.isChangingRoom,
+                            onCommand: { command in Task { await netease.command(command) } },
+                            onOpen: { if let inviteURL = room.inviteURL { openURL(inviteURL) } },
+                            onClose: { Task { await netease.closeRoom() } }
+                        )
+                        .padding(.horizontal, MurmurTheme.pageInset)
+                        .padding(.bottom, 6)
+                    }
                     if let draftFailure = model.draftFailure {
                         DraftFailureLine(message: draftFailure)
                             .transition(.opacity)
@@ -602,6 +630,13 @@ private struct MomentWorkbench: View {
                         // an Audius registration, and Murmur's server says this
                         // account may use music at all.
                         onPickMusic: music.isAvailable ? { showMusicPicker = true } : nil,
+                        onSubmitText: music.isNeteaseCatalogAvailable ? { text in
+                            guard model.draftPhoto == nil,
+                                  netease.recognizePastedText(text)
+                            else { return false }
+                            model.draftText = ""
+                            return true
+                        } : nil,
                         focused: $composerFocused
                     )
                 }
@@ -621,6 +656,24 @@ private struct MomentWorkbench: View {
                 account: music.account,
                 onSend: { model.submitMusic($0) }
             )
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { netease.preview != nil },
+                set: { if !$0, netease.preview != nil { netease.discardPreview() } }
+            )
+        ) {
+            if let preview = netease.preview {
+                NeteaseSharedMusicPreviewView(
+                    preview: preview,
+                    onConfirm: {
+                        guard let track = netease.confirmPreview() else { return }
+                        model.submitMusic(track)
+                    },
+                    onCancel: { netease.discardPreview() }
+                )
+                .presentationDetents([.medium])
+            }
         }
         .fullScreenCover(item: $openPhoto) { photo in
             MurmurPhotoLightbox(url: photo.url)
@@ -644,9 +697,28 @@ private struct MomentWorkbench: View {
         .task {
             await model.loadTranscript()
             await model.checkProactive()
+            if music.isNeteaseCatalogAvailable {
+                netease.loadPendingShareDraft()
+            }
+            if music.isListenTogetherAvailable {
+                await netease.refreshRoom()
+            }
 #if DEBUG
             stubPhotoIfAsked()
 #endif
+        }
+        .task(id: netease.room?.roomHandle) {
+            while !Task.isCancelled,
+                  music.isListenTogetherAvailable,
+                  netease.room?.isActive == true
+            {
+                do {
+                    try await Task.sleep(for: .seconds(5))
+                } catch {
+                    return
+                }
+                await netease.refreshRoom()
+            }
         }
         // The keyboard is loaded before it is wanted, not when the field is
         // tapped.  Once on arrival, and again on the way back from the
@@ -655,7 +727,46 @@ private struct MomentWorkbench: View {
         .onChange(of: scenePhase, initial: false) { _, phase in
             guard phase == .active else { return }
             warmKeyboard()
-            Task { await model.checkProactive() }
+            Task {
+                await model.checkProactive()
+                if music.isNeteaseCatalogAvailable {
+                    netease.loadPendingShareDraft()
+                }
+                if music.isListenTogetherAvailable {
+                    await netease.refreshRoom()
+                }
+            }
+        }
+        .onChange(of: music.isNeteaseCatalogAvailable, initial: true) { _, enabled in
+            guard enabled else { return }
+            netease.loadPendingShareDraft()
+        }
+        .onChange(of: music.isListenTogetherAvailable, initial: true) { _, enabled in
+            guard enabled else { return }
+            Task { await netease.refreshRoom() }
+        }
+        .overlay(alignment: .top) {
+            if netease.isResolvingShare {
+                Label("正在识别网易云歌曲…", systemImage: "music.note")
+                    .font(MurmurTheme.body(.footnote, weight: .medium))
+                    .foregroundStyle(MurmurTheme.ink)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(MurmurTheme.raisedPaper, in: Capsule())
+                    .overlay { Capsule().stroke(MurmurTheme.rule, lineWidth: 1) }
+                    .padding(.top, 8)
+            }
+        }
+        .alert(
+            "网易云音乐",
+            isPresented: Binding(
+                get: { netease.failureMessage != nil },
+                set: { if !$0 { netease.clearFailure() } }
+            )
+        ) {
+            Button("知道了") { netease.clearFailure() }
+        } message: {
+            Text(netease.failureMessage ?? "")
         }
         .onChange(of: composerFocused, initial: true) { _, focused in
             keyboard.focusDidChange(focused)
@@ -716,6 +827,9 @@ private struct MomentComposer: View {
     let onFocus: () -> Void
     let onPickFromLibrary: () -> Void
     var onPickMusic: (() -> Void)?
+    /// Returns true when the text was consumed by an attachment flow (for
+    /// example a pasted NetEase link that must be previewed before sending).
+    var onSubmitText: ((String) -> Bool)?
     /// Owned by the workbench, so tapping the conversation can drop focus in the
     /// same turn the tap is seen rather than a pass later.
     @FocusState.Binding var focused: Bool
@@ -875,6 +989,7 @@ private struct MomentComposer: View {
     /// conversation.
     private func submit() {
         guard model.canSubmit else { return }
+        if onSubmitText?(model.draftText) == true { return }
         model.submit()
     }
 }

@@ -206,6 +206,88 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         )
     }
 
+    func resolveSharedMusic(text: String, idempotencyKey: String) async throws -> MusicTrackAttachmentV1 {
+        let body = try encoder.encode(ResolveSharedMusicRequest(
+            text: text,
+            idempotencyKey: idempotencyKey
+        ))
+        let response: ResolveSharedMusicResponseV1 = try await send(
+            path: "/v1/music/resolve-shared",
+            method: "POST",
+            body: body,
+            contentType: "application/json",
+            authenticated: true
+        )
+        return response.track
+    }
+
+    func createListenTogetherRoom(
+        initialTrack: MusicTrackAttachmentV1,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        let body = try encoder.encode(CreateListenTogetherRoomRequest(
+            initialTrack: initialTrack,
+            idempotencyKey: idempotencyKey
+        ))
+        return try await send(
+            path: "/v1/listen-together/rooms",
+            method: "POST",
+            body: body,
+            contentType: "application/json",
+            authenticated: true
+        )
+    }
+
+    func currentListenTogetherRoom() async throws -> ListenTogetherRoomSnapshotV1? {
+        do {
+            return try await send(
+                path: "/v1/listen-together/rooms/current",
+                method: "GET",
+                body: Data(),
+                contentType: nil,
+                authenticated: true
+            )
+        } catch let failure as MurmurFailure where failure.code == "room_not_found" {
+            return nil
+        }
+    }
+
+    func commandListenTogetherRoom(
+        handle: String,
+        command: ListenTogetherCommand,
+        track: MusicTrackAttachmentV1?,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherCommandResultV1 {
+        let body = try encoder.encode(ListenTogetherCommandRequest(
+            command: command,
+            track: track,
+            idempotencyKey: idempotencyKey
+        ))
+        return try await send(
+            path: "/v1/listen-together/rooms/\(pathComponent(handle))/commands",
+            method: "POST",
+            body: body,
+            contentType: "application/json",
+            authenticated: true
+        )
+    }
+
+    func closeListenTogetherRoom(
+        handle: String,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        let body = try encoder.encode(CloseListenTogetherRoomRequest(
+            idempotencyKey: idempotencyKey
+        ))
+        return try await send(
+            path: "/v1/listen-together/rooms/\(pathComponent(handle))",
+            method: "DELETE",
+            body: body,
+            contentType: "application/json",
+            authenticated: true
+        )
+    }
+
     func updateDevice(apnsToken: String?, environment: String, timezone: String, deviceName: String) async throws {
         let body = try encoder.encode(DeviceRequest(
             apnsToken: apnsToken,
@@ -675,6 +757,45 @@ private struct ChallengeRequest: Encodable {
     let purpose: String
     let keyID: String?
     enum CodingKeys: String, CodingKey { case purpose; case keyID = "key_id" }
+}
+
+private struct ResolveSharedMusicRequest: Encodable {
+    let text: String
+    let idempotencyKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case idempotencyKey = "idempotency_key"
+    }
+}
+
+private struct CreateListenTogetherRoomRequest: Encodable {
+    let initialTrack: MusicTrackAttachmentV1
+    let idempotencyKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case initialTrack = "initial_track"
+        case idempotencyKey = "idempotency_key"
+    }
+}
+
+private struct ListenTogetherCommandRequest: Encodable {
+    let command: ListenTogetherCommand
+    let track: MusicTrackAttachmentV1?
+    let idempotencyKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case command, track
+        case idempotencyKey = "idempotency_key"
+    }
+}
+
+private struct CloseListenTogetherRoomRequest: Encodable {
+    let idempotencyKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case idempotencyKey = "idempotency_key"
+    }
 }
 
 private struct EnrollmentRequest: Encodable {

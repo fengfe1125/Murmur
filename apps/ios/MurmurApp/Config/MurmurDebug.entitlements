@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Deliberately empty.
-
   A free personal team cannot provision Push Notifications or App Attest, so
   declaring either makes signing fail outright and no debug build reaches a
   phone.  Debug does not need them: the shared development token stands in for
@@ -11,5 +9,12 @@
   MurmurRelease.entitlements still declares both for the production build.
 -->
 <plist version="1.0">
-<dict/>
+<dict>
+	<!-- Shared only with Murmur's own share extension; contains one pending,
+	     untrusted music-link draft and no account credential. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.sakura.Murmur</string>
+	</array>
+</dict>
 </plist>
