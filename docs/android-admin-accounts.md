@@ -1,5 +1,7 @@
 # 安卓上线所需的账号与管理员概念
 
+> 状态：现状记录｜适用：安卓上线前的外部账号准备｜核验：2026-08-30｜依据：Google Firebase 与 Play Console 的账号要求、Murmur 现行运维口径；不代表任何账号已申请或已获批
+
 Murmur 的安卓适配（`docs/android-adaptation-plan.md`）卡在两类外部账号上。先把
 "管理员"这个概念拆清楚：Murmur 本身**没有管理员账号**，需要申请的是 Google 侧
 的 Firebase 项目与 Play 开发者账号。
