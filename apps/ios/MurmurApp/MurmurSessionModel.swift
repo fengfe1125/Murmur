@@ -24,6 +24,12 @@ final class MurmurSessionModel: ObservableObject {
     /// The scrollback the person reads.  Held here rather than derived from
     /// `bubbles`, which only ever describes the moment in flight.
     @Published private(set) var messages: [MurmurMessage] = []
+    /// Whether the scrollback on disk has been read back yet.
+    ///
+    /// The screen has to be able to tell a restore from an arrival: rows read
+    /// back off disk were already there, so they must not animate in, and the
+    /// opening line must not be shown over a history that is still being read.
+    @Published private(set) var transcriptRestored = false
     /// Why an outgoing row never landed, keyed by that row.
     ///
     /// A send that failed belongs to the line the person wrote, not to the
@@ -109,6 +115,12 @@ final class MurmurSessionModel: ObservableObject {
     // ---- Transcript ---------------------------------------------------------
 
     func loadTranscript() async {
+        // Set on every path out of here — a second call that finds the
+        // scrollback already in memory included — because the screen holds its
+        // entrance animations back until it is true.  Set in the same turn as
+        // the rows themselves, so the pass that commits them is the pass that
+        // knows they are a restore.
+        defer { transcriptRestored = true }
         guard messages.isEmpty else { return }
         messages = await transcriptStore.load()
     }
@@ -892,9 +904,35 @@ final class MurmurSessionModel: ObservableObject {
             }
             move = proactive.move
             scene = proactive.scene
+            // A send already on the wire keeps its own phase; a proactive
+            // message arriving must not make it look finished.  Settled before
+            // the bubbles land: the chrome should not wait out the pacing
+            // below to say the connection is good.
+            if !isRunning && queue.isEmpty {
+                phase = bubbles.isEmpty ? .quiet : .complete
+            }
+            connection = .connected
             // A message Murmur sent on its own belongs in the scrollback like
             // any other; without this it only ever existed in the notification.
+            //
+            // They land on the same clock a streamed reply lands on: the first
+            // at once — it was written before the app was even open — and each
+            // one after it held back for roughly the time it would take to type
+            // it.  Appended in a single pass they arrived as one block in one
+            // frame, and three bubbles rising together is a machine emptying a
+            // buffer rather than somebody saying three things.  Paced with a
+            // sleep of its own rather than through `pace(for:)`, which counts
+            // from `lastBubbleAt` — that clock belongs to a reply that may be
+            // streaming right now.
+            var isFirstArrival = true
             for bubble in bubbles where !messages.contains(where: { $0.id == bubble.id }) {
+                if !isFirstArrival {
+                    let beat = bubblePacing.delay(for: bubble.text)
+                    // Cancellation takes the theatre away and nothing else:
+                    // what is left still belongs in the scrollback.
+                    if beat > 0 { try? await Task.sleep(for: .seconds(beat)) }
+                }
+                isFirstArrival = false
                 append(.init(
                     id: bubble.id,
                     author: .murmur,
@@ -902,12 +940,8 @@ final class MurmurSessionModel: ObservableObject {
                     momentID: proactive.momentID
                 ))
             }
-            // A send already on the wire keeps its own phase; a proactive
-            // message arriving must not make it look finished.
-            if !isRunning && queue.isEmpty {
-                phase = bubbles.isEmpty ? .quiet : .complete
-            }
-            connection = .connected
+            // The acknowledgement says the message has been shown, so it goes
+            // after the last bubble has actually landed.
             try await api.acknowledge(momentID: proactive.momentID, reply: nil)
         } catch {
             if expectedMomentID != nil {

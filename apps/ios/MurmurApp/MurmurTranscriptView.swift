@@ -226,7 +226,6 @@ private struct MessageRow: View {
     let onMarkFrame: (CGRect) -> Void
     let onAsk: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var appeared = false
 
     private var isOutgoing: Bool { message.author == .you }
 
@@ -324,13 +323,26 @@ private struct MessageRow: View {
             }
             if !isOutgoing { Spacer(minLength: 56) }
         }
-        // Entrance: rise and fade from the speaker's side.
-        .opacity(appeared || reduceMotion ? 1 : 0)
-        .offset(y: appeared || reduceMotion ? 0 : 10)
-        .onAppear {
-            guard !reduceMotion, !appeared else { appeared = true; return }
-            withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) { appeared = true }
-        }
+        // Entrance: rise and fade, on whatever animation the insertion itself
+        // is running under rather than on a spring of the row's own.
+        //
+        // It was `onAppear` driving that spring, and in a lazy stack that is
+        // the wrong signal — `onAppear` fires when the row is built, not when
+        // the message arrives.  A screenful of restored history therefore all
+        // rose at once at launch, against a scroll that was animating at the
+        // same time; rows built mid-scroll started wherever the scroll had got
+        // to; and coming back down through the history made old bubbles fade in
+        // as though they were new.  A transition runs only when the insertion
+        // lands inside an animated transaction: a message arriving does, a row
+        // being built under a moving finger does not.
+        .transition(
+            reduceMotion
+                ? .opacity
+                : .asymmetric(
+                    insertion: .offset(y: 10).combined(with: .opacity),
+                    removal: .opacity
+                )
+        )
         // The mark arriving widens the row, so it fades in rather than
         // snapping — and under Reduce Motion it simply is there.
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: sendFailure)
@@ -407,6 +419,13 @@ struct MurmurTranscriptView: View {
     @State private var questionHeight: CGFloat = 140
     /// The viewport, for keeping the card inside the page.
     @State private var transcriptSize: CGSize = .zero
+    /// True until the scrollback read off disk has been laid out once.
+    ///
+    /// While it is set the screen does not animate at all: the rows arriving
+    /// are a restore, not an arrival, and the whole first second of the app
+    /// used to be an insertion spring, a row-by-row entrance and an animated
+    /// scroll all reaching for the same pixels at once.
+    @State private var isRestoring = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var showsTyping: Bool { model.isAwaitingReply }
@@ -421,7 +440,12 @@ struct MurmurTranscriptView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    if model.messages.isEmpty && !showsTyping {
+                    // Not until the scrollback has been read back: that read
+                    // is asynchronous, and shown before it lands the opening
+                    // line is a screen-high view that the history then has to
+                    // shove out of the way — the first thing the app showed
+                    // was the wrong screen collapsing.
+                    if model.messages.isEmpty && !showsTyping && model.transcriptRestored {
                         EmptyTranscript()
                             // The transcript hangs from the bottom edge, so the
                             // opening line needs a screen of its own to sit in
@@ -494,7 +518,15 @@ struct MurmurTranscriptView: View {
                 isFocused: keyboardIsFocused,
                 dismiss: onDismissKeyboard
             )
-            .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.messages.count)
+            // The one clock the rows move on — each row's entrance transition
+            // runs under this.  Nothing at all while the scrollback is still
+            // being read back: what is on disk was already there.  Softer than
+            // the spring it replaces, because that overshoot sat on top of a
+            // row that was fading in at the same time.
+            .animation(
+                isRestoring ? nil : .spring(response: 0.44, dampingFraction: 0.9),
+                value: model.messages.count
+            )
             .animation(.easeInOut(duration: 0.22), value: showsTyping)
             // The draft-photo reserve arrives and leaves on the same spring as
             // the tile it makes room for, so the two move as one piece.
@@ -502,7 +534,17 @@ struct MurmurTranscriptView: View {
                 .spring(response: 0.32, dampingFraction: 0.86),
                 value: model.draftPhoto != nil || model.isPreparingPhoto
             )
-            .onChange(of: model.messages.count) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: model.messages.count) { _, _ in
+                // The restore is not a journey: the newest line is simply
+                // where the transcript opens.  Animating the way down there
+                // put a second clock on the pixels the insertion was already
+                // moving, and those two fighting is what jerked.
+                guard !isRestoring else {
+                    proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                    return
+                }
+                scrollToBottom(proxy)
+            }
             .onChange(of: showsTyping) { _, _ in scrollToBottom(proxy) }
             // One signal, one animation.  The re-pin below already carries
             // the conversation along as the keyboard changes the room, in
@@ -534,6 +576,14 @@ struct MurmurTranscriptView: View {
             }
             .onScrollPhaseChange { _, phase in
                 scrollPhase = phase
+            }
+            // Going live: one turn after the restored rows commit.  The pass
+            // that puts them on screen is the pass that must not animate, and
+            // a hop through the main actor lands after it — so the restore is
+            // silent and the very next thing to arrive is not.
+            .onChange(of: model.transcriptRestored, initial: true) { _, restored in
+                guard restored, isRestoring else { return }
+                Task { @MainActor in isRestoring = false }
             }
             .onAppear {
                 proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
