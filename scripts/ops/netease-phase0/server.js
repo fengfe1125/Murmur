@@ -72,7 +72,26 @@ function writePrivateFile(filePath, contents) {
   fs.chmodSync(filePath, 0o600);
 }
 
-function createServer({ phase0, capability, publicDirectory }) {
+function createFaultableApi(api) {
+  let faultEnabled = false;
+  const guarded = new Proxy(api, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function") return value;
+      return (...args) => {
+        if (faultEnabled) return Promise.reject(new Error("upstream_network_fault"));
+        return value.apply(target, args);
+      };
+    },
+  });
+  return {
+    api: guarded,
+    set(enabled) { faultEnabled = enabled === true; },
+    get enabled() { return faultEnabled; },
+  };
+}
+
+function createServer({ phase0, capability, publicDirectory, faultController = null }) {
   const prefix = `/${capability}`;
   let mutation = Promise.resolve();
   const serialize = (operation) => {
@@ -121,6 +140,11 @@ function createServer({ phase0, capability, publicDirectory }) {
         result = await serialize(() => phase0.command(body));
       } else if (request.method === "POST" && route === "/api/room/end") {
         result = await serialize(() => phase0.endRoom());
+      } else if (request.method === "POST" && route === "/api/fault/upstream" && faultController) {
+        const body = await readJson(request);
+        if (typeof body.enabled !== "boolean") throw new Phase0Error("invalid_request");
+        faultController.set(body.enabled);
+        result = { enabled: faultController.enabled };
       } else {
         sendJson(response, 404, { error: "not_found" });
         return;
@@ -139,6 +163,7 @@ async function main() {
   const host = argument("host", "127.0.0.1");
   const port = Number(argument("port", "18763"));
   const runtimeDirectoryArg = argument("runtime-dir", "");
+  const allowFaultInjection = argument("allow-fault-injection", "0") === "1";
   if (!apiRootArg || !stateDirectoryArg || host !== "127.0.0.1" ||
       !Number.isInteger(port) || port < 1024 || port > 65535) {
     throw new Error("safe --api-root, --state-dir, --host 127.0.0.1 and --port are required");
@@ -149,11 +174,12 @@ async function main() {
   const apiPackage = path.join(apiRoot, "package.json");
   if (!fs.existsSync(apiPackage)) throw new Error("NetEase API root is missing");
   const apiRequire = createRequire(apiPackage);
-  const api = apiRequire("./main.js");
+  const upstreamApi = apiRequire("./main.js");
+  const faultController = createFaultableApi(upstreamApi);
   const QRCode = apiRequire("qrcode");
   const capability = crypto.randomBytes(24).toString("base64url");
   const phase0 = new NeteasePhase0({
-    api,
+    api: faultController.api,
     qrToSvg: (value) => QRCode.toString(value, {
       type: "svg", errorCorrectionLevel: "M", margin: 2,
     }),
@@ -161,7 +187,9 @@ async function main() {
   });
   const server = createServer({
     phase0, capability, publicDirectory: path.join(__dirname, "public"),
+    faultController: allowFaultInjection ? faultController : null,
   });
+  await phase0.closeStaleRemoteRoom();
   server.requestTimeout = 15_000;
   server.headersTimeout = 17_000;
   let readyFile = null;
@@ -204,4 +232,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, readJson, sendJson, writePrivateFile };
+module.exports = { createFaultableApi, createServer, readJson, sendJson, writePrivateFile };

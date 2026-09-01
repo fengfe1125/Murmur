@@ -22,7 +22,11 @@ function roomEnabled(enabled) {
 
 function renderRoom(room) {
   if (room.state !== "active") {
-    byId("room-state").textContent = room.state === "ended" ? "房间已结束" : "房间未创建";
+    const labels = {
+      ended: "房间已结束",
+      failed: `房间已失败：${room.errorCode || "unknown"}`,
+    };
+    byId("room-state").textContent = labels[room.state] || "房间未创建";
     byId("invite").hidden = true;
     byId("invite-qr").hidden = true;
     roomEnabled(false);
@@ -41,6 +45,14 @@ async function renderInviteQr() {
   const result = await request("/api/room/invite-qr");
   byId("invite-qr").innerHTML = result.qrSvg;
   byId("invite-qr").hidden = false;
+}
+
+async function loadCurrentRoom() {
+  try {
+    const room = await request("/api/room/status");
+    renderRoom(room);
+    if (room.state === "active") await renderInviteQr();
+  } catch (error) { showError(error); }
 }
 
 function showError(error) {
@@ -82,7 +94,10 @@ byId("room-create").addEventListener("click", async () => {
       body: JSON.stringify({ songIds, initialSongId: byId("initial-song-id").value.trim() }),
     }));
     await renderInviteQr();
-  } catch (error) { showError(error); }
+  } catch (error) {
+    if (error.message === "room_already_active") await loadCurrentRoom();
+    else showError(error);
+  }
 });
 
 byId("playlist-replace").addEventListener("click", async () => {
@@ -125,3 +140,4 @@ byId("end").addEventListener("click", async () => {
 });
 
 pollLogin();
+loadCurrentRoom();

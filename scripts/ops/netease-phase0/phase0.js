@@ -8,6 +8,10 @@ const SESSION_COOKIE_NAMES = new Set([
 ]);
 const COMMANDS = new Set(["PLAY", "PAUSE", "NEXT", "PREVIOUS", "GOTO"]);
 
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 class Phase0Error extends Error {
   constructor(code, message = code) {
     super(message);
@@ -107,16 +111,23 @@ class NeteasePhase0 {
     sessionPath,
     now = () => Date.now(),
     monotonicNow = () => Number(process.hrtime.bigint() / 1_000_000n),
+    heartbeatFailureTimeoutMs = 10 * 60 * 1000,
   }) {
+    if (!Number.isInteger(heartbeatFailureTimeoutMs) || heartbeatFailureTimeoutMs < 1_000) {
+      throw new Error("heartbeatFailureTimeoutMs must be at least one second");
+    }
     this.api = api;
     this.qrToSvg = qrToSvg;
     this.sessionPath = sessionPath;
     this.now = now;
     this.monotonicNow = monotonicNow;
+    this.heartbeatFailureTimeoutMs = heartbeatFailureTimeoutMs;
     this.cookies = readSecret(sessionPath);
     this.qrKey = null;
     this.room = null;
     this.heartbeatTimer = null;
+    this.heartbeatFailureSince = null;
+    this.lastTerminalState = null;
   }
 
   cookieHeader() {
@@ -147,7 +158,9 @@ class NeteasePhase0 {
 
   async loginStatus() {
     if (this.cookies) {
-      if (await this.verifyLogin()) return { state: "authenticated" };
+      const login = await this.checkLoginState();
+      if (!login.reachable) throw new Phase0Error("login_status_unreachable");
+      if (login.authenticated) return { state: "authenticated" };
       this.clearSession();
       return { state: "expired" };
     }
@@ -167,24 +180,57 @@ class NeteasePhase0 {
     });
     this.cookies = cookies;
     this.qrKey = null;
-    if (!(await this.verifyLogin())) {
-      this.cookies = null;
+    const login = await this.checkLoginState();
+    if (!login.reachable) throw new Phase0Error("login_verification_unreachable");
+    if (!login.authenticated) {
+      this.clearSession();
       throw new Phase0Error("login_verification_failed");
     }
     return { state: "authenticated" };
   }
 
   async verifyLogin() {
-    if (!this.cookies) return false;
+    return (await this.checkLoginState()).authenticated;
+  }
+
+  async checkLoginState() {
+    if (!this.cookies) return { reachable: true, authenticated: false };
     try {
       const result = await this.api.login_status({
         cookie: this.cookieHeader(), timestamp: this.now(), timeout: 10_000,
       });
       const body = responseBody(result);
-      return Number(body?.data?.code) === 200 && Boolean(body?.data?.profile?.userId);
+      return {
+        reachable: true,
+        authenticated: Number(body?.data?.code) === 200 && Boolean(body?.data?.profile?.userId),
+      };
     } catch {
-      return false;
+      return { reachable: false, authenticated: false };
     }
+  }
+
+  async closeStaleRemoteRoom() {
+    if (!this.cookies) return { state: "not_authenticated" };
+    const login = await this.checkLoginState();
+    if (!login.reachable) return { state: "unreachable" };
+    if (!login.authenticated) {
+      this.clearSession();
+      return { state: "expired" };
+    }
+    const result = await this.api.listentogether_status({
+      cookie: this.cookieHeader(), timeout: 10_000,
+    });
+    const body = requireCode(result, "stale_room_status");
+    const roomId = body?.data?.roomInfo?.roomId;
+    if (!body?.data?.inRoom || (typeof roomId !== "string" && typeof roomId !== "number")) {
+      return { state: "clear" };
+    }
+    const ended = await this.api.listentogether_end({
+      roomId: String(roomId), cookie: this.cookieHeader(), timeout: 10_000,
+    });
+    const endedBody = requireCode(ended, "stale_room_end");
+    if (endedBody?.data?.success !== true) throw new Phase0Error("stale_room_end_unconfirmed");
+    return { state: "stale_room_ended" };
   }
 
   async accountId() {
@@ -212,6 +258,8 @@ class NeteasePhase0 {
       playStatus: "PLAY", progress: 0, playStartedAt: this.monotonicNow(),
       createdAt: this.now(),
     };
+    this.lastTerminalState = null;
+    this.heartbeatFailureSince = null;
     try {
       await this.replacePlaylist();
       await this.sendPlayCommand("GOTO", initial);
@@ -238,7 +286,7 @@ class NeteasePhase0 {
   }
 
   publicRoom(extra = {}) {
-    if (!this.room) return { state: "idle", ...extra };
+    if (!this.room) return { ...(this.lastTerminalState || { state: "idle" }), ...extra };
     const currentSongId = this.room.playlist[this.room.currentIndex];
     const invite = new URL("https://st.music.163.com/listen-together/share/");
     invite.searchParams.set("songId", currentSongId);
@@ -319,8 +367,30 @@ class NeteasePhase0 {
       await this.sendPlayCommand(action, target);
     }
     room.currentIndex = targetIndex;
-    await this.sendHeartbeat();
-    return this.publicRoom({ commandAccepted: true });
+    if (!(await this.confirmRemoteCommand(target, room.playStatus))) {
+      throw new Phase0Error("command_sync_timeout");
+    }
+    return this.publicRoom({ commandAccepted: true, synchronized: true });
+  }
+
+  async confirmRemoteCommand(targetSongId, playStatus) {
+    const started = this.monotonicNow();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = await this.api.listentogether_sync_playlist_get({
+        roomId: this.requireRoom().roomId,
+        cookie: this.cookieHeader(), timeout: 1_800,
+      });
+      const body = requireCode(result, "command_status");
+      this.applyRemotePlaylist(body);
+      const command = body?.data?.playCommand;
+      if (String(command?.targetSongId) === String(targetSongId) &&
+          String(command?.playStatus || "").toUpperCase() === playStatus) {
+        return true;
+      }
+      if (this.monotonicNow() - started >= 1_800) break;
+      await delay(100);
+    }
+    return false;
   }
 
   currentProgress() {
@@ -368,6 +438,7 @@ class NeteasePhase0 {
 
   startHeartbeat() {
     this.stopHeartbeat();
+    this.heartbeatFailureSince = null;
     this.heartbeatTimer = setInterval(() => this.heartbeatTick().catch(() => {}), 10_000);
     this.heartbeatTimer.unref?.();
   }
@@ -383,6 +454,23 @@ class NeteasePhase0 {
       if (!this.room || this.room.roomId !== roomId) return;
       this.applyRemotePlaylist(requireCode(playlist, "playlist_status"));
       await this.sendHeartbeat();
+      this.heartbeatFailureSince = null;
+      return true;
+    } catch {
+      const failedAt = this.monotonicNow();
+      if (this.heartbeatFailureSince === null) this.heartbeatFailureSince = failedAt;
+      if (failedAt - this.heartbeatFailureSince >= this.heartbeatFailureTimeoutMs) {
+        const login = await this.checkLoginState();
+        const authenticationExpired = login.reachable && !login.authenticated;
+        if (authenticationExpired) this.clearSession();
+        this.stopHeartbeat();
+        this.room = null;
+        this.lastTerminalState = {
+          state: "failed",
+          errorCode: authenticationExpired ? "authentication_expired" : "room_unreachable_timeout",
+        };
+      }
+      return false;
     } finally {
       this.heartbeatBusy = false;
     }
@@ -450,6 +538,7 @@ class NeteasePhase0 {
     if (!this.room) return { state: "idle" };
     const roomId = this.room.roomId;
     this.stopHeartbeat();
+    this.heartbeatFailureSince = null;
     try {
       const result = await this.api.listentogether_end({
         roomId, cookie: this.cookieHeader(), timeout: 10_000,
@@ -458,6 +547,7 @@ class NeteasePhase0 {
       if (body?.data?.success !== true) throw new Phase0Error("room_end_unconfirmed");
     } finally {
       this.room = null;
+      this.lastTerminalState = null;
     }
     return { state: "ended" };
   }

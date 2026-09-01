@@ -48,3 +48,19 @@ node --test scripts/ops/netease-phase0/phase0.test.js
 
 `soak.js` 通过回环页面每 30 秒检查一次房间，只记录成功/失败计数和时间。报告不含歌曲、
 房间、用户或账号标识，默认运行两小时，结束后不会自动关闭房间。
+
+`command-benchmark.js` 串行发送 50 次播放、暂停、上下首和指定歌曲命令。每次都重新读取远端
+房间快照，歌曲与播放状态均一致才算同步；报告只保存命令类型、耗时和成功/失败计数。
+
+`logout-session.js` 只用于最后的认证失效验收。它要求命令行明确传入
+`EXPIRE-TEST-SESSION`，调用退出登录后不输出或复制 Cookie；执行后必须验证页面报告会话过期，
+并由用户重新扫码才能继续实验。
+
+`--allow-fault-injection 1` 只允许随机回环能力路径切断本工具对上游 API 的调用，用于真实等待
+十分钟并验证失败收尾。它不修改防火墙、DNS 或正式服务；隔离验收之外不得启用。
+
+需要执行该项验收时，临时在上述启动命令末尾附加 `--allow-fault-injection 1`，测试结束后
+恢复上游并按不带该参数的常态命令重启。
+
+Phase 0 收尾后应不带 `--allow-fault-injection 1` 重启工具。该开关不得成为常驻配置，也不得
+接入 Murmur API、iOS 客户端或正式 worker。

@@ -44,5 +44,7 @@
 | [网易云集成能力来源](netease-cloud-music-integration-sources.md) | 外部能力盘点 |
 | [网易云四项能力可行性](netease-music-exact-scope-feasibility-2026-08-31.md) | 精确到具体能力的分析 |
 | [netease-music-mcp「一起听」源码审计](netease-music-mcp-listen-together-audit-2026-08-31.md) | 第三方实现的源码审计 |
+| [网易云「一起听」Phase 0 初测](netease-listen-together-phase0-results-2026-08-31.md) | 双账号真机核心链路与首日待办 |
+| [网易云「一起听」Phase 0 收尾](netease-listen-together-phase0-results-2026-09-01.md) | 稳定性、延迟与故障收尾结果 |
 | [网易云非官方播放与网页嵌入](netease-unofficial-playback-and-web-embed-feasibility-2026-08-30.md) | 非官方路径的边界与风险 |
 | [100 个相似 GitHub 仓库](github-landscape-2026-08-29.md) | 功能路线的生态盘点 |
