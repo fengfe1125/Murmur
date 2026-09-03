@@ -14,7 +14,9 @@ Murmur 正式运行依赖。
 - 运行用户为 `murmur-netease-poc`，目录为 `/opt/murmur-netease-poc`。
 - 会话只保存在 `/opt/murmur-netease-poc/secrets/bot-session.json`，目录 `0700`、文件 `0600`。
 - 不读取 `/opt/murmur`、正式 `.env`、数据库、日志、systemd 配置或更新器状态。
-- 不开放公网端口，不安装 systemd 服务，不在测试账号上绕过验证码或风控。
+- 不开放公网端口，不在测试账号上绕过验证码或风控。
+- 默认不安装 systemd 服务；只有需要它活过重启时，才手工安装本目录的 unit——
+  它不受 `murmur-update` 管理，安装与恢复都由管理员负责，见下文「常驻运行」。
 - 任何验证码、异常登录或封禁提示都立即停止实验并撤销会话。
 
 启动命令（由隔离用户执行）：
