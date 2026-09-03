@@ -225,8 +225,7 @@ sudo systemctl status murmur-update --no-pager
 首次关联私有 GitHub 仓库可使用：
 
 ```bash
-scripts/ops/link-vps-to-github.sh --repo OWNER/REPO \
-  --gcloud INSTANCE --zone ZONE --project PROJECT
+scripts/ops/link-vps-to-github.sh --repo OWNER/REPO --ssh murmur-new-vps
 ```
 
 `scripts/ops/migrate-to-vps.sh` 只有在输入 `CUTOVER` 后才替换远端目录和传输生产状态；它只

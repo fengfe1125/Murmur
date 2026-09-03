@@ -191,25 +191,14 @@ def cmd_qq(args) -> int:
 
 
 def cmd_web(args) -> int:
-    """看板 + VPS 面板。VPS 页通过本机 gcloud/ssh 凭据查状态、建邀请码。"""
+    """看板 + VPS 面板。VPS 页通过本机 SSH 别名查状态、建邀请码。"""
     from . import vps_panel
     from .web import run
 
     vps = vps_panel.VpsConfig.resolve(
-        gcloud_instance=args.vps_gcloud,
-        zone=args.vps_zone,
-        project=args.vps_project,
         ssh_target=args.vps_ssh,
     )
-    if not vps.ssh_target:
-        # gcloud compute ssh 每次调用一分钟上下；启动时解析一次外网 IP，
-        # 之后面板全部走直连 ssh。解析失败就退回 gcloud（慢，但能用）。
-        direct = vps_panel.resolve_direct_ssh(vps)
-        if direct:
-            print(f"VPS 面板走直连 SSH：{direct.describe()}")
-            vps = direct
-        else:
-            print(f"VPS 面板走 gcloud compute ssh（较慢）：{vps.describe()}")
+    print(f"VPS 面板连接：{vps.describe()}")
     run(host=args.host, port=args.port, open_browser=not args.no_open, vps=vps)
     return 0
 
@@ -376,12 +365,8 @@ def main(argv: list[str] | None = None) -> int:
     wb.add_argument("--host", default="127.0.0.1")
     wb.add_argument("--port", type=int, default=8765)
     wb.add_argument("--no-open", action="store_true", help="不要自动打开浏览器")
-    wb.add_argument("--vps-gcloud", metavar="INSTANCE",
-                    help="VPS 面板用的 GCE 实例（默认 MURMUR_VPS_GCLOUD_INSTANCE 或现网实例）")
-    wb.add_argument("--vps-zone", help="GCE 可用区（默认 MURMUR_VPS_ZONE 或 us-west1-b）")
-    wb.add_argument("--vps-project", help="GCE 项目（默认 MURMUR_VPS_PROJECT 或 gcloud 当前项目）")
-    wb.add_argument("--vps-ssh", metavar="USER@HOST",
-                    help="普通 SSH 主机；给了就不用 gcloud（也可 MURMUR_VPS_SSH）")
+    wb.add_argument("--vps-ssh", metavar="HOST",
+                    help="SSH 主机或别名（默认 MURMUR_VPS_SSH 或 murmur-new-vps）")
     wb.set_defaults(func=cmd_web)
 
     api = sub.add_parser("app-api", help="启动正式 App API（默认仅监听本机）")
