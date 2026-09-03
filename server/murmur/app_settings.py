@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 
@@ -36,6 +37,24 @@ def _digests(value: str | None) -> tuple[bytes, ...]:
         digests.append(raw)
     return tuple(digests)
 
+
+
+def _loopback_or_https(value: str) -> bool:
+    """受审协议服务跑在本机回环上，明文 http 在那里是可以的。
+
+    https 防的是链路上有人看得到；回环的字节根本不出这台机器，而给一个只有
+    自己能连的端口签证书是纯粹的仪式。Murmur 自己的 `MURMUR_APP_BASE_URL`
+    也一直是 `http://127.0.0.1:8766`。
+
+    口子只开到回环：主机名不是这三个之一，就仍然必须 https——否则这个例外
+    会变成「随便哪台机器都能明文」。
+    """
+    if value.startswith("https://"):
+        return True
+    if not value.startswith("http://"):
+        return False
+    host = urlsplit(value).hostname or ""
+    return host in {"127.0.0.1", "::1", "localhost"}
 
 @dataclass(frozen=True)
 class AppSettings:
@@ -327,9 +346,10 @@ class AppSettings:
                 raise RuntimeError(
                     "NetEase room experiment requires a protocol base URL"
                 )
-            if not self.netease_room_protocol_base_url.startswith("https://"):
+            if not _loopback_or_https(self.netease_room_protocol_base_url):
                 raise RuntimeError(
-                    "MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL must use HTTPS"
+                    "MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL must use HTTPS "
+                    "unless it is a loopback address"
                 )
 
     def validate_android(self) -> None:
