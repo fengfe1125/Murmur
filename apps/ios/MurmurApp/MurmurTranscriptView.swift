@@ -231,10 +231,19 @@ private struct MessageRow: View {
     /// Absent whenever the room experiment is off for this account, which is
     /// how the card knows not to offer a button that cannot work.
     var onListenTogether: ((MusicTrackAttachmentV1) -> Void)?
+    var activeListenTogetherTrackID: String?
+    var hasActiveListenTogetherRoom = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openURL) private var openURL
 
     private var isOutgoing: Bool { message.author == .you }
+
+    private func relationship(
+        for track: MusicTrackAttachmentV1
+    ) -> ListenTogetherTrackRelationship {
+        guard track.isNetease, hasActiveListenTogetherRoom else { return .inactive }
+        return track.trackID == activeListenTogetherTrackID ? .currentTrack : .otherTrack
+    }
 
     var body: some View {
         HStack {
@@ -267,7 +276,8 @@ private struct MessageRow: View {
                                 onOpenProvider: { openURL(track.canonicalURL) },
                                 onListenTogether: onListenTogether.map { start in
                                     { start(track) }
-                                }
+                                },
+                                listenTogetherRelationship: relationship(for: track)
                             )
                         }
                         // A song carries a text fallback so an older client has
@@ -425,6 +435,8 @@ struct MurmurTranscriptView: View {
     var nowPlaying: MusicNowPlaying = .none
     var onPlayMusic: (MusicTrackAttachmentV1) -> Void = { _ in }
     var onListenTogether: ((MusicTrackAttachmentV1) -> Void)?
+    var activeListenTogetherTrackID: String?
+    var hasActiveListenTogetherRoom = false
 
     /// Whether the reader is resting on the newest line.  Kept from the
     /// scroll geometry stream; only then may a resize carry the transcript
@@ -498,7 +510,9 @@ struct MurmurTranscriptView: View {
                             },
                             musicPlayback: message.musicTrack.map(nowPlaying.playback) ?? .stopped,
                             onPlayMusic: onPlayMusic,
-                            onListenTogether: onListenTogether
+                            onListenTogether: onListenTogether,
+                            activeListenTogetherTrackID: activeListenTogetherTrackID,
+                            hasActiveListenTogetherRoom: hasActiveListenTogetherRoom
                         )
                         .id(message.id)
                     }

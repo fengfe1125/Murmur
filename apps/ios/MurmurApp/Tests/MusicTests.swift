@@ -1038,6 +1038,117 @@ final class SharedMusicDraftStoreTests: XCTestCase {
     }
 }
 
+final class ListenTogetherContractTests: XCTestCase {
+    func testPlaybackStateDecodesWhenTheServerSendsIt() throws {
+        let room = try decodeRoom(playbackState: "playing")
+        XCTAssertEqual(room.playbackState, .playing)
+    }
+
+    func testOldServerWithoutPlaybackStateSafelyDecodesAsUnknown() throws {
+        let room = try decodeRoom(playbackState: nil)
+        XCTAssertEqual(room.playbackState, .unknown)
+    }
+
+    func testInvalidPlaybackStateIsRejectedInsteadOfBeingGuessed() throws {
+        XCTAssertThrowsError(try decodeRoom(playbackState: "buffering_forever"))
+    }
+
+    func testPresentationPriorityAndPlaybackMapping() {
+        let playing = room(state: .connected, joined: true, playback: .playing)
+        XCTAssertEqual(resolve(playing), .playing)
+        XCTAssertEqual(resolve(room(state: .connected, joined: true, playback: .paused)), .paused)
+        XCTAssertEqual(resolve(room(state: .waitingForUser)), .waiting)
+        XCTAssertEqual(resolve(room(state: .connected, joined: true)), .syncing(nil))
+        XCTAssertEqual(
+            resolve(playing, connection: .offline("down"), status: .failed),
+            .offline,
+            "连接异常优先于房间或命令状态"
+        )
+        XCTAssertEqual(
+            resolve(playing, status: .failed, failedCommand: .pause, confirmed: .playing),
+            .commandFailed(.pause, .playing)
+        )
+        XCTAssertEqual(
+            resolve(room(state: .failed, error: "invite_expired")),
+            .roomFailed("invite_expired")
+        )
+    }
+
+    func testResponsiveHeaderRulesMatchTheFigmaBreakpoints() {
+        let wide = ListenTogetherHeaderVisibility(availableWidth: 361, isPlaying: true)
+        XCTAssertTrue(wide.showStatusTag)
+        XCTAssertTrue(wide.showLiveBars)
+
+        let compact = ListenTogetherHeaderVisibility(availableWidth: 360, isPlaying: true)
+        XCTAssertFalse(compact.showStatusTag)
+        XCTAssertTrue(compact.showLiveBars)
+
+        let narrowWithBars = ListenTogetherHeaderVisibility(availableWidth: 289, isPlaying: true)
+        XCTAssertFalse(narrowWithBars.showStatusTag)
+        XCTAssertTrue(narrowWithBars.showLiveBars)
+
+        let narrow = ListenTogetherHeaderVisibility(availableWidth: 288, isPlaying: true)
+        XCTAssertFalse(narrow.showStatusTag)
+        XCTAssertFalse(narrow.showLiveBars)
+        XCTAssertFalse(
+            ListenTogetherHeaderVisibility(availableWidth: 393, isPlaying: false).showLiveBars
+        )
+    }
+
+    func testSongCardRoomRelationshipsHaveUnambiguousActions() {
+        XCTAssertEqual(ListenTogetherTrackRelationship.inactive.actionLabel, "和 Murmur 一起听")
+        XCTAssertEqual(ListenTogetherTrackRelationship.currentTrack.actionLabel, "正在一起听")
+        XCTAssertEqual(ListenTogetherTrackRelationship.otherTrack.actionLabel, "换成这首")
+    }
+
+    private func decodeRoom(playbackState: String?) throws -> ListenTogetherRoomSnapshotV1 {
+        var object: [String: Any] = [
+            "room_handle": "room-1",
+            "state": "connected",
+            "user_joined": true,
+            "updated_at": "2026-09-01T00:00:00Z",
+        ]
+        if let playbackState { object["playback_state"] = playbackState }
+        return try JSONDecoder().decode(
+            ListenTogetherRoomSnapshotV1.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+    }
+
+    private func room(
+        state: ListenTogetherRoomState,
+        joined: Bool = false,
+        playback: ListenTogetherPlaybackState = .unknown,
+        error: String? = nil
+    ) -> ListenTogetherRoomSnapshotV1 {
+        .init(
+            roomHandle: "room-1",
+            state: state,
+            userJoined: joined,
+            updatedAt: "2026-09-01T00:00:00Z",
+            errorCode: error,
+            playbackState: playback
+        )
+    }
+
+    private func resolve(
+        _ room: ListenTogetherRoomSnapshotV1,
+        connection: MurmurConnectionState = .connected,
+        status: ListenTogetherCommandStatus? = nil,
+        failedCommand: ListenTogetherCommand? = nil,
+        confirmed: ListenTogetherPlaybackState = .unknown
+    ) -> ListenTogetherPresentationState {
+        .resolve(
+            connection: connection,
+            room: room,
+            commandStatus: status,
+            isChanging: false,
+            failedCommand: failedCommand,
+            lastConfirmedPlayback: confirmed
+        )
+    }
+}
+
 @MainActor
 final class NeteaseMusicModelTests: XCTestCase {
     // XCTest's setup/teardown overrides are nonisolated even though the test
@@ -1129,7 +1240,40 @@ final class NeteaseMusicModelTests: XCTestCase {
         await api.setFailing(true)
         await model.command(.pause)
         XCTAssertEqual(model.commandStatus, .failed)
-        XCTAssertNotNil(model.failureMessage)
+        XCTAssertEqual(model.lastFailedCommand, .pause)
+        XCTAssertNotNil(model.room, "单次命令失败不能清掉活动房间")
+        XCTAssertNil(model.failureMessage, "命令错误应该留在 Header 内，不弹全局错误")
+        XCTAssertEqual(
+            model.presentationState(connection: .connected),
+            .commandFailed(.pause, .unknown)
+        )
+    }
+
+    func testAcceptedWaitsForARemoteSnapshotInsteadOfClaimingSuccess() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        _ = await model.createRoom(for: MusicFixtures.netease)
+        await api.setNextCommand(status: .accepted, playback: .unknown)
+        await model.command(.pause)
+        XCTAssertEqual(model.commandStatus, .accepted)
+        XCTAssertEqual(model.presentationState(connection: .connected), .syncing(.pause))
+    }
+
+    func testFailedCommandCanRetryAndOnlyThenShowsConfirmedPlayback() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        _ = await model.createRoom(for: MusicFixtures.netease)
+        await api.setNextCommand(status: .failed, playback: .playing)
+        await model.command(.pause)
+        XCTAssertEqual(
+            model.presentationState(connection: .connected),
+            .commandFailed(.pause, .playing)
+        )
+
+        await api.setNextCommand(status: .synchronized, playback: .paused)
+        await model.retryLastCommand()
+        XCTAssertEqual(model.commandStatus, .synchronized)
+        XCTAssertEqual(model.presentationState(connection: .connected), .paused)
     }
 
     func testWithoutARoomThereIsNothingToCommand() async throws {
@@ -1138,6 +1282,67 @@ final class NeteaseMusicModelTests: XCTestCase {
         await model.command(.next)
         let calls = await api.calls
         XCTAssertEqual(calls, [])
+    }
+
+    func testRoomRefreshesNeverOverlap() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        await api.setCurrentDelay(.milliseconds(120))
+
+        let first = Task { await model.refreshRoom() }
+        try await Task.sleep(for: .milliseconds(20))
+        await model.refreshRoom()
+        await first.value
+
+        let currentCalls = await api.calls.filter { $0 == "current" }
+        XCTAssertEqual(currentCalls.count, 1)
+    }
+
+    func testAnOldRefreshCannotRestoreARoomThatWasClosedWhileItWasInFlight() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        _ = await model.createRoom(for: MusicFixtures.netease)
+        await api.setCurrentDelay(.milliseconds(120))
+
+        let staleRefresh = Task { await model.refreshRoom() }
+        try await Task.sleep(for: .milliseconds(20))
+        await model.closeRoom()
+        await staleRefresh.value
+
+        XCTAssertEqual(model.room?.state, .ended)
+        XCTAssertFalse(model.room?.isActive ?? true)
+    }
+
+    func testAnOldRefreshCannotUndoACommandConfirmedWhileItWasInFlight() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        _ = await model.createRoom(for: MusicFixtures.netease)
+        await api.setCurrentDelay(.milliseconds(120))
+
+        let staleRefresh = Task { await model.refreshRoom() }
+        try await Task.sleep(for: .milliseconds(20))
+        await api.setNextCommand(status: .synchronized, playback: .paused)
+        await model.command(.pause)
+        await staleRefresh.value
+
+        XCTAssertEqual(model.room?.state, .connected)
+        XCTAssertEqual(model.lastConfirmedPlaybackState, .paused)
+    }
+
+    func testAnOldRefreshCannotUndoATrackChangeInsideAnExistingRoom() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        _ = await model.createRoom(for: MusicFixtures.netease)
+        await api.setCurrentDelay(.milliseconds(120))
+
+        let staleRefresh = Task { await model.refreshRoom() }
+        try await Task.sleep(for: .milliseconds(20))
+        _ = await model.createRoom(for: MusicFixtures.neteaseOther)
+        await staleRefresh.value
+
+        XCTAssertEqual(
+            model.room?.currentTrack?.trackID, MusicFixtures.neteaseOther.trackID
+        )
     }
 }
 
@@ -1163,12 +1368,23 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
     private var sharedTrack: MusicTrackAttachmentV1?
     private var failing = false
     private var room: ListenTogetherRoomSnapshotV1?
+    private var nextCommandStatus: ListenTogetherCommandStatus = .synchronized
+    private var nextPlaybackState: ListenTogetherPlaybackState = .playing
+    private var currentDelay: Duration = .zero
 
     struct Unused: Error {}
     struct Refused: Error {}
 
     func setSharedTrack(_ track: MusicTrackAttachmentV1?) { sharedTrack = track }
     func setFailing(_ value: Bool) { failing = value }
+    func setCurrentDelay(_ delay: Duration) { currentDelay = delay }
+    func setNextCommand(
+        status: ListenTogetherCommandStatus,
+        playback: ListenTogetherPlaybackState
+    ) {
+        nextCommandStatus = status
+        nextPlaybackState = playback
+    }
 
     func resolveSharedMusic(
         text: String, idempotencyKey: String
@@ -1195,7 +1411,9 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
     func currentListenTogetherRoom() async throws -> ListenTogetherRoomSnapshotV1? {
         calls.append("current")
         if failing { throw Refused() }
-        return room
+        let snapshot = room
+        if currentDelay > .zero { try await Task.sleep(for: currentDelay) }
+        return snapshot
     }
 
     func commandListenTogetherRoom(
@@ -1204,13 +1422,19 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
     ) async throws -> ListenTogetherCommandResultV1 {
         calls.append("command:\(command.rawValue)")
         if failing { throw Refused() }
+        let status = nextCommandStatus
+        let playback = nextPlaybackState
+        let state: ListenTogetherRoomState = status == .accepted ? .syncing : .connected
         let snapshot = ListenTogetherRoomSnapshotV1(
-            roomHandle: handle, state: .connected,
+            roomHandle: handle, state: state,
             currentTrack: track ?? room?.currentTrack, userJoined: true,
-            updatedAt: "2026-08-31T00:00:01Z"
+            pendingCommand: status == .accepted ? command.rawValue : nil,
+            updatedAt: "2026-08-31T00:00:01Z",
+            errorCode: status == .failed ? "command_rejected" : nil,
+            playbackState: playback
         )
         room = snapshot
-        return ListenTogetherCommandResultV1(status: .synchronized, room: snapshot)
+        return ListenTogetherCommandResultV1(status: status, room: snapshot)
     }
 
     func closeListenTogetherRoom(

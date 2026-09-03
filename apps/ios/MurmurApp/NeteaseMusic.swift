@@ -53,6 +53,12 @@ enum ListenTogetherRoomState: String, Codable, Sendable {
     case failed
 }
 
+enum ListenTogetherPlaybackState: String, Codable, Sendable {
+    case playing
+    case paused
+    case unknown
+}
+
 struct ListenTogetherRoomSnapshotV1: Codable, Equatable, Identifiable, Sendable {
     let version: Int
     let roomHandle: String
@@ -63,6 +69,7 @@ struct ListenTogetherRoomSnapshotV1: Codable, Equatable, Identifiable, Sendable 
     let inviteURL: URL?
     let updatedAt: String
     let errorCode: String?
+    let playbackState: ListenTogetherPlaybackState
 
     var id: String { roomHandle }
     var isActive: Bool { state != .ended && state != .failed }
@@ -77,6 +84,7 @@ struct ListenTogetherRoomSnapshotV1: Codable, Equatable, Identifiable, Sendable 
         case inviteURL = "invite_url"
         case updatedAt = "updated_at"
         case errorCode = "error_code"
+        case playbackState = "playback_state"
     }
 
     init(
@@ -88,7 +96,8 @@ struct ListenTogetherRoomSnapshotV1: Codable, Equatable, Identifiable, Sendable 
         pendingCommand: String? = nil,
         inviteURL: URL? = nil,
         updatedAt: String,
-        errorCode: String? = nil
+        errorCode: String? = nil,
+        playbackState: ListenTogetherPlaybackState = .unknown
     ) {
         self.version = version
         self.roomHandle = roomHandle
@@ -99,6 +108,7 @@ struct ListenTogetherRoomSnapshotV1: Codable, Equatable, Identifiable, Sendable 
         self.inviteURL = inviteURL
         self.updatedAt = updatedAt
         self.errorCode = errorCode
+        self.playbackState = playbackState
     }
 
     init(from decoder: Decoder) throws {
@@ -112,6 +122,10 @@ struct ListenTogetherRoomSnapshotV1: Codable, Equatable, Identifiable, Sendable 
         inviteURL = try values.decodeIfPresent(URL.self, forKey: .inviteURL)
         updatedAt = try values.decodeIfPresent(String.self, forKey: .updatedAt) ?? ""
         errorCode = try values.decodeIfPresent(String.self, forKey: .errorCode)
+        playbackState = try values.decodeIfPresent(
+            ListenTogetherPlaybackState.self,
+            forKey: .playbackState
+        ) ?? .unknown
     }
 }
 
@@ -127,6 +141,45 @@ enum ListenTogetherCommandStatus: String, Codable, Sendable {
     case accepted
     case synchronized
     case failed
+}
+
+enum ListenTogetherPresentationState: Equatable, Sendable {
+    case inactive
+    case waiting
+    case playing
+    case paused
+    case syncing(ListenTogetherCommand?)
+    case commandFailed(ListenTogetherCommand?, ListenTogetherPlaybackState)
+    case roomFailed(String?)
+    case offline
+
+    static func resolve(
+        connection: MurmurConnectionState,
+        room: ListenTogetherRoomSnapshotV1?,
+        commandStatus: ListenTogetherCommandStatus?,
+        isChanging: Bool,
+        failedCommand: ListenTogetherCommand?,
+        lastConfirmedPlayback: ListenTogetherPlaybackState
+    ) -> Self {
+        guard let room else { return .inactive }
+        if case .offline = connection { return .offline }
+        if room.state == .failed { return .roomFailed(room.errorCode) }
+        if room.state == .ended { return .inactive }
+        if commandStatus == .failed {
+            return .commandFailed(failedCommand, lastConfirmedPlayback)
+        }
+        if isChanging || commandStatus == .accepted || room.state == .syncing {
+            return .syncing(room.pendingCommand.flatMap(ListenTogetherCommand.init(rawValue:)))
+        }
+        if room.state == .creating || room.state == .waitingForUser || !room.userJoined {
+            return .waiting
+        }
+        return switch room.playbackState {
+        case .playing: .playing
+        case .paused: .paused
+        case .unknown: .syncing(nil)
+        }
+    }
 }
 
 struct ListenTogetherCommandResultV1: Codable, Equatable, Sendable {
@@ -148,11 +201,14 @@ final class NeteaseMusicModel: ObservableObject {
     @Published private(set) var isResolvingShare = false
     @Published private(set) var isChangingRoom = false
     @Published private(set) var failureMessage: String?
+    @Published private(set) var lastFailedCommand: ListenTogetherCommand?
+    @Published private(set) var lastConfirmedPlaybackState: ListenTogetherPlaybackState = .unknown
 
     private let api: any MurmurAPIClient
     private let draftStore: SharedMusicDraftStore
     private var resolvingDraftID: UUID?
     private var roomGeneration = 0
+    private var isRefreshingRoom = false
 
     init(api: any MurmurAPIClient, draftStore: SharedMusicDraftStore = SharedMusicDraftStore()) {
         self.api = api
@@ -196,10 +252,36 @@ final class NeteaseMusicModel: ObservableObject {
 
     func clearFailure() { failureMessage = nil }
 
+#if DEBUG
+    func seedUITestSharePreviewIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("--murmur-stub-netease-share"),
+              preview == nil,
+              !isResolvingShare
+        else { return }
+        _ = recognizePastedText("https://music.163.com/song?id=186016")
+    }
+#endif
+
+    func presentationState(connection: MurmurConnectionState) -> ListenTogetherPresentationState {
+        ListenTogetherPresentationState.resolve(
+            connection: connection,
+            room: room,
+            commandStatus: commandStatus,
+            isChanging: isChangingRoom,
+            failedCommand: lastFailedCommand,
+            lastConfirmedPlayback: lastConfirmedPlaybackState
+        )
+    }
+
     func createRoom(for track: MusicTrackAttachmentV1) async -> URL? {
         guard track.isNetease else { return nil }
+        // 建房和换歌都会改房间，所以此刻已经在路上的那次轮询讲的都是旧事。
+        // 递增放在两条分支之前：换歌那条以前漏了，回来的旧快照会把刚确认
+        // 的结果盖掉。
+        roomGeneration += 1
         isChangingRoom = true
-        commandStatus = nil
+        lastFailedCommand = nil
+        commandStatus = room?.isActive == true ? .accepted : nil
         defer { isChangingRoom = false }
         do {
             let snapshot: ListenTogetherRoomSnapshotV1
@@ -212,26 +294,46 @@ final class NeteaseMusicModel: ObservableObject {
                 )
                 snapshot = result.room
                 commandStatus = result.status
+                lastFailedCommand = result.status == .failed ? .playTrack : nil
             } else {
                 snapshot = try await api.createListenTogetherRoom(
                     initialTrack: track,
                     idempotencyKey: UUID().uuidString.lowercased()
                 )
-                commandStatus = .accepted
+                commandStatus = nil
             }
-            room = snapshot
+            apply(snapshot)
             failureMessage = nil
             return snapshot.inviteURL
         } catch {
             failureMessage = MurmurFailure.from(error).message
             commandStatus = .failed
+            lastFailedCommand = room?.isActive == true ? .playTrack : nil
             return nil
         }
     }
 
     func refreshRoom(reportFailure: Bool = false) async {
+        guard !isRefreshingRoom else { return }
+        isRefreshingRoom = true
+        let generation = roomGeneration
+        defer { isRefreshingRoom = false }
         do {
-            room = try await api.currentListenTogetherRoom()
+            let snapshot = try await api.currentListenTogetherRoom()
+            guard generation == roomGeneration else { return }
+            if let snapshot {
+                apply(snapshot)
+                if commandStatus == .accepted,
+                   snapshot.state != .syncing,
+                   snapshot.pendingCommand == nil {
+                    commandStatus = nil
+                }
+            } else {
+                room = nil
+                commandStatus = nil
+                lastFailedCommand = nil
+                lastConfirmedPlaybackState = .unknown
+            }
             failureMessage = nil
         } catch {
             if reportFailure {
@@ -242,7 +344,10 @@ final class NeteaseMusicModel: ObservableObject {
 
     func command(_ command: ListenTogetherCommand) async {
         guard let room, room.isActive else { return }
+        roomGeneration += 1
         isChangingRoom = true
+        commandStatus = .accepted
+        lastFailedCommand = nil
         defer { isChangingRoom = false }
         do {
             let result = try await api.commandListenTogetherRoom(
@@ -251,13 +356,22 @@ final class NeteaseMusicModel: ObservableObject {
                 track: nil,
                 idempotencyKey: UUID().uuidString.lowercased()
             )
-            self.room = result.room
+            apply(result.room)
             commandStatus = result.status
+            lastFailedCommand = result.status == .failed ? command : nil
             failureMessage = nil
+            if result.status == .accepted {
+                await refreshRoom()
+            }
         } catch {
             commandStatus = .failed
-            failureMessage = MurmurFailure.from(error).message
+            lastFailedCommand = command
         }
+    }
+
+    func retryLastCommand() async {
+        guard let lastFailedCommand else { return }
+        await command(lastFailedCommand)
     }
 
     func closeRoom() async {
@@ -271,9 +385,22 @@ final class NeteaseMusicModel: ObservableObject {
                 idempotencyKey: UUID().uuidString.lowercased()
             )
             commandStatus = nil
+            lastFailedCommand = nil
+            lastConfirmedPlaybackState = .unknown
             failureMessage = nil
         } catch {
             failureMessage = MurmurFailure.from(error).message
+        }
+    }
+
+    private func apply(_ snapshot: ListenTogetherRoomSnapshotV1) {
+        room = snapshot
+        if snapshot.playbackState != .unknown {
+            lastConfirmedPlaybackState = snapshot.playbackState
+        }
+        if !snapshot.isActive {
+            commandStatus = nil
+            lastFailedCommand = nil
         }
     }
 
@@ -319,153 +446,106 @@ struct NeteaseSharedMusicPreviewView: View {
     let onCancel: () -> Void
 
     @Environment(\.openURL) private var openURL
+    @AccessibilityFocusState private var titleFocused: Bool
 
     var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 20) {
-                HStack(spacing: 14) {
-                    AsyncImage(url: preview.track.artworkURL) { image in
-                        image.resizable().scaledToFill()
-                    } placeholder: {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(MurmurTheme.rule)
-                            .overlay { Image(systemName: "music.note") }
-                    }
-                    .frame(width: 72, height: 72)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("把这首歌发给 Murmur？")
+                    .font(MurmurTheme.display(.title3))
+                    .foregroundStyle(MurmurTheme.ink)
+                    .accessibilityFocused($titleFocused)
 
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(preview.track.title)
-                            .font(MurmurTheme.display(.headline))
-                            .foregroundStyle(MurmurTheme.ink)
-                            .lineLimit(2)
-                        Text(preview.track.artists.joined(separator: "、"))
-                            .font(MurmurTheme.body(.subheadline))
-                            .foregroundStyle(MurmurTheme.secondaryInk)
-                            .lineLimit(1)
-                    }
-                }
-
-                Text("发送后，Murmur 收到的是这首歌的官方元数据和链接，不是分享文案里的内容。")
+                Text("已从网易云重新获取歌曲信息。确认后才会发送，也不会自动开启一起听。")
                     .font(MurmurTheme.body(.footnote))
                     .foregroundStyle(MurmurTheme.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                Button("在网易云里核对") { openURL(preview.track.canonicalURL) }
-                    .font(MurmurTheme.body(.subheadline, weight: .medium))
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        AsyncImage(url: preview.track.artworkURL) { image in
+                            image.resizable().scaledToFill()
+                        } placeholder: {
+                            RoundedRectangle(cornerRadius: 11)
+                                .fill(MurmurTheme.accent)
+                                .overlay {
+                                    Image(systemName: "music.note")
+                                        .foregroundStyle(MurmurTheme.accentInk)
+                                }
+                        }
+                        .frame(width: 64, height: 64)
+                        .clipShape(RoundedRectangle(cornerRadius: 11))
 
-                Spacer(minLength: 0)
-
-                Button(action: onConfirm) {
-                    Text("发给 Murmur")
-                        .font(MurmurTheme.body(.headline, weight: .semibold))
-                        .foregroundStyle(MurmurTheme.paper)
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                        .background(MurmurTheme.ink, in: RoundedRectangle(cornerRadius: 15))
-                }
-                .buttonStyle(MurmurPressStyle())
-                .accessibilityIdentifier("confirm-netease-share")
-            }
-            .padding(22)
-            .background(MurmurTheme.paper)
-            .navigationTitle("发送这首歌？")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消", action: onCancel)
-                }
-            }
-        }
-    }
-}
-
-/// Process-local room state shown above the composer.  It never claims a
-/// command succeeded merely because the VPS accepted it: accepted, synced and
-/// failed each get their own wording.
-struct NeteaseListenTogetherCard: View {
-    let room: ListenTogetherRoomSnapshotV1
-    let commandStatus: ListenTogetherCommandStatus?
-    let isChanging: Bool
-    let onCommand: (ListenTogetherCommand) -> Void
-    let onOpen: () -> Void
-    let onClose: () -> Void
-
-    private var stateLine: String {
-        if let commandStatus {
-            return switch commandStatus {
-            case .accepted: "命令已送出，等待网易云同步"
-            case .synchronized: "已与网易云同步"
-            case .failed: "这次没有同步成功"
-            }
-        }
-        return switch room.state {
-        case .creating: "正在创建房间"
-        case .waitingForUser: "等你在网易云加入"
-        case .connected: "已连接，正在一起听"
-        case .syncing: "正在同步"
-        case .ended: "一起听已结束"
-        case .failed: "房间暂时不可用"
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Image(systemName: room.userJoined ? "person.2.fill" : "person.2")
-                    .foregroundStyle(MurmurTheme.accentInk)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(room.currentTrack?.title ?? "和 Murmur 一起听")
-                        .font(MurmurTheme.body(.subheadline, weight: .semibold))
-                        .foregroundStyle(MurmurTheme.ink)
-                        .lineLimit(1)
-                    Text(stateLine)
-                        .font(MurmurTheme.body(.caption))
-                        .foregroundStyle(commandStatus == .failed ? MurmurTheme.coral : MurmurTheme.secondaryInk)
-                        .lineLimit(2)
-                }
-                Spacer(minLength: 8)
-                if isChanging { ProgressView().controlSize(.small) }
-            }
-
-            HStack(spacing: 2) {
-                roomButton("上一首", systemImage: "backward.fill") { onCommand(.previous) }
-                roomButton("暂停", systemImage: "pause.fill") { onCommand(.pause) }
-                roomButton("继续", systemImage: "play.fill") { onCommand(.resume) }
-                roomButton("下一首", systemImage: "forward.fill") { onCommand(.next) }
-                Menu {
-                    if room.inviteURL != nil {
-                        Button("在网易云打开", systemImage: "arrow.up.right.square", action: onOpen)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(preview.track.title)
+                                .font(MurmurTheme.body(.headline, weight: .semibold))
+                                .foregroundStyle(MurmurTheme.ink)
+                                .lineLimit(2)
+                            Text(preview.track.artists.joined(separator: "、"))
+                                .font(MurmurTheme.body(.subheadline))
+                                .foregroundStyle(MurmurTheme.secondaryInk)
+                                .lineLimit(1)
+                            Text(providerLine)
+                                .font(MurmurTheme.body(.caption))
+                                .foregroundStyle(MurmurTheme.secondaryInk)
+                        }
+                        Spacer(minLength: 0)
                     }
-                    Button("结束一起听", systemImage: "xmark", role: .destructive, action: onClose)
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .contentShape(Rectangle())
+
+                    Button {
+                        openURL(preview.track.canonicalURL)
+                    } label: {
+                        Image(systemName: "arrow.up.forward.app.fill")
+                            .font(MurmurTheme.body(.caption, weight: .semibold))
+                            .foregroundStyle(MurmurTheme.ink)
+                            .frame(width: 44, height: 44)
+                            .background(MurmurTheme.raisedPaper, in: Circle())
+                            .overlay { Circle().stroke(MurmurTheme.rule, lineWidth: 1) }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("在网易云里核对")
                 }
-                .disabled(isChanging)
-                .accessibilityLabel("更多一起听操作")
+                .padding(12)
+                .background(MurmurTheme.paper, in: RoundedRectangle(cornerRadius: 17))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 17).stroke(MurmurTheme.rule, lineWidth: 1)
+                }
+
+                Text("请核对歌名和艺人")
+                    .font(MurmurTheme.body(.caption2))
+                    .foregroundStyle(MurmurTheme.secondaryInk)
+
+                HStack(spacing: 12) {
+                    Button("取消", action: onCancel)
+                        .font(MurmurTheme.body(.body, weight: .medium))
+                        .foregroundStyle(MurmurTheme.ink)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .background(MurmurTheme.paper, in: Capsule())
+                        .overlay { Capsule().stroke(MurmurTheme.rule, lineWidth: 1) }
+                        .buttonStyle(.plain)
+
+                    Button("确认发送", action: onConfirm)
+                        .font(MurmurTheme.body(.body, weight: .semibold))
+                        .foregroundStyle(MurmurTheme.accentInk)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .background(MurmurTheme.accent, in: Capsule())
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("confirm-netease-share")
+                }
             }
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+            .padding(.bottom, 20)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(maxWidth: MurmurTheme.contentWidth)
-        .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 18))
-        .overlay { RoundedRectangle(cornerRadius: 18).stroke(MurmurTheme.rule, lineWidth: 1) }
-        .shadow(color: MurmurTheme.ink.opacity(0.05), radius: 6, y: 2)
-        .accessibilityIdentifier("netease-listen-together-card")
+        .scrollIndicators(.hidden)
+        .background(MurmurTheme.paper)
+        .onAppear { titleFocused = true }
     }
 
-    private func roomButton(
-        _ label: String,
-        systemImage: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .contentShape(Rectangle())
+    private var providerLine: String {
+        let duration = preview.track.durationSeconds.map { seconds in
+            String(format: "%d:%02d", seconds / 60, seconds % 60)
         }
-        .buttonStyle(.plain)
-        .disabled(isChanging)
-        .accessibilityLabel(label)
+        return ["网易云音乐", duration].compactMap { $0 }.joined(separator: " · ")
     }
 }

@@ -43,6 +43,7 @@ from murmur.app_listen_together import (  # noqa: E402
     RoomNotFound,
     RoomSnapshotV1,
     RoomTransportUnavailable,
+    _room_from_wire,
     explicitly_requests_listen_together,
     parse_room_chat_intent,
 )
@@ -120,6 +121,7 @@ class RoomLifecycleTests(unittest.TestCase):
         self.assertEqual(snapshot.state, "waiting_for_user")
         self.assertFalse(snapshot.user_joined)
         self.assertEqual(snapshot.current_track, TRACK)
+        self.assertEqual(snapshot.playback_state, "playing")
         self.assertTrue(snapshot.invite_url.startswith("https://"))
 
         adapter.join(next(iter(adapter.rooms)))
@@ -138,6 +140,21 @@ class RoomLifecycleTests(unittest.TestCase):
         self.assertNotIn(external, wire)
         self.assertNotIn("room_ref", wire)
         self.assertNotIn("u1", wire)
+        self.assertEqual(snapshot.to_wire()["playback_state"], "playing")
+
+    def test_old_worker_snapshots_default_to_an_unknown_playback_state(self):
+        snapshot = manager().create(
+            user_id="u1", initial_track=dict(TRACK), idempotency_key="key-00000001"
+        ).to_wire()
+        snapshot.pop("playback_state")
+        self.assertEqual(_room_from_wire(snapshot).playback_state, "unknown")
+
+    def test_invalid_public_playback_state_is_refused(self):
+        snapshot = manager().create(
+            user_id="u1", initial_track=dict(TRACK), idempotency_key="key-00000001"
+        )
+        with self.assertRaises(RoomInvalid):
+            replace(snapshot, playback_state="buffering")
 
     def test_one_person_may_only_hold_one_room(self):
         rooms = manager()
@@ -238,6 +255,26 @@ class RoomCommandTests(unittest.TestCase):
         self.assertEqual(result.room.state, "syncing")
         self.assertEqual(result.room.error_code, "room_confirmation_timeout")
         # 房间还在：一次没确认不等于结束。
+        self.assertIsNotNone(rooms.current(user_id="u1", refresh=False))
+
+    def test_a_rejected_command_keeps_the_confirmed_room_active(self):
+        class Rejecting(InMemoryRoomAdapter):
+            def command(self, **kwargs):
+                state = self.rooms[kwargs["room_ref"]]
+                return AdapterCommandResult("failed", state, "command_rejected")
+
+        rooms = manager(Rejecting())
+        room = rooms.create(
+            user_id="u1", initial_track=dict(TRACK), idempotency_key="key-00000001"
+        )
+        result = rooms.command(
+            user_id="u1", room_handle=room.room_handle, command="pause",
+            idempotency_key="key-00000002",
+        )
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.room.state, "waiting_for_user")
+        self.assertEqual(result.room.playback_state, "playing")
+        self.assertEqual(result.room.error_code, "command_rejected")
         self.assertIsNotNone(rooms.current(user_id="u1", refresh=False))
 
     def test_play_track_needs_a_track_and_the_others_refuse_one(self):
@@ -614,6 +651,7 @@ class ListenTogetherAPITests(unittest.TestCase):
         room = created.json()
         self.assertEqual(room["state"], "waiting_for_user")
         self.assertEqual(room["version"], 1)
+        self.assertEqual(room["playback_state"], "playing")
 
         current = client.get(
             "/v1/listen-together/rooms/current", headers=self.device.headers()

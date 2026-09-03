@@ -215,6 +215,11 @@ final class MurmurSessionModel: ObservableObject {
             }
             if hasPendingPushRegistration { await syncDevice(token: pendingAPNSToken) }
             await refreshMusicAvailability()
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--murmur-stub-netease-offline") {
+                connection = .offline("UI Test")
+            }
+#endif
         } catch {
             let mapped = MurmurFailure.from(error)
             requiresDeviceReconnect = mapped.requiresDeviceReconnect

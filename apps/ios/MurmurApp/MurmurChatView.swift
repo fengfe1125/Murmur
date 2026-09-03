@@ -158,10 +158,19 @@ extension View {
 struct MurmurChatView: View {
     @ObservedObject var model: MurmurSessionModel
     @ObservedObject var music: MusicModule
+    @ObservedObject private var netease: NeteaseMusicModel
     @EnvironmentObject private var notifications: MurmurNotificationBridge
+    @Environment(\.openURL) private var openURL
     @State private var showCamera = false
     @State private var topChromeHeight: CGFloat = 0
     @State private var topFadeHeight: CGFloat = 0
+    @State private var showRoomMenu = false
+
+    init(model: MurmurSessionModel, music: MusicModule) {
+        self.model = model
+        self.music = music
+        self._netease = ObservedObject(wrappedValue: music.netease)
+    }
 
     var body: some View {
         // The chrome floats: the conversation owns the whole screen and the
@@ -200,13 +209,39 @@ struct MurmurChatView: View {
             .ignoresSafeArea()
         }
         .overlay(alignment: .top) {
-            MurmurTopChrome(connection: model.connection)
+            ZStack(alignment: .top) {
+                if showRoomMenu {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea()
+                        .onTapGesture { showRoomMenu = false }
+                        .accessibilityLabel("关闭一起听菜单")
+                }
+                MurmurTopChrome(
+                    connection: model.connection,
+                    room: netease.room,
+                    presentation: netease.presentationState(connection: model.connection),
+                    showsRoomMenu: $showRoomMenu,
+                    onPrimary: performPrimaryRoomAction,
+                    onPrevious: { Task { await netease.command(.previous) } },
+                    onNext: { Task { await netease.command(.next) } },
+                    onOpen: openRoomInNetease,
+                    onClose: { Task { await netease.closeRoom() } }
+                )
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
                     topChromeHeight = frame.height
                     // Where the disc ends in the window is where the chat
                     // becomes fully legible again.
                     topFadeHeight = frame.maxY
                 }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .onChange(of: netease.room?.roomHandle, initial: false) { _, _ in
+            showRoomMenu = false
+        }
+        .onChange(of: netease.room?.isActive, initial: false) { _, active in
+            if active != true { showRoomMenu = false }
         }
         .background(MurmurTheme.paper.ignoresSafeArea())
         .sheet(isPresented: $showCamera) {
@@ -217,6 +252,43 @@ struct MurmurChatView: View {
             .ignoresSafeArea()
         }
     }
+
+    private func performPrimaryRoomAction() {
+        switch netease.presentationState(connection: model.connection) {
+        case .waiting:
+            openRoomInNetease()
+        case .playing:
+            Task { await netease.command(.pause) }
+        case .paused:
+            Task { await netease.command(.resume) }
+        case .commandFailed:
+            Task { await netease.retryLastCommand() }
+        case .roomFailed:
+            guard let track = netease.room?.currentTrack else { return }
+            Task {
+                if let inviteURL = await netease.createRoom(for: track) {
+                    openURL(inviteURL)
+                }
+            }
+        case .inactive, .syncing, .offline:
+            break
+        }
+    }
+
+    private func openRoomInNetease() {
+        guard let inviteURL = netease.room?.inviteURL else { return }
+        openURL(inviteURL)
+    }
+}
+
+struct ListenTogetherHeaderVisibility: Equatable, Sendable {
+    let showStatusTag: Bool
+    let showLiveBars: Bool
+
+    init(availableWidth: CGFloat, isPlaying: Bool) {
+        showStatusTag = availableWidth >= 361
+        showLiveBars = availableWidth >= 289 && isPlaying
+    }
 }
 
 /// Independent discs floating over the transcript: the mark, 当年今日 and the
@@ -224,19 +296,56 @@ struct MurmurChatView: View {
 /// and the conversation is the 44pt of each disc.
 private struct MurmurTopChrome: View {
     let connection: MurmurConnectionState
+    let room: ListenTogetherRoomSnapshotV1?
+    let presentation: ListenTogetherPresentationState
+    @Binding var showsRoomMenu: Bool
+    let onPrimary: () -> Void
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+    let onOpen: () -> Void
+    let onClose: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        Group {
+            if presentation == .inactive {
+                inactiveChrome
+            } else {
+                activeChrome
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if showsRoomMenu, presentation != .inactive {
+                NeteaseRoomMenuOverlay(
+                    remoteActionsDisabled: presentation == .offline,
+                    onPrevious: closeThen(onPrevious),
+                    onNext: closeThen(onNext),
+                    onOpen: closeThen(onOpen),
+                    onClose: closeThen(onClose)
+                )
+                .frame(width: 280)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.trailing, 16)
+                .offset(y: 108)
+                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
+                .zIndex(3)
+            }
+        }
+        .animation(
+            reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.86),
+            value: presentation
+        )
+    }
+
+    private var inactiveChrome: some View {
         HStack(spacing: 8) {
-            // No action of its own — the mark answers a press the way the
-            // gear does, and that is all.
-            Button {} label: {
+            Button(action: {}) {
                 MurmurFloatingDisc { MurmurMark(size: 38) }
             }
             .murmurDiscButtonStyle()
             .accessibilityLabel("Murmur")
             Spacer(minLength: 0)
-            // "已连接" is the normal case and just adds noise; a broken
-            // connection still has to be visible.
             if connection != .connected {
                 Text(connection.label)
                     .font(MurmurTheme.body(.caption2, weight: .medium))
@@ -254,11 +363,296 @@ private struct MurmurTopChrome: View {
         .frame(maxWidth: .infinity)
     }
 
+    private var activeChrome: some View {
+        GeometryReader { geometry in
+            let available = geometry.size.width
+            let visibility = ListenTogetherHeaderVisibility(
+                availableWidth: available,
+                isPlaying: presentation == .playing
+            )
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text("Murmur")
+                        .font(MurmurTheme.display(.title3))
+                        .foregroundStyle(MurmurTheme.ink)
+                    Spacer(minLength: 8)
+                    if visibility.showStatusTag {
+                        Text(statusTag)
+                            .font(MurmurTheme.body(.caption2, weight: .semibold))
+                            .foregroundStyle(statusColor)
+                            .padding(.horizontal, 10)
+                            .frame(height: 23)
+                            .background(statusColor.opacity(0.13), in: Capsule())
+                    }
+                }
+
+                HStack(spacing: 9) {
+                    Image(systemName: "music.note")
+                        .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                        .foregroundStyle(MurmurTheme.accentInk)
+                        .frame(width: 40, height: 40)
+                        .background(MurmurTheme.accent, in: RoundedRectangle(cornerRadius: 10))
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(trackLine)
+                            .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                            .foregroundStyle(MurmurTheme.ink)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(statusLine)
+                            .font(MurmurTheme.body(.caption2))
+                            .foregroundStyle(statusColor)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if visibility.showLiveBars {
+                        MurmurLiveBars()
+                            .frame(width: 20, height: 22)
+                            .accessibilityHidden(true)
+                    }
+
+                    Button(action: onPrimary) {
+                        Group {
+                            if presentation.isSyncing {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: primarySymbol)
+                                    .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                            }
+                        }
+                        .foregroundStyle(primaryColor)
+                        .frame(width: 46, height: 46)
+                        .background(MurmurTheme.raisedPaper.opacity(0.74), in: Circle())
+                        .overlay { Circle().stroke(MurmurTheme.rule, lineWidth: 1) }
+                        .contentShape(Circle())
+                    }
+                    .frame(width: 46, height: 46)
+                    .buttonStyle(.plain)
+                    .disabled(presentation.isSyncing || presentation == .offline)
+                    .accessibilityLabel(primaryAccessibilityLabel)
+
+                    Button {
+                        showsRoomMenu.toggle()
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                            .foregroundStyle(MurmurTheme.ink)
+                            .frame(width: 46, height: 46)
+                            .background(MurmurTheme.raisedPaper.opacity(0.74), in: Circle())
+                            .overlay { Circle().stroke(MurmurTheme.rule, lineWidth: 1) }
+                            .contentShape(Circle())
+                    }
+                    .frame(width: 46, height: 46)
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("更多一起听操作")
+                    .accessibilityValue(showsRoomMenu ? "已展开" : "已收起")
+                }
+            }
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
+            .padding(.vertical, 8)
+            .frame(width: available, height: 90)
+            .murmurGlass()
+            .overlay {
+                if presentation.isRoomFailure {
+                    RoundedRectangle(cornerRadius: MurmurTheme.glassCorner, style: .continuous)
+                        .stroke(MurmurTheme.coral, lineWidth: 1)
+                }
+            }
+        }
+        .frame(maxWidth: MurmurTheme.contentWidth, minHeight: 90, maxHeight: 90)
+        .padding(.horizontal, 16)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var trackLine: String {
+        guard let track = room?.currentTrack else { return "和 Murmur 一起听" }
+        guard let artist = track.artists.first, !artist.isEmpty else { return track.title }
+        return "\(track.title) · \(artist)"
+    }
+
+    private var statusTag: String {
+        switch presentation {
+        case .waiting: "等待加入"
+        case .playing: "已连接"
+        case .paused: "已暂停"
+        case .syncing: "同步中"
+        case .commandFailed: "同步失败"
+        case .roomFailed: "邀请过期"
+        case .offline: "连接异常"
+        case .inactive: ""
+        }
+    }
+
+    private var statusLine: String {
+        switch presentation {
+        case .waiting: "等待加入 / 点此打开网易云邀请"
+        case .playing: "已连接，正在一起听"
+        case .paused: "房间仍保持连接"
+        case .syncing(let command): syncingLine(for: command)
+        case .commandFailed: "这次没有同步成功"
+        case .roomFailed: "邀请已过期，点此重试"
+        case .offline: "Murmur 连接异常"
+        case .inactive: ""
+        }
+    }
+
+    private var primarySymbol: String {
+        switch presentation {
+        case .waiting: "arrow.up.forward.app.fill"
+        case .playing: "pause.fill"
+        case .paused: "play.fill"
+        case .commandFailed, .roomFailed: "arrow.clockwise"
+        case .inactive, .syncing, .offline: "circle"
+        }
+    }
+
+    private var primaryAccessibilityLabel: String {
+        switch presentation {
+        case .waiting: "打开网易云一起听邀请"
+        case .playing: "暂停一起听"
+        case .paused: "继续一起听"
+        case .commandFailed: "重试上一次一起听操作"
+        case .roomFailed: "重新创建一起听邀请"
+        case .syncing: "正在同步一起听操作"
+        case .offline: "Murmur 连接异常，控制暂不可用"
+        case .inactive: "Murmur"
+        }
+    }
+
+    private var statusColor: Color {
+        presentation.isFailure ? MurmurTheme.coral : MurmurTheme.secondaryInk
+    }
+
+    private var primaryColor: Color {
+        presentation.isFailure ? MurmurTheme.coral : MurmurTheme.ink
+    }
+
+    private func syncingLine(for command: ListenTogetherCommand?) -> String {
+        switch command {
+        case .pause: "暂停同步中…"
+        case .resume: "继续同步中…"
+        case .previous: "上一首同步中…"
+        case .next: "下一首同步中…"
+        case .playTrack: "切歌同步中…"
+        case nil: "正在确认播放状态…"
+        }
+    }
+
     private var connectionCaptionColor: Color {
         switch connection {
         case .connected, .checking: MurmurTheme.secondaryInk
         case .needsEnrollment, .offline: MurmurTheme.coral
         }
+    }
+
+    private func closeThen(_ action: @escaping () -> Void) -> () -> Void {
+        {
+            showsRoomMenu = false
+            action()
+        }
+    }
+}
+
+private extension ListenTogetherPresentationState {
+    var isSyncing: Bool {
+        if case .syncing = self { return true }
+        return false
+    }
+
+    var isFailure: Bool {
+        switch self {
+        case .commandFailed, .roomFailed, .offline: true
+        default: false
+        }
+    }
+
+    var isRoomFailure: Bool {
+        if case .roomFailed = self { return true }
+        return false
+    }
+}
+
+private struct MurmurLiveBars: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var phase = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 3) {
+            ForEach([10.0, 18.0, 13.0], id: \.self) { height in
+                Capsule()
+                    .fill(MurmurTheme.accent)
+                    .frame(width: 3, height: reduceMotion ? height : (phase ? height : height * 0.55))
+            }
+        }
+        .task {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) {
+                phase = true
+            }
+        }
+    }
+}
+
+private struct NeteaseRoomMenuOverlay: View {
+    let remoteActionsDisabled: Bool
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+    let onOpen: () -> Void
+    let onClose: () -> Void
+
+    @AccessibilityFocusState private var firstItemFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            menuButton("上一首", systemImage: "backward.fill", disabled: remoteActionsDisabled, action: onPrevious)
+                .accessibilityFocused($firstItemFocused)
+            Divider().padding(.horizontal, 10)
+            menuButton("下一首", systemImage: "forward.fill", disabled: remoteActionsDisabled, action: onNext)
+            Divider().padding(.horizontal, 10)
+            menuButton("在网易云打开", systemImage: "arrow.up.forward.app.fill", action: onOpen)
+            Divider().padding(.horizontal, 10)
+            menuButton(
+                "结束一起听",
+                systemImage: "xmark",
+                role: .destructive,
+                disabled: remoteActionsDisabled,
+                action: onClose
+            )
+        }
+        .padding(.vertical, 9)
+        .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(MurmurTheme.rule, lineWidth: 1)
+        }
+        .shadow(color: MurmurTheme.ink.opacity(0.14), radius: 18, y: 8)
+        .onAppear { firstItemFocused = true }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("一起听操作")
+    }
+
+    private func menuButton(
+        _ title: String,
+        systemImage: String,
+        role: ButtonRole? = nil,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(role: role, action: action) {
+            Label(title, systemImage: systemImage)
+                .font(MurmurTheme.body(.body, weight: title == "结束一起听" ? .semibold : .regular))
+                .foregroundStyle(title == "结束一起听" ? MurmurTheme.coral : MurmurTheme.ink)
+                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 18)
+        .disabled(disabled)
     }
 }
 
@@ -479,6 +873,11 @@ struct EnrollmentView: View {
     }
 }
 
+private struct NeteaseRoomPollingKey: Equatable {
+    let roomHandle: String?
+    let mayPoll: Bool
+}
+
 private struct MomentWorkbench: View {
     @ObservedObject var model: MurmurSessionModel
     @Binding var showCamera: Bool
@@ -513,6 +912,7 @@ private struct MomentWorkbench: View {
     @Environment(\.murmurTabBarClearance) private var tabBarClearance
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.openURL) private var openURL
 
     init(model: MurmurSessionModel, showCamera: Binding<Bool>, music: MusicModule) {
@@ -551,11 +951,15 @@ private struct MomentWorkbench: View {
             onPlayMusic: { music.player.tap($0) },
             onListenTogether: music.isListenTogetherAvailable ? { track in
                 Task {
-                    if let inviteURL = await netease.createRoom(for: track) {
+                    let needsInvite = netease.room?.isActive != true
+                    if let inviteURL = await netease.createRoom(for: track), needsInvite {
                         openURL(inviteURL)
                     }
                 }
-            } : nil
+            } : nil,
+            activeListenTogetherTrackID: netease.room?.isActive == true
+                ? netease.room?.currentTrack?.trackID : nil,
+            hasActiveListenTogetherRoom: netease.room?.isActive == true
         )
             // A tap anywhere off the menu closes it, the way a popover does.
             // The catcher covers the transcript and nothing else: over the
@@ -604,18 +1008,6 @@ private struct MomentWorkbench: View {
             // arrives — on the keyboard's own curve, not SwiftUI's.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
-                    if let room = netease.room, room.isActive {
-                        NeteaseListenTogetherCard(
-                            room: room,
-                            commandStatus: netease.commandStatus,
-                            isChanging: netease.isChangingRoom,
-                            onCommand: { command in Task { await netease.command(command) } },
-                            onOpen: { if let inviteURL = room.inviteURL { openURL(inviteURL) } },
-                            onClose: { Task { await netease.closeRoom() } }
-                        )
-                        .padding(.horizontal, MurmurTheme.pageInset)
-                        .padding(.bottom, 6)
-                    }
                     if let draftFailure = model.draftFailure {
                         DraftFailureLine(message: draftFailure)
                             .transition(.opacity)
@@ -672,7 +1064,9 @@ private struct MomentWorkbench: View {
                     },
                     onCancel: { netease.discardPreview() }
                 )
-                .presentationDetents([.medium])
+                .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.height(377)])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(MurmurTheme.paper)
             }
         }
         .fullScreenCover(item: $openPhoto) { photo in
@@ -707,13 +1101,17 @@ private struct MomentWorkbench: View {
             stubPhotoIfAsked()
 #endif
         }
-        .task(id: netease.room?.roomHandle) {
+        .task(id: NeteaseRoomPollingKey(
+            roomHandle: netease.room?.roomHandle,
+            mayPoll: music.isListenTogetherAvailable && scenePhase == .active
+        )) {
             while !Task.isCancelled,
                   music.isListenTogetherAvailable,
+                  scenePhase == .active,
                   netease.room?.isActive == true
             {
                 do {
-                    try await Task.sleep(for: .seconds(5))
+                    try await Task.sleep(for: .seconds(2))
                 } catch {
                     return
                 }
@@ -740,6 +1138,9 @@ private struct MomentWorkbench: View {
         .onChange(of: music.isNeteaseCatalogAvailable, initial: true) { _, enabled in
             guard enabled else { return }
             netease.loadPendingShareDraft()
+#if DEBUG
+            netease.seedUITestSharePreviewIfRequested()
+#endif
         }
         .onChange(of: music.isListenTogetherAvailable, initial: true) { _, enabled in
             guard enabled else { return }

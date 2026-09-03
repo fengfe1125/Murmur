@@ -24,6 +24,20 @@ enum MusicCardPlayback: Equatable, Sendable {
     }
 }
 
+enum ListenTogetherTrackRelationship: Equatable, Sendable {
+    case inactive
+    case currentTrack
+    case otherTrack
+
+    var actionLabel: String {
+        switch self {
+        case .inactive: "和 Murmur 一起听"
+        case .currentTrack: "正在一起听"
+        case .otherTrack: "换成这首"
+        }
+    }
+}
+
 /// One song, sitting in the scrollback like any other message.
 ///
 /// It draws only what the sender's snapshot recorded. Nothing here reaches the
@@ -37,6 +51,7 @@ struct MusicCardView: View {
     let onPlay: () -> Void
     let onOpenProvider: () -> Void
     var onListenTogether: (() -> Void)?
+    var listenTogetherRelationship: ListenTogetherTrackRelationship = .inactive
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var artworkSide: CGFloat = 56
@@ -82,12 +97,13 @@ struct MusicCardView: View {
 
                 if track.isNetease, let onListenTogether {
                     Button(action: onListenTogether) {
-                        Text("和 Murmur 一起听")
+                        Text(listenTogetherRelationship.actionLabel)
                             .font(MurmurTheme.body(.caption2, weight: .semibold))
                             .foregroundStyle(isOutgoing ? MurmurTheme.onAccent : MurmurTheme.accentInk)
                     }
                     .buttonStyle(.plain)
                     .frame(minHeight: 44, alignment: .leading)
+                    .disabled(listenTogetherRelationship == .currentTrack)
                 }
             }
         }
@@ -114,8 +130,10 @@ struct MusicCardView: View {
             named: track.isNetease ? "在网易云打开" : "在 Audius 打开",
             onOpenProvider
         )
-        .accessibilityAction(named: "和 Murmur 一起听") {
-            if track.isNetease { onListenTogether?() }
+        .accessibilityAction(named: listenTogetherRelationship.actionLabel) {
+            if track.isNetease, listenTogetherRelationship != .currentTrack {
+                onListenTogether?()
+            }
         }
     }
 
@@ -184,4 +202,5 @@ struct MusicCardView: View {
         }
         return "\(who)，\(track.title)，\(names)\(status)"
     }
+
 }

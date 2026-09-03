@@ -228,6 +228,7 @@ class RoomSnapshotV1:
     invite_url: str | None
     updated_at: str
     error_code: str | None = None
+    playback_state: str = "unknown"
     version: int = field(default=1, init=False)
 
     def __post_init__(self) -> None:
@@ -242,6 +243,8 @@ class RoomSnapshotV1:
             object.__setattr__(self, "current_track", _public_track(self.current_track))
         if not isinstance(self.user_joined, bool):
             raise RoomInvalid("user_joined must be boolean")
+        if self.playback_state not in {"playing", "paused", "unknown"}:
+            raise RoomInvalid("invalid public playback state")
 
     def to_wire(self) -> dict:
         """Return the complete, stable public shape and nothing transport-specific."""
@@ -255,6 +258,7 @@ class RoomSnapshotV1:
             "invite_url": self.invite_url,
             "updated_at": self.updated_at,
             "error_code": self.error_code,
+            "playback_state": self.playback_state,
         }
 
 
@@ -419,6 +423,7 @@ class ListenTogetherRoomManager:
             invite_url=room.adapter_state.invite_url,
             updated_at=room.updated_at,
             error_code=room.error_code,
+            playback_state=room.adapter_state.playback_state,
         )
 
     def _apply_confirmed(self, room: _ActiveRoom, state: AdapterRoomState) -> None:
@@ -539,7 +544,10 @@ class ListenTogetherRoomManager:
                 elif adapter_result.status == "accepted":
                     room.state = "syncing"
                 else:
-                    room.state = "failed"
+                    # A rejected command is not a failed room. Keep the last
+                    # confirmed lifecycle and playback state so the client can
+                    # offer another control without manufacturing a new room.
+                    room.state = room.adapter_state.lifecycle
                     room.pending_command = None
                     room.error_code = adapter_result.error_code or "room_command_failed"
                 result = CommandResultV1(adapter_result.status, self._snapshot(room))
@@ -1057,14 +1065,19 @@ class InMemoryRoomAdapter:
             raise RoomNotFound("adapter room was not found") from exc
 
 
-_ROOM_WIRE_KEYS = frozenset({
+_ROOM_WIRE_REQUIRED_KEYS = frozenset({
     "version", "room_handle", "state", "current_track", "user_joined",
     "pending_command", "invite_url", "updated_at", "error_code",
 })
+_ROOM_WIRE_KEYS = _ROOM_WIRE_REQUIRED_KEYS | {"playback_state"}
 
 
 def _room_from_wire(value: object) -> RoomSnapshotV1:
-    if not isinstance(value, dict) or set(value) != _ROOM_WIRE_KEYS:
+    if (
+        not isinstance(value, dict)
+        or not _ROOM_WIRE_REQUIRED_KEYS.issubset(value)
+        or not set(value).issubset(_ROOM_WIRE_KEYS)
+    ):
         raise RoomIPCUnavailable("worker returned an invalid room response")
     if value.get("version") != 1:
         raise RoomIPCUnavailable("worker returned an unsupported room version")
@@ -1078,6 +1091,7 @@ def _room_from_wire(value: object) -> RoomSnapshotV1:
             invite_url=value["invite_url"],
             updated_at=value["updated_at"],
             error_code=value["error_code"],
+            playback_state=value.get("playback_state", "unknown"),
         )
     except (KeyError, RoomInvalid) as exc:
         raise RoomIPCUnavailable("worker returned an invalid room response") from exc

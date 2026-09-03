@@ -26,7 +26,17 @@ struct MurmurApp: App {
         WindowGroup {
             MurmurRootView(session: session, music: music)
                 .environmentObject(notifications)
+                .preferredColorScheme(uiTestPreferredColorScheme)
         }
+    }
+
+    private var uiTestPreferredColorScheme: ColorScheme? {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--murmur-ui-test-dark") {
+            return .dark
+        }
+#endif
+        return nil
     }
 }
 
