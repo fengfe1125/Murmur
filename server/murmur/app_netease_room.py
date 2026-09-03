@@ -65,6 +65,19 @@ class NeteaseHTTPRoomTransport:
         if self._owns_client:
             self.client.close()
 
+    @staticmethod
+    def _error_code(response: httpx.Response) -> str | None:
+        """协议服务把每种失败都压成 502 + `{"error": "<code>"}`。
+
+        只看状态码的话，「已经有房间了」和「这首歌下架了」长得一模一样，到
+        用户那儿都是同一句「暂时不可用」。要自愈就必须把码读出来。
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        return body.get("error") if isinstance(body, dict) else None
+
     def _call(self, method: str, path: str, payload: dict | None = None) -> dict:
         try:
             response = self.client.request(method, path, json=payload)
@@ -73,7 +86,10 @@ class NeteaseHTTPRoomTransport:
         if response.status_code == 401:
             raise RoomAuthenticationFailed("netease robot session is not authenticated")
         if response.status_code >= 400:
-            raise RoomTransportUnavailable("netease protocol service rejected the call")
+            raise RoomTransportUnavailable(
+                "netease protocol service rejected the call: "
+                f"{self._error_code(response) or response.status_code}"
+            )
         try:
             body = response.json()
         except ValueError as exc:
@@ -142,12 +158,35 @@ class NeteaseHTTPRoomTransport:
     ) -> NeteaseTransportState:
         song_id = self._song_id(initial_track)
         self._queue_version = max(queue_version, 1)
-        self._call("POST", "/api/room/create", {
-            "songIds": [song_id], "initialSongId": song_id,
-        })
+        body = {"songIds": [song_id], "initialSongId": song_id}
+        try:
+            self._call("POST", "/api/room/create", body)
+        except RoomTransportUnavailable:
+            # 房间只活在两处：manager 在 worker 内存里（重启即忘），协议服务
+            # 在它自己进程里（重启才清）。worker 每次部署都会留下一个只有协议
+            # 服务记得的孤儿房间，之后每一次建房都撞 room_already_active，
+            # 用户看到的是永久的「一起听暂时不可用」——重启 App 也不会好。
+            #
+            # 这里只对这一种情况自愈，而且只重试一次。前提是协议服务全局只有
+            # 一个房间、房间白名单只有一个用户，所以残留的那个一定是他自己的。
+            # 将来支持多用户时，这个前提不再成立，必须重新设计。
+            if not self._stale_room_cleared():
+                raise
+            self._call("POST", "/api/room/create", body)
         # 建房那一下不返回成员信息，状态要再查一次才完整。
         self._current_track = initial_track
         return self._state(self._call("GET", "/api/room/status"), initial_track)
+
+    def _stale_room_cleared(self) -> bool:
+        """协议服务手上是不是有一个 Murmur 已经不认识的房间；有就收掉。"""
+        try:
+            status = self._call("GET", "/api/room/status")
+        except RoomTransportUnavailable:
+            return False
+        if status.get("state") != "active":
+            return False
+        self._call("POST", "/api/room/end")
+        return True
 
     def get_state(
         self, *, external_room_id: str, client_sequence: int, queue_version: int

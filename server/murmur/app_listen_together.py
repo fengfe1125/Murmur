@@ -1285,11 +1285,18 @@ class RoomIPCClient:
         self,
         socket_path: str | os.PathLike[str],
         *,
-        timeout_seconds: float = 2.0,
+        # 这条 socket 上没有一个操作是纯本地的：worker 那头每次都要打网易云。
+        # 读一次状态就是三个并行上游请求，每个自己有十秒预算；建房还要再加上
+        # 曲库校验、建房、换歌单、下发播放、心跳。原来的 2 秒几乎必然超时，而
+        # 超时之后用户看到的是一句和真实原因无关的「一起听暂时不可用」——
+        # 客户端那边的刷新还是静默失败，于是表现成「header 不会自己更新」。
+        timeout_seconds: float = 15.0,
+        create_timeout_seconds: float = 45.0,
         max_message_bytes: int = 64 * 1024,
     ):
         self.socket_path = os.fspath(socket_path)
         self.timeout = timeout_seconds
+        self.create_timeout = create_timeout_seconds
         self.max_message_bytes = max_message_bytes
 
     def create(
@@ -1300,7 +1307,7 @@ class RoomIPCClient:
             "user_id": user_id,
             "initial_track": initial_track,
             "idempotency_key": idempotency_key,
-        })
+        }, timeout=self.create_timeout)
         return _room_from_wire(data)
 
     def current(self, *, user_id: str) -> RoomSnapshotV1 | None:
@@ -1323,7 +1330,7 @@ class RoomIPCClient:
             "command": command,
             "track": track,
             "idempotency_key": idempotency_key,
-        })
+        }, timeout=self.create_timeout)
         if not isinstance(data, dict) or set(data) != {"status", "room"}:
             raise RoomIPCUnavailable("worker returned an invalid command response")
         try:
@@ -1346,12 +1353,12 @@ class RoomIPCClient:
         })
         return _room_from_wire(data)
 
-    def _request(self, request: dict):
+    def _request(self, request: dict, *, timeout: float | None = None):
         encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
         if len(encoded) > self.max_message_bytes:
             raise RoomInvalid("room IPC request is too large")
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        connection.settimeout(self.timeout)
+        connection.settimeout(self.timeout if timeout is None else timeout)
         try:
             connection.connect(self.socket_path)
             connection.sendall(encoded + b"\n")

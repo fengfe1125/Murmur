@@ -201,6 +201,81 @@ class TransportTranslationTests(unittest.TestCase):
                 idempotency_key="k",
             )
 
+    def test_a_room_only_the_protocol_service_remembers_is_cleared_and_retried(self):
+        """worker 一重启就会留下这种孤儿房间，之后每次建房都撞它。
+
+        manager 在 worker 内存里（重启即忘），协议服务在自己进程里（重启才清）。
+        两者一旦分叉，用户看到的是永久的「暂时不可用」，重启 App 也不会好。
+        """
+        seen = []
+        created = {"count": 0}
+
+        def handler(request):
+            seen.append((request.method, request.url.path))
+            if request.url.path == "/api/room/create":
+                created["count"] += 1
+                if created["count"] == 1:
+                    return httpx.Response(502, json={"error": "room_already_active"})
+                return httpx.Response(200, json={"ok": True})
+            if request.url.path == "/api/room/status":
+                return httpx.Response(200, json=room_body())
+            return httpx.Response(200, json={"ok": True})
+
+        transport = NeteaseHTTPRoomTransport(
+            "https://127.0.0.1:18763", transport=httpx.MockTransport(handler)
+        )
+        state = transport.create_room(
+            initial_track=TRACK, client_sequence=1, queue_version=1,
+            idempotency_key="k",
+        )
+        self.assertEqual(state.external_room_id, "room-1")
+        self.assertIn(("POST", "/api/room/end"), seen)
+        self.assertEqual(created["count"], 2, "该重试一次建房")
+
+    def test_the_retry_happens_at_most_once(self):
+        """自愈失败就如实报错，不许无限重试撞一个坏掉的上游。"""
+        created = {"count": 0}
+
+        def handler(request):
+            if request.url.path == "/api/room/create":
+                created["count"] += 1
+                return httpx.Response(502, json={"error": "room_already_active"})
+            if request.url.path == "/api/room/status":
+                return httpx.Response(200, json=room_body())
+            return httpx.Response(200, json={"ok": True})
+
+        transport = NeteaseHTTPRoomTransport(
+            "https://127.0.0.1:18763", transport=httpx.MockTransport(handler)
+        )
+        with self.assertRaises(RoomTransportUnavailable):
+            transport.create_room(
+                initial_track=TRACK, client_sequence=1, queue_version=1,
+                idempotency_key="k",
+            )
+        self.assertEqual(created["count"], 2)
+
+    def test_nothing_is_cleared_when_the_service_has_no_room(self):
+        """服务端本来就空着的失败是别的原因，不该顺手去关一个不存在的房间。"""
+        seen = []
+
+        def handler(request):
+            seen.append((request.method, request.url.path))
+            if request.url.path == "/api/room/create":
+                return httpx.Response(502, json={"error": "song_unavailable"})
+            if request.url.path == "/api/room/status":
+                return httpx.Response(200, json={"state": "idle"})
+            return httpx.Response(200, json={"ok": True})
+
+        transport = NeteaseHTTPRoomTransport(
+            "https://127.0.0.1:18763", transport=httpx.MockTransport(handler)
+        )
+        with self.assertRaises(RoomTransportUnavailable):
+            transport.create_room(
+                initial_track=TRACK, client_sequence=1, queue_version=1,
+                idempotency_key="k",
+            )
+        self.assertNotIn(("POST", "/api/room/end"), seen)
+
     def test_a_track_that_is_not_a_netease_song_never_reaches_the_service(self):
         service = FakeService()
         with self.assertRaises(RoomTransportUnavailable):
