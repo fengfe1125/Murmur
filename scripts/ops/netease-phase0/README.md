@@ -14,7 +14,9 @@ Murmur 正式运行依赖。
 - 运行用户为 `murmur-netease-poc`，目录为 `/opt/murmur-netease-poc`。
 - 会话只保存在 `/opt/murmur-netease-poc/secrets/bot-session.json`，目录 `0700`、文件 `0600`。
 - 不读取 `/opt/murmur`、正式 `.env`、数据库、日志、systemd 配置或更新器状态。
-- 不开放公网端口，不安装 systemd 服务，不在测试账号上绕过验证码或风控。
+- 不开放公网端口，不在测试账号上绕过验证码或风控。
+- 默认不安装 systemd 服务；只有需要它活过重启时，才手工安装本目录的 unit——
+  它不受 `murmur-update` 管理，安装与恢复都由管理员负责，见下文「常驻运行」。
 - 任何验证码、异常登录或封禁提示都立即停止实验并撤销会话。
 
 启动命令（由隔离用户执行）：
@@ -33,6 +35,21 @@ Murmur 正式运行依赖。
 `--runtime-dir` 后，PID 和随机本地页面地址分别写入权限 `0600` 的 `phase0.pid` 与
 `phase0-ready.txt`，进程退出时自动移除。使用 SSH 将本机 `18763` 转发到 VPS
 `127.0.0.1:18763`，再打开该 URL。二维码由服务端生成；扫码成功后页面只显示“登录成功”。
+
+常驻运行（可选）：`nohup` 起的进程一重启就没了，房间会跟着停。要让它活过重启，
+安装同目录的 unit：
+
+```sh
+sudo install -m 0644 murmur-netease-phase0.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now murmur-netease-phase0
+```
+
+这个 unit **不由 `murmur-update` 管理**，也不放进 `infra/deploy/`——那个目录下的每个
+`.service` 都会被更新器安装。代价要知道：更新器不会替它恢复，机器重装或 unit 被删之后
+要人工装回来。它对应的边界记在[回滚计划](../../../docs/operations/netease-poc-rollback-plan-2026-08-31.md)第 4 节。
+
+会话失效后服务仍在跑，但所有房间调用都会失败；重新扫码即可，不必重启服务。
 
 本地单元测试：
 

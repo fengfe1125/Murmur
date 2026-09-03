@@ -6,7 +6,7 @@
 
 - 生产域名是 `https://claude.sakuramu.edu.kg`，当前主机为 `193.106.250.61`；迁移基线是 `main@0d5f805c736417af3fd8b864664ce03ccf0358d9`。迁移后已通过公网 HTTPS、真实消息、SQLite 备份和 GitHub 更新链验收；生产操作前仍须重新读取实时 SHA 与服务状态。
 - 生产只运行 Caddy、`murmur-app-api`、`murmur-app-worker` 和 `murmur-web`。Telegram、钉钉、微信、QQ 的凭据、环境文件和 systemd unit 均未迁入新 VPS。
-- 网易云音乐目前只存在于本机 `codex/feat/music/netease-vps-mobile-poc` 开发分支及未提交改动中，尚未进入生产 VPS、远端 `main` 或可分发 App；“一起听”仍按实验 PoC 处理，不得从文档或本地代码推断为已上线。
+- 网易云音乐已进入远端 `main` 与生产 VPS（2026-09-03）。曲库、歌曲卡与分享按 `MURMUR_APP_MUSIC_USER_ALLOWLIST` 单账号灰度；“一起听”的 transport 已接入，但仍是实验 PoC——协议非官方、依赖跑在隔离用户下的 Phase 0 服务、用可丢弃机器人账号，且未获网易云授权，不得据此推断可公测或分发。
 
 ## VPS 连接
 

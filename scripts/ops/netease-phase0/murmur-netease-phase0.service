@@ -1,0 +1,69 @@
+# 受审协议服务（实验）。手工安装，不由 murmur-update 管理。
+#
+# 它不在更新器的 SERVICES 清单里，也不放在 infra/deploy/——那个目录下的每个
+# .service 都会被更新器安装。放在这里是为了让更新器完全碰不到它：回滚计划的
+# 「新 systemd 服务闸门」针对的是更新器管理的服务，这一个刻意留在闸门之外，
+# 代价是更新器不会替它恢复，出事要人工 systemctl start。
+#
+# 安装：
+#   sudo install -m 0644 murmur-netease-phase0.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now murmur-netease-phase0
+
+[Unit]
+Description=Murmur — NetEase listen-together Phase 0 protocol service (experimental)
+Documentation=file:/opt/murmur-netease-poc/app/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=murmur-netease-poc
+Group=murmur-netease-poc
+WorkingDirectory=/opt/murmur-netease-poc
+Environment=DOTENV_CONFIG_QUIET=true
+ExecStart=/opt/murmur-netease-poc/runtime/node/bin/node \
+  /opt/murmur-netease-poc/app/server.js \
+  --api-root /opt/murmur-netease-poc/vendor/api-enhanced \
+  --state-dir /opt/murmur-netease-poc/secrets \
+  --runtime-dir /opt/murmur-netease-poc/work/run \
+  --host 127.0.0.1 \
+  --port 18763
+
+# 会话失效要人工重新扫码，所以崩溃重启是对的，起不来就别一直撞。
+Restart=on-failure
+RestartSec=5
+MemoryMax=384M
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Node 的 JIT 需要可写可执行页，所以这一条只能是 false——写成 true 服务起不来。
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# 只有会话和运行时目录可写；vendor、runtime、app 全部只读。
+ReadWritePaths=/opt/murmur-netease-poc/secrets
+ReadWritePaths=/opt/murmur-netease-poc/work
+
+# 手册里「不读取 /opt/murmur、正式 .env、数据库、日志」那条，在这里从纸面
+# 约定变成内核强制：这个进程根本看不到 Murmur 的目录。
+InaccessiblePaths=/opt/murmur
+InaccessiblePaths=/etc/murmur
+
+[Install]
+WantedBy=multi-user.target
