@@ -28,6 +28,9 @@ MAX_SHARED_URL_CHARS = 2048
 MAX_SHORT_LINK_REDIRECTS = 3
 NETEASE_LONG_HOST = "music.163.com"
 NETEASE_SHORT_HOSTS = frozenset({"y.music.163.com", "163cn.tv"})
+# 手机端分享的短链终点是 y.music.163.com，它直接出歌曲页、不再重定向。
+# 歌曲 id 就在那个地址里，所以这两个 host 都算「已经是一首歌」的落点。
+NETEASE_SONG_HOSTS = frozenset({NETEASE_LONG_HOST, "y.music.163.com"})
 
 _URL = re.compile(r"https://[^\s<>\"']+", re.IGNORECASE)
 _TRAILING_SHARE_PUNCTUATION = ").,;!?，。；！？、】》」』”’"
@@ -128,7 +131,7 @@ class MusicLink:
     @staticmethod
     def _song_ref(url: str) -> TrackRef | None:
         parsed = urlparse(url)
-        if (parsed.hostname or "").rstrip(".").casefold() != NETEASE_LONG_HOST:
+        if (parsed.hostname or "").rstrip(".").casefold() not in NETEASE_SONG_HOSTS:
             return None
 
         song_url = parsed
@@ -153,6 +156,11 @@ class MusicLink:
         for redirect_index in range(self.max_redirects + 1):
             _, host = self._validated_url(current, allowed_hosts=allowed_targets)
             self._require_public_dns(host)
+            # 到了歌就停，不管这一跳是不是还会再跳。短链的终点是
+            # y.music.163.com，它返回 200 而不是又一个 302——继续要求重定向
+            # 会把手机端分享的每一首歌都判成「打不开成一首歌」。
+            if self._song_ref(current) is not None:
+                return current
             if host == NETEASE_LONG_HOST:
                 return current
             if redirect_index == self.max_redirects:
@@ -191,12 +199,14 @@ class MusicLink:
         for candidate in candidates:
             parsed = urlparse(candidate)
             host = (parsed.hostname or "").rstrip(".").casefold()
-            if host == NETEASE_LONG_HOST:
-                self._validated_url(candidate, allowed_hosts=frozenset({NETEASE_LONG_HOST}))
+            if host in NETEASE_SONG_HOSTS:
+                self._validated_url(candidate, allowed_hosts=NETEASE_SONG_HOSTS)
                 ref = self._song_ref(candidate)
-                if ref is None:
+                if ref is not None:
+                    return self.catalog.resolve(ref.provider, ref.track_id)
+                # y.music 上不是歌的地址仍然可能是一条要跟的短链。
+                if host not in NETEASE_SHORT_HOSTS:
                     continue
-                return self.catalog.resolve(ref.provider, ref.track_id)
             if host in NETEASE_SHORT_HOSTS:
                 self._validated_url(candidate, allowed_hosts=NETEASE_SHORT_HOSTS)
                 resolved_url = self._follow_short_link(candidate)
@@ -211,5 +221,6 @@ __all__ = [
     "MAX_SHARED_TEXT_BYTES",
     "MusicLink",
     "MusicLinkRejected",
+    "NETEASE_SONG_HOSTS",
     "TrackRef",
 ]

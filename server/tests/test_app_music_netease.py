@@ -302,6 +302,53 @@ class MusicLinkTests(unittest.TestCase):
         self.assertEqual(seen, ["y.music.163.com"])
         self.assertEqual(catalog.calls, [("netease", "186016")])
 
+    def test_the_real_mobile_share_ends_on_y_music_without_redirecting_again(self):
+        """手机端分享的真实形状：163cn.tv 跳一次就落在 y.music 的歌曲页。
+
+        那一跳返回 200 而不是又一个 302，歌曲 id 就在地址里。以前代码要求
+        短链必须一路跳到 music.163.com，于是手机上分享的每一首歌都被判成
+        「这个链接打不开成一首歌」——这条竖切最主要的入口整个是坏的。
+        """
+        seen = []
+
+        def handler(request):
+            seen.append(request.url.host)
+            return httpx.Response(302, headers={
+                "location":
+                    "https://y.music.163.com/m/song?fx-wechatnew=t1&id=13918916",
+            })
+
+        catalog = ResolvingCatalog()
+        link = MusicLink(
+            catalog,
+            transport=httpx.MockTransport(handler),
+            address_resolver=public_dns,
+        )
+        track = link.parse_shared_text(
+            "分享颜人中的单曲《嗜好》https://163cn.tv/bfjiU65m (@网易云音乐)"
+        )
+        self.assertEqual(track["track_id"], "13918916")
+        self.assertEqual(track["provider"], "netease")
+        # 只请求了短链那一跳；y.music 那一跳不再被要求继续重定向。
+        self.assertEqual(seen, ["163cn.tv"])
+        self.assertEqual(catalog.calls, [("netease", "13918916")])
+
+    def test_a_pasted_y_music_song_link_resolves_without_any_request(self):
+        """直接粘 y.music 的歌曲地址，不该再去网络上跟一次。"""
+        catalog = ResolvingCatalog()
+        link = MusicLink(
+            catalog,
+            transport=httpx.MockTransport(
+                lambda request: self.fail("不应该发起请求")
+            ),
+            address_resolver=public_dns,
+        )
+        self.assertEqual(
+            link.parse_shared_text("https://y.music.163.com/m/song?id=186016"),
+            NETEASE_TRACK,
+        )
+        self.assertEqual(catalog.calls, [("netease", "186016")])
+
     def test_supports_the_official_163cn_short_host(self):
         link = MusicLink(
             ResolvingCatalog(),
