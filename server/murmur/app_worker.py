@@ -1119,10 +1119,11 @@ def _start_listen_together(settings: AppSettings):
     restart recovery, and a socket only the App API user can open.
 
     The transport is injected only when a protocol base URL is configured.
-    Without one the adapter keeps its fail-closed behaviour: every room request
-    returns a typed error rather than pretending a room exists.  That is what
-    makes `MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL` the real switch — the room
-    flag alone still cannot reach NetEase.
+    `AppSettings.validate()` already refuses to start with the room switch on
+    and no protocol URL, so in a real deployment turning the room on is always
+    a deliberate two-part decision: the flag *and* an endpoint.  The unset
+    branch here is the belt to that braces — an adapter with no transport fails
+    closed rather than pretending a room exists.
     """
     if not settings.netease_room_experiment_enabled:
         return None, None

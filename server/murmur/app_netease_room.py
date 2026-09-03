@@ -109,7 +109,17 @@ class NeteaseHTTPRoomTransport:
         ):
             raise RoomTransportUnavailable("netease invite url is invalid")
         # roomUsers 只在自己一个人时长度为 1；对方进来才算连上。
-        joined = int(body.get("participantCount") or 0) > 1
+        count = body.get("participantCount") or 0
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise RoomTransportUnavailable("netease participant count is invalid")
+        joined = count > 1
+        # 上游只说当前是哪个 songId，不给 Murmur 的 track 形状。对不上就是
+        # 我们手上这份已经过期了（next/previous 之后就会这样）——那就如实说
+        # 不知道，而不是把旧的那首当成正在放的那首端出去。
+        current = body.get("currentSongId")
+        if track is not None and current is not None:
+            if str(current) != str(track.get("track_id")):
+                track = None
         return NeteaseTransportState(
             external_room_id=str(room_id),
             invite_url=invite,

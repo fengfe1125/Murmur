@@ -153,7 +153,10 @@ class TransportTranslationTests(unittest.TestCase):
         self.assertEqual(service.calls, [("POST", "/api/room/command")])
 
     def test_changing_the_song_replaces_the_playlist_and_moves_the_queue_version(self):
-        service = FakeService(states=[room_body(), room_body()])
+        # 换歌之后服务端报的是新的那首，两边对得上，track 才留得住。
+        service = FakeService(states=[
+            room_body(), room_body(currentSongId=OTHER["track_id"]),
+        ])
         transport = service.transport()
         transport.create_room(
             initial_track=TRACK, client_sequence=1, queue_version=1,
@@ -169,6 +172,34 @@ class TransportTranslationTests(unittest.TestCase):
         self.assertGreaterEqual(state.queue_version, 2)
         self.assertEqual(state.current_track, OTHER)
         self.assertIn(("POST", "/api/room/playlist"), service.calls)
+
+    def test_a_room_that_moved_on_reports_no_track_instead_of_the_old_one(self):
+        """上游只给 songId。对不上就是我们手上这份过期了——如实说不知道。
+
+        `next` / `previous` 之后房间的当前歌会变，而 Murmur 的 track 形状上游
+        给不了。这时候把旧的那首继续端出去，卡片就会显示错的歌，而且命令确认
+        那一步还可能据此判成「已同步」。
+        """
+        service = FakeService(states=[
+            room_body(), room_body(currentSongId="99999999"),
+        ])
+        transport = service.transport()
+        transport.create_room(
+            initial_track=TRACK, client_sequence=1, queue_version=1,
+            idempotency_key="k",
+        )
+        state = transport.get_state(
+            external_room_id="room-1", client_sequence=1, queue_version=1
+        )
+        self.assertIsNone(state.current_track)
+
+    def test_a_nonsense_participant_count_is_a_transport_error(self):
+        service = FakeService(states=[room_body(participantCount="两个")])
+        with self.assertRaises(RoomTransportUnavailable):
+            service.transport().create_room(
+                initial_track=TRACK, client_sequence=1, queue_version=1,
+                idempotency_key="k",
+            )
 
     def test_a_track_that_is_not_a_netease_song_never_reaches_the_service(self):
         service = FakeService()
@@ -230,9 +261,6 @@ class AdapterWithRealTransportTests(unittest.TestCase):
             adapter.snapshot(room_ref=created.room_ref)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class WorkerWiringTests(unittest.TestCase):
     """协议地址才是真开关：房间开关自己到不了网易云。"""
@@ -290,3 +318,6 @@ class WorkerWiringTests(unittest.TestCase):
             finally:
                 if server is not None:
                     server.close()
+
+if __name__ == "__main__":
+    unittest.main()
