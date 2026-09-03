@@ -7,11 +7,13 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from murmur.app_settings import AppSettings  # noqa: E402
-from murmur.app_worker import build_catalog  # noqa: E402
+from murmur.app_worker import build_catalog, build_processor  # noqa: E402
+from murmur.config import Config  # noqa: E402
 
 
 def settings(root: Path, **overrides) -> AppSettings:
@@ -103,6 +105,31 @@ class NeteaseSettingsTests(unittest.TestCase):
             self.assertEqual(catalog.providers, ("netease", "audius"))
         finally:
             catalog.close()
+
+    def test_the_worker_processor_carries_the_music_allowlist(self):
+        """灰度名单得真的走到 worker 里，不能只写在 App API 那面。"""
+        value = settings(
+            self.root,
+            netease_catalog_enabled=True,
+            music_user_allowlist=frozenset({"user-1"}),
+        )
+        store = SimpleNamespace(current_playback=lambda user_id: None)
+        processor = build_processor(Config.load(), value, store)
+        try:
+            self.assertEqual(
+                processor.music_user_allowlist, frozenset({"user-1"})
+            )
+        finally:
+            processor.music.catalog.close()
+
+    def test_a_deployment_without_music_carries_no_allowlist(self):
+        processor = build_processor(
+            Config.load(),
+            settings(self.root, music_user_allowlist=frozenset({"user-1"})),
+            None,
+        )
+        self.assertIsNone(processor.music)
+        self.assertEqual(processor.music_user_allowlist, frozenset())
 
 
 if __name__ == "__main__":

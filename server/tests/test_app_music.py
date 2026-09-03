@@ -1170,9 +1170,11 @@ class MusicProcessorTests(unittest.TestCase):
 
         return Job("j1", "m1", "u1", note, None, None, (), None, music_track)
 
-    def process(self, job, music, on_bubble=None, playback=None):
+    def process(self, job, music, on_bubble=None, playback=None,
+                allowlist=frozenset()):
         processor = EngineMomentProcessor(
             self.cfg, self.root, music=music, playback_state=playback,
+            music_user_allowlist=allowlist,
         )
         return processor(job, self.memory, on_bubble or (lambda text: None))
 
@@ -1240,6 +1242,65 @@ class MusicProcessorTests(unittest.TestCase):
             result = self.process(self.job(), None)
         self.assertIsNone(respond.call_args.kwargs["context_extra"])
         self.assertIsNone(result.music_track)
+
+    def test_an_account_outside_the_allowlist_never_reaches_the_catalog(self):
+        """灰度之外的账号，连搜都不许搜。
+
+        App API 那面已经 403 了，但聊天是另一条进来的路。少了这道闸门，
+        没开的账号照样能用一句话把歌搜出来、拿到卡片。
+        """
+        catalog = StubCatalog(results=[TRACK])
+        music = AppMusic(
+            catalog, StubPlanner(error=AssertionError("planner must not run"))
+        )
+        with patch("murmur.app_worker.respond") as respond:
+            respond.return_value = Reply(scene="", move="speak", say=["嗯。"])
+            result = self.process(
+                self.job(), music, allowlist=frozenset({"u2"})
+            )
+        self.assertIsNone(result.music_card)
+        self.assertEqual(catalog.searches, [])
+
+    def test_a_shared_song_from_an_excluded_account_is_never_re_resolved(self):
+        """他附上的那首歌也一样，不该拿去问 catalog。"""
+        catalog = StubCatalog(track=TRACK)
+        music = AppMusic(catalog, StubPlanner())
+        with patch("murmur.app_worker.respond") as respond:
+            respond.return_value = Reply(scene="", move="speak", say=["嗯。"])
+            result = self.process(
+                self.job("听听这首歌", music_track=json.dumps(TRACK)),
+                music,
+                allowlist=frozenset({"u2"}),
+            )
+        self.assertEqual(catalog.lookups, [])
+        self.assertIsNone(result.music_track)
+
+    def test_an_empty_allowlist_still_means_everyone(self):
+        """空名单是「开关放行的所有人」，不是「没有人」。
+
+        这条钉住的是它和房间白名单的区别——房间必须是显式非空成员。
+        别有人顺手把这里也改成严格成员判断。
+        """
+        music = AppMusic(
+            StubCatalog(results=[TRACK]),
+            StubPlanner(MusicPlan(True, "discover", "rainy")),
+        )
+        with patch("murmur.app_worker.respond") as respond:
+            respond.return_value = Reply(scene="", move="speak", say=["给你放这首。"])
+            result = self.process(self.job(), music, allowlist=frozenset())
+        self.assertEqual(result.music_card, TRACK)
+
+    def test_an_account_inside_the_allowlist_still_gets_its_song(self):
+        music = AppMusic(
+            StubCatalog(results=[TRACK]),
+            StubPlanner(MusicPlan(True, "discover", "rainy")),
+        )
+        with patch("murmur.app_worker.respond") as respond:
+            respond.return_value = Reply(scene="", move="speak", say=["给你放这首。"])
+            result = self.process(
+                self.job(), music, allowlist=frozenset({"u1", "u2"})
+            )
+        self.assertEqual(result.music_card, TRACK)
 
     def test_what_he_is_listening_to_reaches_this_turn(self):
         music = AppMusic(StubCatalog(), StubPlanner())

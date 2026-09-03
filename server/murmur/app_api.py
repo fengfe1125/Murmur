@@ -50,7 +50,7 @@ from .app_music import (
     parse_music_track,
 )
 from .app_music_links import MAX_SHARED_TEXT_BYTES, MusicLink, MusicLinkRejected
-from .app_settings import AppSettings
+from .app_settings import AppSettings, music_user_allowed
 from .app_store import (
     MOMENT_INTENTS,
     AccountDeleting,
@@ -396,7 +396,7 @@ def room_api_error(exc: ListenTogetherError) -> APIError:
 
 
 def _music_user_allowed(settings: AppSettings, user_id: str) -> bool:
-    return not settings.music_user_allowlist or user_id in settings.music_user_allowlist
+    return music_user_allowed(settings.music_user_allowlist, user_id)
 
 
 def audius_music_enabled_for(settings: AppSettings, user_id: str) -> bool:

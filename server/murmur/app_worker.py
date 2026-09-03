@@ -34,7 +34,7 @@ from .app_music import (
     music_prompt_line,
     playback_prompt_line,
 )
-from .app_settings import AppSettings
+from .app_settings import AppSettings, music_user_allowed
 from .app_store import AccountDeleting, AppStore, Job, NotFound
 from .config import Config
 from .continuity import refresh_open_loops
@@ -166,6 +166,7 @@ class EngineMomentProcessor:
         playback_state: Callable[[str], dict | None] | None = None,
         rooms=None,
         room_user_allowlist: frozenset[str] = frozenset(),
+        music_user_allowlist: frozenset[str] = frozenset(),
     ):
         self.cfg = cfg
         self.data_root = data_root
@@ -179,6 +180,9 @@ class EngineMomentProcessor:
         # commands at all.
         self.rooms = rooms
         self.room_user_allowlist = room_user_allowlist
+        # 开关是 `self.music` 在不在，这一条是灰度名单——和 App API 那面
+        # 同一个判断，空集合等于放行。房间白名单不是这个语义，别混用。
+        self.music_user_allowlist = music_user_allowlist
 
     def __call__(
         self, job: Job, memory: Memory, on_bubble: Callable[[str], None]
@@ -221,12 +225,9 @@ class EngineMomentProcessor:
         # 歌先定下来，模型后说话。定在这里有两个原因：它要进这一轮的
         # prompt（不然它会答一句和卡片无关的话），而且点歌那一轮必须关掉
         # 逐条气泡流——先把曲目确定并落库，再一次性输出文字和卡片。
-        shared = self.music.verify_shared(job.music_track) if self.music else None
-        choice = (
-            self.music.choose_for(job.note)
-            if self.music and shared is None
-            else None
-        )
+        music = self._music_for(job.user_id)
+        shared = music.verify_shared(job.music_track) if music else None
+        choice = music.choose_for(job.note) if music and shared is None else None
         chosen = choice.track if choice else None
         if room_turn := self._apply_music_to_room(job, moment, chosen):
             return room_turn
@@ -284,6 +285,18 @@ class EngineMomentProcessor:
             music_track_role=("out" if chosen is not None
                               else "in" if shared is not None else None),
         )
+
+    def _music_for(self, user_id: str) -> AppMusic | None:
+        """这一轮这个账号能用的音乐，没有就是没有。
+
+        灰度名单只在 App API 那面查过，聊天这面是另一条进来的路：不在这里
+        再查一次，关掉的账号照样能用自然语言把歌搜出来。
+        """
+        if self.music is None:
+            return None
+        if not music_user_allowed(self.music_user_allowlist, user_id):
+            return None
+        return self.music
 
     def _control_existing_room(
         self, job: Job, moment: Moment
@@ -1092,6 +1105,9 @@ def build_processor(
         rooms=rooms,
         room_user_allowlist=(
             settings.netease_room_user_allowlist if rooms is not None else frozenset()
+        ),
+        music_user_allowlist=(
+            settings.music_user_allowlist if music is not None else frozenset()
         ),
     )
 

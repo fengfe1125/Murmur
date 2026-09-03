@@ -374,3 +374,14 @@ class AppSettings:
             raise RuntimeError("APNs configuration missing: " + ", ".join(missing))
         if not self.apns_key_path or not self.apns_key_path.is_file():
             raise RuntimeError("APNs signing key does not exist")
+
+
+def music_user_allowed(allowlist: frozenset[str], user_id: str) -> bool:
+    """这个账号在不在音乐灰度里。
+
+    空集合是「开关放行的所有人」，不是「没有人」——全量放开时不必把每个
+    user_id 都列一遍。房间白名单不走这条：它必须是显式的非空成员判断。
+
+    App API 和 worker 都用这一个：两面语义不一致，比两面都没有闸门更糟。
+    """
+    return not allowlist or user_id in allowlist
