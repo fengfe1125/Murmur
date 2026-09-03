@@ -193,6 +193,60 @@ class TransportTranslationTests(unittest.TestCase):
         )
         self.assertIsNone(state.current_track)
 
+    def test_a_room_that_moved_on_says_which_song_it_moved_to(self):
+        """换歌之后顶部要显示新歌，而不是上一首、也不是一片空白。
+
+        上游只给 songId，所以必须去曲库查回来。之前这里直接返回 None，于是
+        用户看到的是「已经切歌了它还显示旧的」。
+        """
+        class Catalog:
+            def __init__(self):
+                self.asked = []
+
+            def resolve(self, provider, track_id):
+                self.asked.append((provider, track_id))
+                return {**OTHER, "track_id": track_id}
+
+        catalog = Catalog()
+        service = FakeService(states=[
+            room_body(), room_body(currentSongId="1391891631"),
+        ])
+        transport = NeteaseHTTPRoomTransport(
+            "https://127.0.0.1:18763",
+            catalog=catalog,
+            transport=httpx.MockTransport(service.handler),
+        )
+        transport.create_room(
+            initial_track=TRACK, client_sequence=1, queue_version=1,
+            idempotency_key="k",
+        )
+        state = transport.get_state(
+            external_room_id="room-1", client_sequence=1, queue_version=1
+        )
+        self.assertEqual(catalog.asked, [("netease", "1391891631")])
+        self.assertEqual(state.current_track["track_id"], "1391891631")
+
+    def test_a_song_the_catalog_cannot_place_is_reported_as_unknown(self):
+        """查不到就说不知道。显示错的歌名比不显示更糟。"""
+        class Catalog:
+            def resolve(self, provider, track_id):
+                raise RuntimeError("catalog is down")
+
+        service = FakeService(states=[room_body(), room_body(currentSongId="99999999")])
+        transport = NeteaseHTTPRoomTransport(
+            "https://127.0.0.1:18763",
+            catalog=Catalog(),
+            transport=httpx.MockTransport(service.handler),
+        )
+        transport.create_room(
+            initial_track=TRACK, client_sequence=1, queue_version=1,
+            idempotency_key="k",
+        )
+        state = transport.get_state(
+            external_room_id="room-1", client_sequence=1, queue_version=1
+        )
+        self.assertIsNone(state.current_track)
+
     def test_a_nonsense_participant_count_is_a_transport_error(self):
         service = FakeService(states=[room_body(participantCount="两个")])
         with self.assertRaises(RoomTransportUnavailable):

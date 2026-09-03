@@ -44,6 +44,7 @@ class NeteaseHTTPRoomTransport:
         self,
         base_url: str,
         *,
+        catalog=None,
         timeout: float = 15.0,
         transport: httpx.BaseTransport | None = None,
         client: httpx.Client | None = None,
@@ -55,6 +56,10 @@ class NeteaseHTTPRoomTransport:
             base_url=self.base_url, timeout=timeout, transport=transport,
             follow_redirects=False,
         )
+        # 上游状态里只有 songId。没有曲库就只能拿我们自己发出去的那份顶，
+        # 而换歌、放完自动切、对方操作之后那份就过期了——顶部就一直显示上
+        # 一首。曲库自己有缓存，同一首反复查很便宜。
+        self.catalog = catalog
         self._owns_client = client is None
         self._queue_version = 0
         # 上游状态里只有 songId，没有 Murmur 的 track 形状。当前这首歌以我们
@@ -133,9 +138,10 @@ class NeteaseHTTPRoomTransport:
         # 我们手上这份已经过期了（next/previous 之后就会这样）——那就如实说
         # 不知道，而不是把旧的那首当成正在放的那首端出去。
         current = body.get("currentSongId")
-        if track is not None and current is not None:
-            if str(current) != str(track.get("track_id")):
-                track = None
+        if current is not None and str(current) != str((track or {}).get("track_id")):
+            # 手上这份过期了。先去曲库查这首到底是什么；查不到就说不知道，
+            # 不许拿旧的顶——顶部显示错的歌名比不显示更糟。
+            track = self._resolve(str(current))
         return NeteaseTransportState(
             external_room_id=str(room_id),
             invite_url=invite,
@@ -147,6 +153,16 @@ class NeteaseHTTPRoomTransport:
             queue_version=self._queue_version,
             authenticated=True,
         )
+
+    def _resolve(self, song_id: str) -> dict | None:
+        if self.catalog is None:
+            return None
+        try:
+            return self.catalog.resolve("netease", song_id)
+        except Exception:
+            # 查不到、曲库挂了、返回了看不懂的东西——都只意味着这一刻说不出
+            # 是哪首歌，不该让整个房间状态失败。
+            return None
 
     def create_room(
         self,
