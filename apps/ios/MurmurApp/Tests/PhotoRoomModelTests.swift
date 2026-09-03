@@ -323,7 +323,14 @@ final class PhotoRoomModelTests: XCTestCase {
 
         model.draft = "那天是我搬走前最后一次去"
         model.send()
-        await settle { archive.rows.count == 4 }
+        // 行数到齐不等于回执到齐：第二个勾是读图落地时另外补上的，和插入
+        // 不在同一拍。只等 count 的话，快机器上凑巧一起到，慢机器上就会在
+        // delivery 还是 .sent 的时候往下走。等到真正要断言的那个状态为止。
+        await settle {
+            archive.rows.count == 4
+                && archive.rows[0].delivery == .answered
+                && archive.rows[2].delivery == .answered
+        }
         model.close()
 
         XCTAssertEqual(
