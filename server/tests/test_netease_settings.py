@@ -92,6 +92,37 @@ class NeteaseSettingsTests(unittest.TestCase):
             replace(base, netease_room_protocol_base_url="http://room.invalid").validate()
         base.validate()
 
+    def test_the_protocol_service_may_be_plain_http_only_on_loopback(self):
+        """受审协议服务跑在本机回环，明文 http 在那里可以；别处不行。
+
+        https 防的是链路上有人看得到，而回环的字节不出这台机器。但这个例外
+        必须只认回环——否则它就变成「随便哪台机器都能明文」。
+        """
+        secret = self.root / "netease-bot.json"
+        secret.write_text("{}", encoding="utf-8")
+        secret.chmod(0o600)
+        base = settings(
+            self.root,
+            netease_catalog_enabled=True,
+            netease_room_experiment_enabled=True,
+            netease_room_user_allowlist=frozenset({"user-1"}),
+            netease_bot_secret_path=secret,
+            netease_room_protocol_base_url="https://room.invalid",
+        )
+        for url in (
+            "http://127.0.0.1:18763", "http://localhost:18763", "http://[::1]:18763",
+        ):
+            with self.subTest(url=url):
+                replace(base, netease_room_protocol_base_url=url).validate()
+        for url in (
+            "http://192.168.1.5:18763",   # 局域网仍然是链路
+            "http://room.invalid",
+            "http://127.0.0.1.evil.example",  # 前缀像回环，主机名不是
+        ):
+            with self.subTest(url=url):
+                with self.assertRaisesRegex(RuntimeError, "HTTPS"):
+                    replace(base, netease_room_protocol_base_url=url).validate()
+
     def test_enabling_netease_makes_it_the_chat_catalog_without_removing_audius(self):
         value = settings(
             self.root,
