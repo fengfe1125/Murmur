@@ -663,7 +663,10 @@ class NeteaseCatalogAdapter:
             except MusicCatalogUnavailable:
                 continue
             tracks.append(track)
-            self._remember(track["track_id"], track)
+            # 刻意不写进 resolve 缓存：网易云的搜索接口不返回 picUrl，只有
+            # song/detail 有。把这份缺封面的版本存进去，之后对同一首歌的
+            # resolve 会拿到它，卡片就永远没有封面——而且是随机的，取决于
+            # 这首歌是先被搜到还是先被解析。搜索自己的缓存在下面，不受影响。
         with self._lock:
             self._search_cache[cache_key] = (
                 time.monotonic() + self.search_ttl,
@@ -881,7 +884,21 @@ class AppMusic:
             tracks = self.catalog.search(plan.query, limit=5)
         except MusicError:
             return MusicChoice(True)
-        return MusicChoice(True, choose_music_track(plan, tracks))
+        chosen = choose_music_track(plan, tracks)
+        return MusicChoice(True, self._complete(chosen) if chosen else None)
+
+    def _complete(self, track: dict) -> dict:
+        """把选中的这首补全再发出去。
+
+        搜索结果和详情不是同一份数据——网易云的搜索接口不返回封面。卡片一旦
+        落库就不会再变，所以补全必须发生在这里，不能指望之后有人回填。
+
+        补不到就用原来那份：少一张封面是小事，为此让整轮点歌失败才是大事。
+        """
+        try:
+            return self.catalog.resolve(track["provider"], track["track_id"])
+        except MusicError:
+            return track
 
 
 def playback_prompt_line(playback: dict | None) -> str | None:

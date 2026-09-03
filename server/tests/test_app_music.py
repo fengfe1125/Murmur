@@ -1202,6 +1202,52 @@ class MusicPlannerQueryTests(unittest.TestCase):
         self.assertEqual(plan.query, "杀死那个石家庄人 万能青年旅店")
 
 
+class ChosenTrackCompletionTests(unittest.TestCase):
+    """卡片一旦落库就不会再变，所以补全必须发生在选歌那一刻。"""
+
+    class _Catalog:
+        def __init__(self, *, resolve_fails=False):
+            self.resolved = []
+            self.resolve_fails = resolve_fails
+
+        def search(self, query, limit=5):
+            # 搜索给不出封面，网易云的搜索接口就是这样。
+            return [{"version": 1, "provider": "netease", "track_id": "186016",
+                     "title": "晴天", "artists": ["周杰伦"],
+                     "canonical_url": "https://music.163.com/song?id=186016"}]
+
+        def resolve(self, provider, track_id):
+            self.resolved.append((provider, track_id))
+            if self.resolve_fails:
+                raise MusicCatalogUnavailable("nope")
+            return {"version": 1, "provider": "netease", "track_id": "186016",
+                    "title": "晴天", "artists": ["周杰伦"],
+                    "artwork_url": "https://p1.music.126.net/cover.jpg",
+                    "canonical_url": "https://music.163.com/song?id=186016"}
+
+    def choose(self, catalog):
+        planner = AppMusicPlanner(make_config(), client=_StubClient(json.dumps({
+            "requested": True, "mode": "exact", "query": "晴天 周杰伦",
+            "title": "晴天", "artist": "周杰伦",
+        })))
+        return AppMusic(catalog, planner).choose_for("放首晴天")
+
+    def test_the_chosen_track_is_completed_before_it_becomes_a_card(self):
+        catalog = self._Catalog()
+        choice = self.choose(catalog)
+        self.assertEqual(catalog.resolved, [("netease", "186016")])
+        self.assertEqual(
+            choice.track["artwork_url"], "https://p1.music.126.net/cover.jpg"
+        )
+
+    def test_a_failed_completion_still_sends_the_song(self):
+        """补不到就用原来那份。少一张封面是小事，整轮点歌失败才是大事。"""
+        catalog = self._Catalog(resolve_fails=True)
+        choice = self.choose(catalog)
+        self.assertIsNotNone(choice.track)
+        self.assertNotIn("artwork_url", choice.track)
+
+
 class MusicProcessorTests(unittest.TestCase):
     """处理器这一层：什么时候去问模型、卡片和文字怎么各就各位。"""
 
