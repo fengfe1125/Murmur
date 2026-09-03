@@ -86,6 +86,12 @@ MURMUR_NETEASE_ROOM_EXPERIMENT_ENABLED=0
 
 未满足前，逻辑隔离通过 `murmur-app-worker` 内的深模块、feature flag、超时和网络 allowlist 完成。
 
+Phase 0 协议服务的 `murmur-netease-phase0.service` 刻意留在这道闸门之外：它不在更新器的
+`SERVICES` 清单里，不放在 `infra/deploy/`（那里的每个 unit 都会被更新器安装），跑在独立
+用户和 `/opt/murmur-netease-poc` 下，并用 `InaccessiblePaths` 把 `/opt/murmur` 和
+`/etc/murmur` 挡在进程视野之外。因此上面六条对它不适用——更新器既不重启它也不恢复它。
+代价是它出问题只能人工 `systemctl start`，撤回一起听时要单独 `disable`。
+
 ## 5. 发布前必须增加的检查
 
 - 网易功能关闭时，现有全套测试通过；

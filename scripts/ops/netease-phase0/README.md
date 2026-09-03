@@ -34,6 +34,21 @@ Murmur 正式运行依赖。
 `phase0-ready.txt`，进程退出时自动移除。使用 SSH 将本机 `18763` 转发到 VPS
 `127.0.0.1:18763`，再打开该 URL。二维码由服务端生成；扫码成功后页面只显示“登录成功”。
 
+常驻运行（可选）：`nohup` 起的进程一重启就没了，房间会跟着停。要让它活过重启，
+安装同目录的 unit：
+
+```sh
+sudo install -m 0644 murmur-netease-phase0.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now murmur-netease-phase0
+```
+
+这个 unit **不由 `murmur-update` 管理**，也不放进 `infra/deploy/`——那个目录下的每个
+`.service` 都会被更新器安装。代价要知道：更新器不会替它恢复，机器重装或 unit 被删之后
+要人工装回来。它对应的边界记在[回滚计划](../../../docs/operations/netease-poc-rollback-plan-2026-08-31.md)第 4 节。
+
+会话失效后服务仍在跑，但所有房间调用都会失败；重新扫码即可，不必重启服务。
+
 本地单元测试：
 
 ```sh
