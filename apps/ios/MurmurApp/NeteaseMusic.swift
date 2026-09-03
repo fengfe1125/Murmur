@@ -2,13 +2,18 @@ import Foundation
 import SwiftUI
 
 enum NeteaseSharedTextDetector {
+    /// 服务端 `app_music_links.MAX_SHARED_TEXT_BYTES`，两边必须一致。
+    static let maxSharedTextBytes = 8 * 1024
+
     private static let longHosts: Set<String> = ["music.163.com", "y.music.163.com"]
     private static let shortHosts: Set<String> = ["163cn.tv"]
 
     /// This is only a cheap UI routing check. The server still follows short
     /// links with a strict redirect policy and re-fetches trusted metadata.
     static func containsCandidate(in text: String) -> Bool {
-        guard text.utf8.count <= 16_384 else { return false }
+        // 和服务端 MAX_SHARED_TEXT_BYTES 同一个数。客户端放行到比服务端更
+        // 宽的地方，只会让 8–16KiB 那一段在设备上被接受、到服务端才 413。
+        guard text.utf8.count <= maxSharedTextBytes else { return false }
         return links(in: text).contains { url in
             // https only, exactly like the server: NSDataDetector also reports
             // bare `music.163.com/...` text as a link, and routing something the

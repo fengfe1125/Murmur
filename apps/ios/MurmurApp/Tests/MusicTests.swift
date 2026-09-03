@@ -984,6 +984,22 @@ final class NeteaseSharedTextDetectorTests: XCTestCase {
             + " https://music.163.com/song?id=186016"
         XCTAssertFalse(NeteaseSharedTextDetector.containsCandidate(in: huge))
     }
+
+    /// 客户端的上限必须就是服务端的上限。放宽一个字节，8KiB 之外的分享就会
+    /// 在设备上被收下、送到服务端换回一个 413——用户看到的是发送失败，而不是
+    /// 「这段太长了」。服务端的数字在 app_music_links.MAX_SHARED_TEXT_BYTES。
+    func testTheClientStopsExactlyWhereTheServerDoes() {
+        XCTAssertEqual(NeteaseSharedTextDetector.maxSharedTextBytes, 8 * 1024)
+
+        let link = " https://music.163.com/song?id=186016"
+        let padding = NeteaseSharedTextDetector.maxSharedTextBytes - link.utf8.count
+        let atLimit = String(repeating: "x", count: padding) + link
+        XCTAssertEqual(atLimit.utf8.count, NeteaseSharedTextDetector.maxSharedTextBytes)
+        XCTAssertTrue(NeteaseSharedTextDetector.containsCandidate(in: atLimit))
+
+        let overLimit = "x" + atLimit
+        XCTAssertFalse(NeteaseSharedTextDetector.containsCandidate(in: overLimit))
+    }
 }
 
 final class SharedMusicDraftStoreTests: XCTestCase {

@@ -66,7 +66,9 @@ final class ShareViewController: UIViewController {
     private func save(_ value: String?) {
         guard let value else { finish(with: ShareDraftError.noSupportedItem); return }
         let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, text.utf8.count <= 16_384 else {
+        // 服务端 MAX_SHARED_TEXT_BYTES 是 8KiB；扩展这里放得更宽的话，
+        // 草稿会被存下来、主 App 再拿去换一个 413。
+        guard !text.isEmpty, text.utf8.count <= 8 * 1024 else {
             finish(with: ShareDraftError.invalidText)
             return
         }
