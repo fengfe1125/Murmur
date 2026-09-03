@@ -55,6 +55,7 @@ struct MusicCardView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var artworkSide: CGFloat = 56
+    @ScaledMetric(relativeTo: .body) private var recordReveal: CGFloat = 26
 
     private var foreground: Color { isOutgoing ? MurmurTheme.onAccent : MurmurTheme.ink }
     private var secondary: Color {
@@ -139,8 +140,40 @@ struct MusicCardView: View {
 
     @ViewBuilder
     private var artwork: some View {
+        if track.isNetease {
+            ZStack(alignment: .leading) {
+                vinylRecord
+                    .offset(x: artworkSide - recordSide + recordReveal)
+
+                coverArtwork
+                    .background(
+                        MurmurTheme.accent,
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(MurmurTheme.paper.opacity(0.72), lineWidth: 1)
+                    }
+                    .shadow(
+                        color: MurmurTheme.onAccent.opacity(0.18),
+                        radius: 2,
+                        x: 0,
+                        y: 1.5
+                    )
+            }
+            .frame(
+                width: artworkSide + recordReveal,
+                height: artworkSide,
+                alignment: .leading
+            )
+        } else {
+            coverArtwork
+        }
+    }
+
+    private var coverArtwork: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
-        AsyncImage(url: track.artworkURL) { image in
+        return AsyncImage(url: track.artworkURL) { image in
             image.resizable().aspectRatio(contentMode: .fill)
         } placeholder: {
             // A song with no cover still has a shape, so the row does not
@@ -154,6 +187,33 @@ struct MusicCardView: View {
         }
         .frame(width: artworkSide, height: artworkSide)
         .clipShape(shape)
+    }
+
+    private var recordSide: CGFloat { artworkSide * 0.9 }
+
+    private var vinylRecord: some View {
+        ZStack {
+            Circle()
+                .fill(MurmurTheme.onAccent)
+
+            Circle()
+                .stroke(MurmurTheme.paper.opacity(0.14), lineWidth: 0.75)
+                .frame(width: recordSide * 0.72, height: recordSide * 0.72)
+
+            Circle()
+                .stroke(MurmurTheme.accent.opacity(0.16), lineWidth: 0.75)
+                .frame(width: recordSide * 0.48, height: recordSide * 0.48)
+
+            Circle()
+                .fill(MurmurTheme.paper)
+                .frame(width: recordSide * 0.27, height: recordSide * 0.27)
+
+            Circle()
+                .fill(MurmurTheme.accentInk)
+                .frame(width: recordSide * 0.065, height: recordSide * 0.065)
+        }
+        .frame(width: recordSide, height: recordSide)
+        .accessibilityHidden(true)
     }
 
     private var playButton: some View {
