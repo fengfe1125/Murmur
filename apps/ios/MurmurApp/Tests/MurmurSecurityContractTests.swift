@@ -69,6 +69,44 @@ final class MurmurNotificationPolicyTests: XCTestCase {
 }
 
 final class MurmurMomentMultipartTests: XCTestCase {
+    func testMusicMomentCarriesFallbackNoteAndCanonicalTrackJSON() async throws {
+        let client = URLSessionMurmurAPIClient(
+            baseURL: try XCTUnwrap(URL(string: "https://murmur.test")),
+            authenticator: MomentAuthenticator()
+        )
+        let track = MusicTrackAttachmentV1(
+            trackID: "track-42",
+            title: "Night Drive",
+            artists: ["Mira", "June"],
+            artworkURL: URL(string: "https://images.audius.test/42.jpg"),
+            canonicalURL: try XCTUnwrap(URL(string: "https://audius.co/mira/night-drive")),
+            durationSeconds: 187,
+            explicit: false
+        )
+        let fallback = "🎵 Night Drive — Mira, June\nhttps://audius.co/mira/night-drive"
+        let url = try await client.makeMultipartBody(
+            boundary: "MusicBoundary",
+            note: fallback,
+            photo: nil,
+            musicTrack: track,
+            idempotencyKey: "music-key",
+            intent: nil,
+            contextMomentIDs: []
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let body = String(decoding: try Data(contentsOf: url), as: UTF8.self)
+
+        XCTAssertTrue(body.contains(#"name="note""#), body)
+        XCTAssertTrue(body.contains(fallback), body)
+        XCTAssertTrue(body.contains(#"name="music_track""#), body)
+        XCTAssertTrue(body.contains(#""track_id":"track-42""#), body)
+        XCTAssertTrue(body.contains(#""artists":["Mira","June"]"#), body)
+        XCTAssertTrue(body.contains(#""canonical_url":"https:\/\/audius.co\/mira\/night-drive""#)
+            || body.contains(#""canonical_url":"https://audius.co/mira/night-drive""#), body)
+        XCTAssertFalse(body.localizedCaseInsensitiveContains("access_token"), body)
+        XCTAssertFalse(body.localizedCaseInsensitiveContains("stream_url"), body)
+    }
+
     func testArchiveContextIsEncodedWhileOrdinaryMomentsKeepTheOldBody() async throws {
         let recorder = RecoveryRequestRecorder()
         RecoveryURLProtocol.handler = { request in
@@ -266,6 +304,90 @@ final class MurmurEnrollmentRecoveryTests: XCTestCase {
         let attestationCalls = await authenticator.attestationCalls
         XCTAssertEqual(discardCalls, 1)
         XCTAssertEqual(attestationCalls, 1)
+    }
+}
+
+/// The bytes that actually go on the wire.
+///
+/// Every field here is parsed by the server by name.  A client double proves
+/// the room handed the facts over; only the encoding proves the server can
+/// find them — and a rename that only the double ever sees is a green suite
+/// over a feature the server never receives.
+final class MultipartProvenanceTests: XCTestCase {
+    private func body(
+        photo: PhotoAttachment?, boundary: String = "TestBoundary"
+    ) async throws -> String {
+        let client = URLSessionMurmurAPIClient(
+            baseURL: try XCTUnwrap(URL(string: "https://murmur.test")),
+            authenticator: MomentAuthenticator()
+        )
+        let url = try await client.makeMultipartBody(
+            boundary: boundary,
+            note: nil,
+            photo: photo,
+            idempotencyKey: "multipart-key",
+            intent: .photoReading,
+            contextMomentIDs: []
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let data = try Data(contentsOf: url)
+        // The image part is raw bytes; decoding leniently keeps the assertion
+        // on the field names rather than on the photo.
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func attachment(_ provenance: PhotoProvenance?) throws -> PhotoAttachment {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("murmur-onthisday-\(UUID().uuidString).jpg")
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8))
+        let jpeg = try XCTUnwrap(renderer.image { context in
+            UIColor.systemTeal.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        }.jpegData(compressionQuality: 0.9))
+        try jpeg.write(to: url)
+        return PhotoAttachment(
+            id: UUID(), originalURL: url, preview: UIImage(),
+            filename: "onthisday.jpg", mimeType: "image/jpeg",
+            byteCount: Int64(jpeg.count), provenance: provenance
+        )
+    }
+
+    func testTheFactsAreWrittenUnderTheNamesTheServerParses() async throws {
+        // 15:04 in Shanghai is 07:04Z — spelled out rather than computed, so the
+        // assertion below reads as an expectation instead of arithmetic.
+        let shotAt = try XCTUnwrap(
+            ISO8601DateFormatter().date(from: "2023-08-30T15:04:11+08:00")
+        )
+        let attachment = try attachment(PhotoProvenance(
+            shotAt: shotAt,
+            latitude: 31.201, longitude: 121.447, place: "上海市 · 徐汇区 · 星巴克"
+        ))
+        defer { try? FileManager.default.removeItem(at: attachment.originalURL) }
+        let body = try await body(photo: attachment)
+
+        XCTAssertTrue(body.contains(#"name="provenance""#), body)
+        // snake_case, and an ISO-8601 instant — both are what murmur/app_api.py
+        // validates and what datetime.fromisoformat accepts.
+        XCTAssertTrue(body.contains(#""shot_at":"2023-08-30T07:04:11Z""#), body)
+        XCTAssertTrue(body.contains(#""lat":31.201"#), body)
+        XCTAssertTrue(body.contains(#""lon":121.447"#), body)
+        XCTAssertTrue(body.contains("上海市 · 徐汇区 · 星巴克"), body)
+    }
+
+    /// An empty block would make the server decide what `{}` meant.  It is not
+    /// sent at all.
+    func testAPhotoWithNothingToSayCarriesNoField() async throws {
+        for provenance in [nil, PhotoProvenance()] {
+            let attachment = try attachment(provenance)
+            defer { try? FileManager.default.removeItem(at: attachment.originalURL) }
+            let body = try await body(photo: attachment)
+            XCTAssertFalse(body.contains(#"name="provenance""#), body)
+        }
+    }
+
+    func testAMomentWithNoPhotoAtAllCarriesNoField() async throws {
+        let body = try await body(photo: nil)
+        XCTAssertFalse(body.contains(#"name="provenance""#), body)
     }
 }
 

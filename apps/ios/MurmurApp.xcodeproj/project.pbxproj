@@ -11,6 +11,7 @@
 		A10000000000000000000002 /* MurmurChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* MurmurChatView.swift */; };
 		A10000000000000000000003 /* MurmurModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* MurmurModels.swift */; };
 		A10000000000000000000004 /* PhotoLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* PhotoLoader.swift */; };
+		A10000000000000000000209 /* MurmurPlaceLookup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020A /* MurmurPlaceLookup.swift */; };
 		A10000000000000000000005 /* MurmurSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* MurmurSecurity.swift */; };
 		A10000000000000000000006 /* MurmurAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* MurmurAPI.swift */; };
 		A10000000000000000000007 /* MurmurSessionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* MurmurSessionModel.swift */; };
@@ -35,6 +36,21 @@
 		A10000000000000000000203 /* OnThisDayTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000204 /* OnThisDayTabView.swift */; };
 		A100000000000000000000F3 /* OnThisDay.metal in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F4 /* OnThisDay.metal */; };
 		A100000000000000000000F5 /* MurmurPhotoRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* MurmurPhotoRoom.swift */; };
+		A10000000000000000000301 /* MusicModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000302 /* MusicModels.swift */; };
+		A10000000000000000000303 /* MusicPlaybackReporting.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000304 /* MusicPlaybackReporting.swift */; };
+		A10000000000000000000305 /* AudiusClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000306 /* AudiusClient.swift */; };
+		A10000000000000000000307 /* AudiusAccountModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000308 /* AudiusAccountModel.swift */; };
+		A10000000000000000000309 /* MusicPlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030A /* MusicPlaybackController.swift */; };
+		A1000000000000000000030B /* MusicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030C /* MusicTests.swift */; };
+		A1000000000000000000030D /* MusicModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000030E /* MusicModule.swift */; };
+		A1000000000000000000030F /* MusicPlayerViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000310 /* MusicPlayerViews.swift */; };
+		A10000000000000000000311 /* MusicCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000312 /* MusicCardView.swift */; };
+		A10000000000000000000313 /* MusicPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000314 /* MusicPickerView.swift */; };
+		A10000000000000000000315 /* NeteaseMusic.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000316 /* NeteaseMusic.swift */; };
+		A10000000000000000000317 /* SharedMusicDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000318 /* SharedMusicDraft.swift */; };
+		B10000000000000000000001 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000011 /* ShareViewController.swift */; };
+		B10000000000000000000002 /* SharedMusicDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000318 /* SharedMusicDraft.swift */; };
+		B10000000000000000000003 /* MurmurShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* MurmurShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -52,7 +68,28 @@
 			remoteGlobalIDString = A10000000000000000000041;
 			remoteInfo = Murmur;
 		};
+		B10000000000000000000004 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000071 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B10000000000000000000041;
+			remoteInfo = MurmurShareExtension;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		B10000000000000000000061 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				B10000000000000000000003 /* MurmurShareExtension.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		A10000000000000000000011 /* MurmurApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurApp.swift; sourceTree = "<group>"; };
@@ -60,6 +97,7 @@
 		A10000000000000000000013 /* MurmurModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurModels.swift; sourceTree = "<group>"; };
 		A10000000000000000000014 /* Murmur.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Murmur.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000015 /* PhotoLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLoader.swift; sourceTree = "<group>"; };
+		A1000000000000000000020A /* MurmurPlaceLookup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurPlaceLookup.swift; sourceTree = "<group>"; };
 		A10000000000000000000016 /* MurmurSecurity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurSecurity.swift; sourceTree = "<group>"; };
 		A10000000000000000000017 /* MurmurAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurAPI.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* MurmurSessionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurSessionModel.swift; sourceTree = "<group>"; };
@@ -92,6 +130,22 @@
 		A10000000000000000000204 /* OnThisDayTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnThisDayTabView.swift; sourceTree = "<group>"; };
 		A100000000000000000000F4 /* OnThisDay.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = OnThisDay.metal; sourceTree = "<group>"; };
 		A100000000000000000000F6 /* MurmurPhotoRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurPhotoRoom.swift; sourceTree = "<group>"; };
+		A10000000000000000000302 /* MusicModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicModels.swift; sourceTree = "<group>"; };
+		A10000000000000000000304 /* MusicPlaybackReporting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlaybackReporting.swift; sourceTree = "<group>"; };
+		A10000000000000000000306 /* AudiusClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudiusClient.swift; sourceTree = "<group>"; };
+		A10000000000000000000308 /* AudiusAccountModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudiusAccountModel.swift; sourceTree = "<group>"; };
+		A1000000000000000000030A /* MusicPlaybackController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlaybackController.swift; sourceTree = "<group>"; };
+		A1000000000000000000030C /* MusicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicTests.swift; sourceTree = "<group>"; };
+		A1000000000000000000030E /* MusicModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicModule.swift; sourceTree = "<group>"; };
+		A10000000000000000000310 /* MusicPlayerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlayerViews.swift; sourceTree = "<group>"; };
+		A10000000000000000000312 /* MusicCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicCardView.swift; sourceTree = "<group>"; };
+		A10000000000000000000314 /* MusicPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPickerView.swift; sourceTree = "<group>"; };
+		A10000000000000000000316 /* NeteaseMusic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeteaseMusic.swift; sourceTree = "<group>"; };
+		A10000000000000000000318 /* SharedMusicDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedMusicDraft.swift; sourceTree = "<group>"; };
+		B10000000000000000000011 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		B10000000000000000000012 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B10000000000000000000013 /* MurmurShareExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MurmurShareExtension.entitlements; sourceTree = "<group>"; };
+		B10000000000000000000014 /* MurmurShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MurmurShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -116,6 +170,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B10000000000000000000031 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -123,6 +184,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000032 /* MurmurApp */,
+				B10000000000000000000021 /* MurmurShareExtension */,
 				A10000000000000000000033 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -137,6 +199,7 @@
 				A10000000000000000000017 /* MurmurAPI.swift */,
 				A10000000000000000000016 /* MurmurSecurity.swift */,
 				A10000000000000000000015 /* PhotoLoader.swift */,
+				A1000000000000000000020A /* MurmurPlaceLookup.swift */,
 				A10000000000000000000019 /* MurmurEnvironment.swift */,
 				A10000000000000000000029 /* MurmurTranscript.swift */,
 				A1000000000000000000002A /* MurmurTranscriptView.swift */,
@@ -150,6 +213,17 @@
 				A100000000000000000000F4 /* OnThisDay.metal */,
 				A100000000000000000000D2 /* MurmurDiagnostics.swift */,
 				A100000000000000000000E2 /* MurmurKeyboardInset.swift */,
+				A10000000000000000000302 /* MusicModels.swift */,
+				A10000000000000000000304 /* MusicPlaybackReporting.swift */,
+				A10000000000000000000306 /* AudiusClient.swift */,
+				A10000000000000000000308 /* AudiusAccountModel.swift */,
+				A1000000000000000000030A /* MusicPlaybackController.swift */,
+				A1000000000000000000030E /* MusicModule.swift */,
+				A10000000000000000000310 /* MusicPlayerViews.swift */,
+				A10000000000000000000312 /* MusicCardView.swift */,
+				A10000000000000000000314 /* MusicPickerView.swift */,
+				A10000000000000000000316 /* NeteaseMusic.swift */,
+				A10000000000000000000318 /* SharedMusicDraft.swift */,
 				A1000000000000000000001A /* Assets.xcassets */,
 				A1000000000000000000001B /* PrivacyInfo.xcprivacy */,
 				A10000000000000000000034 /* Config */,
@@ -163,6 +237,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000014 /* Murmur.app */,
+				B10000000000000000000014 /* MurmurShareExtension.appex */,
 				A10000000000000000000020 /* MurmurTests.xctest */,
 				A10000000000000000000022 /* MurmurUITests.xctest */,
 			);
@@ -189,6 +264,7 @@
 				A1000000000000000000001D /* PhotoLoaderTests.swift */,
 				A1000000000000000000001E /* MurmurSecurityContractTests.swift */,
 				A100000000000000000000G2 /* OnThisDayTests.swift */,
+				A1000000000000000000030C /* MusicTests.swift */,
 				A100000000000000000000G4 /* PhotoRoomModelTests.swift */,
 			);
 			path = Tests;
@@ -202,6 +278,16 @@
 			path = UITests;
 			sourceTree = "<group>";
 		};
+		B10000000000000000000021 /* MurmurShareExtension */ = {
+			isa = PBXGroup;
+			children = (
+				B10000000000000000000011 /* ShareViewController.swift */,
+				B10000000000000000000012 /* Info.plist */,
+				B10000000000000000000013 /* MurmurShareExtension.entitlements */,
+			);
+			path = MurmurShareExtension;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -212,10 +298,12 @@
 				A10000000000000000000061 /* Sources */,
 				A10000000000000000000021 /* Frameworks */,
 				A10000000000000000000062 /* Resources */,
+				B10000000000000000000061 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				B10000000000000000000071 /* PBXTargetDependency */,
 			);
 			name = Murmur;
 			productName = Murmur;
@@ -258,6 +346,23 @@
 			productReference = A10000000000000000000022 /* MurmurUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		B10000000000000000000041 /* MurmurShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B10000000000000000000051 /* Build configuration list for PBXNativeTarget "MurmurShareExtension" */;
+			buildPhases = (
+				B10000000000000000000062 /* Sources */,
+				B10000000000000000000031 /* Frameworks */,
+				B10000000000000000000063 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MurmurShareExtension;
+			productName = MurmurShareExtension;
+			productReference = B10000000000000000000014 /* MurmurShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -279,6 +384,9 @@
 						CreatedOnToolsVersion = 26.6;
 						TestTargetID = A10000000000000000000041;
 					};
+					B10000000000000000000041 = {
+						CreatedOnToolsVersion = 26.6;
+					};
 				};
 			};
 			buildConfigurationList = A10000000000000000000072 /* Build configuration list for PBXProject "MurmurApp" */;
@@ -296,6 +404,7 @@
 			projectRoot = "";
 			targets = (
 				A10000000000000000000041 /* Murmur */,
+				B10000000000000000000041 /* MurmurShareExtension */,
 				A10000000000000000000042 /* MurmurTests */,
 				A10000000000000000000043 /* MurmurUITests */,
 			);
@@ -326,6 +435,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B10000000000000000000063 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -337,6 +453,7 @@
 				A10000000000000000000002 /* MurmurChatView.swift in Sources */,
 				A10000000000000000000003 /* MurmurModels.swift in Sources */,
 				A10000000000000000000004 /* PhotoLoader.swift in Sources */,
+				A10000000000000000000209 /* MurmurPlaceLookup.swift in Sources */,
 				A10000000000000000000005 /* MurmurSecurity.swift in Sources */,
 				A10000000000000000000006 /* MurmurAPI.swift in Sources */,
 				A10000000000000000000007 /* MurmurSessionModel.swift in Sources */,
@@ -350,6 +467,17 @@
 				A10000000000000000000207 /* MurmurArchiveViews.swift in Sources */,
 				A10000000000000000000203 /* OnThisDayTabView.swift in Sources */,
 				A100000000000000000000F5 /* MurmurPhotoRoom.swift in Sources */,
+				A10000000000000000000313 /* MusicPickerView.swift in Sources */,
+				A10000000000000000000315 /* NeteaseMusic.swift in Sources */,
+				A10000000000000000000317 /* SharedMusicDraft.swift in Sources */,
+				A10000000000000000000311 /* MusicCardView.swift in Sources */,
+				A1000000000000000000030F /* MusicPlayerViews.swift in Sources */,
+				A1000000000000000000030D /* MusicModule.swift in Sources */,
+				A10000000000000000000309 /* MusicPlaybackController.swift in Sources */,
+				A10000000000000000000307 /* AudiusAccountModel.swift in Sources */,
+				A10000000000000000000305 /* AudiusClient.swift in Sources */,
+				A10000000000000000000303 /* MusicPlaybackReporting.swift in Sources */,
+				A10000000000000000000301 /* MusicModels.swift in Sources */,
 				A100000000000000000000F3 /* OnThisDay.metal in Sources */,
 				A100000000000000000000D1 /* MurmurDiagnostics.swift in Sources */,
 				A100000000000000000000E1 /* MurmurKeyboardInset.swift in Sources */,
@@ -365,6 +493,7 @@
 				A1000000000000000000000D /* MurmurSecurityContractTests.swift in Sources */,
 				A100000000000000000000G1 /* OnThisDayTests.swift in Sources */,
 				A100000000000000000000G3 /* PhotoRoomModelTests.swift in Sources */,
+				A1000000000000000000030B /* MusicTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -373,6 +502,15 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1000000000000000000000E /* MurmurUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B10000000000000000000062 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000001 /* ShareViewController.swift in Sources */,
+				B10000000000000000000002 /* SharedMusicDraft.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -388,6 +526,11 @@
 			isa = PBXTargetDependency;
 			target = A10000000000000000000041 /* Murmur */;
 			targetProxy = A10000000000000000000091 /* PBXContainerItemProxy */;
+		};
+		B10000000000000000000071 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B10000000000000000000041 /* MurmurShareExtension */;
+			targetProxy = B10000000000000000000004 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -441,7 +584,7 @@
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Murmur 想在本机翻找你相册里同一天的旧照片；发送哪一张，由你决定。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
+				INFOPLIST_KEY_UIBackgroundModes = "remote-notification audio";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -475,7 +618,7 @@
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Murmur 想在本机翻找你相册里同一天的旧照片；发送哪一张，由你决定。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIBackgroundModes = "remote-notification";
+				INFOPLIST_KEY_UIBackgroundModes = "remote-notification audio";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -558,6 +701,55 @@
 			};
 			name = Release;
 		};
+		B10000000000000000000081 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = MurmurShareExtension/MurmurShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = FZNVTA2X9J;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MurmurShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../../Frameworks";
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.sakura.Murmur.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		B10000000000000000000082 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = MurmurShareExtension/MurmurShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = FZNVTA2X9J;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MurmurShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../../Frameworks";
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.sakura.Murmur.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -584,6 +776,15 @@
 			buildConfigurations = (
 				A10000000000000000000087 /* Debug */,
 				A10000000000000000000088 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B10000000000000000000051 /* Build configuration list for PBXNativeTarget "MurmurShareExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B10000000000000000000081 /* Debug */,
+				B10000000000000000000082 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

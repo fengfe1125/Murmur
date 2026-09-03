@@ -83,11 +83,30 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         intent: MurmurMomentIntent?,
         contextMomentIDs: [String]
     ) async throws -> MomentReceipt {
+        try await createMoment(
+            note: note,
+            photo: photo,
+            musicTrack: nil,
+            idempotencyKey: idempotencyKey,
+            intent: intent,
+            contextMomentIDs: contextMomentIDs
+        )
+    }
+
+    func createMoment(
+        note: String?,
+        photo: PhotoAttachment?,
+        musicTrack: MusicTrackAttachmentV1?,
+        idempotencyKey: String,
+        intent: MurmurMomentIntent?,
+        contextMomentIDs: [String]
+    ) async throws -> MomentReceipt {
         let boundary = "Murmur-\(UUID().uuidString)"
         let bodyURL = try makeMultipartBody(
             boundary: boundary,
             note: note,
             photo: photo,
+            musicTrack: musicTrack,
             idempotencyKey: idempotencyKey,
             intent: intent,
             contextMomentIDs: contextMomentIDs
@@ -160,6 +179,112 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             contentType: "application/json",
             authenticated: true,
             allowsEmpty: true
+        )
+    }
+
+    func musicAvailability() async throws -> MusicFeatureAvailability {
+        try await send(
+            path: "/v1/music/config",
+            method: "GET",
+            body: Data(),
+            contentType: nil,
+            authenticated: true
+        )
+    }
+
+    func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let body = try encoder.encode(event)
+        let _: PlaybackStateResponse = try await send(
+            path: "/v1/music/playback-state",
+            method: "PUT",
+            body: body,
+            contentType: "application/json",
+            authenticated: true,
+            allowsEmpty: true
+        )
+    }
+
+    func resolveSharedMusic(text: String, idempotencyKey: String) async throws -> MusicTrackAttachmentV1 {
+        let body = try encoder.encode(ResolveSharedMusicRequest(
+            text: text,
+            idempotencyKey: idempotencyKey
+        ))
+        let response: ResolveSharedMusicResponseV1 = try await send(
+            path: "/v1/music/resolve-shared",
+            method: "POST",
+            body: body,
+            contentType: "application/json",
+            authenticated: true
+        )
+        return response.track
+    }
+
+    func createListenTogetherRoom(
+        initialTrack: MusicTrackAttachmentV1,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        let body = try encoder.encode(CreateListenTogetherRoomRequest(
+            initialTrack: initialTrack,
+            idempotencyKey: idempotencyKey
+        ))
+        return try await send(
+            path: "/v1/listen-together/rooms",
+            method: "POST",
+            body: body,
+            contentType: "application/json",
+            authenticated: true
+        )
+    }
+
+    func currentListenTogetherRoom() async throws -> ListenTogetherRoomSnapshotV1? {
+        do {
+            return try await send(
+                path: "/v1/listen-together/rooms/current",
+                method: "GET",
+                body: Data(),
+                contentType: nil,
+                authenticated: true
+            )
+        } catch let failure as MurmurFailure where failure.code == "room_not_found" {
+            return nil
+        }
+    }
+
+    func commandListenTogetherRoom(
+        handle: String,
+        command: ListenTogetherCommand,
+        track: MusicTrackAttachmentV1?,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherCommandResultV1 {
+        let body = try encoder.encode(ListenTogetherCommandRequest(
+            command: command,
+            track: track,
+            idempotencyKey: idempotencyKey
+        ))
+        return try await send(
+            path: "/v1/listen-together/rooms/\(pathComponent(handle))/commands",
+            method: "POST",
+            body: body,
+            contentType: "application/json",
+            authenticated: true
+        )
+    }
+
+    func closeListenTogetherRoom(
+        handle: String,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        let body = try encoder.encode(CloseListenTogetherRoomRequest(
+            idempotencyKey: idempotencyKey
+        ))
+        return try await send(
+            path: "/v1/listen-together/rooms/\(pathComponent(handle))",
+            method: "DELETE",
+            body: body,
+            contentType: "application/json",
+            authenticated: true
         )
     }
 
@@ -315,7 +440,7 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             return .accepted(id: id)
         case "bubble":
             let bubble = try decoder.decode(BubblePayload.self, from: payload)
-            return .bubble(id: id, text: bubble.text)
+            return .bubble(id: id, text: bubble.text, musicTrack: bubble.musicTrack)
         case "quiet":
             return .quiet(id: id)
         case "done":
@@ -486,10 +611,15 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         return url
     }
 
-    private func makeMultipartBody(
+    /// Internal rather than private so the encoding itself can be asserted on.
+    /// Every field here is one the server parses by name: a rename that only a
+    /// client double ever sees is a green test suite over a feature the server
+    /// never receives.
+    func makeMultipartBody(
         boundary: String,
         note: String?,
         photo: PhotoAttachment?,
+        musicTrack: MusicTrackAttachmentV1? = nil,
         idempotencyKey: String,
         intent: MurmurMomentIntent?,
         contextMomentIDs: [String]
@@ -526,6 +656,42 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             try field("context_moment_ids", value)
         }
         if let note, !note.isEmpty { try field("note", note) }
+        if let musicTrack {
+            guard photo == nil else {
+                throw MurmurFailure(
+                    code: "invalid_music_attachment",
+                    message: "歌曲不能和照片一起发送。",
+                    retryable: false
+                )
+            }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            guard let value = String(data: try encoder.encode(musicTrack), encoding: .utf8) else {
+                throw MurmurFailure(
+                    code: "upload_prepare_failed",
+                    message: "无法准备这首歌。",
+                    retryable: false
+                )
+            }
+            try field("music_track", value)
+        }
+        // What the photo says about itself.  It rides as its own field rather
+        // than being written back into the JPEG: the bytes going up are a
+        // downsampled derivative, and forging EXIF into a derivative so the
+        // server can "discover" what this app already knows is one indirection
+        // too many.
+        if let provenance = photo?.provenance, !provenance.isEmpty {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let value = String(data: try encoder.encode(provenance), encoding: .utf8) else {
+                throw MurmurFailure(
+                    code: "upload_prepare_failed",
+                    message: "无法准备这张照片的信息。",
+                    retryable: false
+                )
+            }
+            try field("provenance", value)
+        }
         if let photo {
             try write("--\(boundary)\r\n")
             try write("Content-Disposition: form-data; name=\"image\"; filename=\"\(photo.filename)\"\r\n")
@@ -558,6 +724,12 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
     private static let emptyDigest = Data(SHA256.hash(data: Data()))
 }
 
+extension URLSessionMurmurAPIClient: MusicPlaybackEventTransport {
+    func send(_ event: MusicPlaybackEvent) async throws {
+        try await reportMusicPlayback(event)
+    }
+}
+
 actor ProtectedRequestGate {
     private var acquired = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -585,6 +757,45 @@ private struct ChallengeRequest: Encodable {
     let purpose: String
     let keyID: String?
     enum CodingKeys: String, CodingKey { case purpose; case keyID = "key_id" }
+}
+
+private struct ResolveSharedMusicRequest: Encodable {
+    let text: String
+    let idempotencyKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case idempotencyKey = "idempotency_key"
+    }
+}
+
+private struct CreateListenTogetherRoomRequest: Encodable {
+    let initialTrack: MusicTrackAttachmentV1
+    let idempotencyKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case initialTrack = "initial_track"
+        case idempotencyKey = "idempotency_key"
+    }
+}
+
+private struct ListenTogetherCommandRequest: Encodable {
+    let command: ListenTogetherCommand
+    let track: MusicTrackAttachmentV1?
+    let idempotencyKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case command, track
+        case idempotencyKey = "idempotency_key"
+    }
+}
+
+private struct CloseListenTogetherRoomRequest: Encodable {
+    let idempotencyKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case idempotencyKey = "idempotency_key"
+    }
 }
 
 private struct EnrollmentRequest: Encodable {
@@ -632,7 +843,15 @@ struct DeviceRequest: Encodable {
 
 private struct DevicesResponse: Decodable, Sendable { let devices: [MurmurDevice] }
 
-private struct BubblePayload: Decodable { let text: String }
+private struct BubblePayload: Decodable {
+    let text: String
+    let musicTrack: MusicTrackAttachmentV1?
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case musicTrack = "music_track"
+    }
+}
 private struct DonePayload: Decodable { let move: String?; let scene: String? }
 private struct AnglesPayload: Decodable { let angles: [String] }
 private struct StreamFailurePayload: Decodable { let code: String; let message: String; let retryable: Bool }
@@ -640,4 +859,9 @@ private struct ErrorEnvelope: Decodable { let error: StreamFailurePayload }
 
 private struct EmptyResponse: Codable {
     init() {}
+}
+
+private struct PlaybackStateResponse: Decodable {
+    let accepted: Bool?
+    init() { accepted = nil }
 }

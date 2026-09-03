@@ -1,24 +1,30 @@
 # VPS 连接与权限边界
 
-> 状态：现行规范｜适用：已授权的运维人员｜核验：2026-08-28｜依据：本地连接参考经脱敏整理；桥接安装时已验证连接
+> 状态：现行规范｜适用：已授权的运维人员｜核验：2026-09-03｜依据：2026-09-02 新 VPS 迁移及公网验收
 
-服务器地址、实例名、项目 ID、账号和密钥位置由操作者在本机私有配置维护，本文只保留占位示例。
-既有运维工具仍可能含历史主机默认值，使用前应以本机环境变量和 SSH 配置核对覆盖，不能把默认值当作连接授权。
-原始连接笔记已保留在本机忽略的重组备份内，不上传。
-2026-08-28 在单独授权下使用已有密钥和 macOS 钥匙串完成连接及 [桥接安装核验](bridge-installation-2026-08-28.md)，未生成或替换登录凭据；本次成功不构成后续生产变更授权。
+生产域名是 `https://claude.sakuramu.edu.kg`，DNS 指向 `193.106.250.61`。服务器为 Ubuntu 24.04，Murmur 位于 `/opt/murmur`；公网只由 Caddy 暴露，API、Worker 和管理面板使用既有 systemd unit。
 
-## 连接
+## 当前连接
 
-普通 SSH 使用个人 SSH config 中的别名，例如 `ssh murmur-vps`。
-若直连不可用且主机使用 Google Cloud，可由操作者使用已登录账号建立 IAP 隧道：
+本机 `~/.ssh/config` 的私有配置应等价于：
 
 ```sh
-gcloud compute start-iap-tunnel INSTANCE 22 \
-  --local-host-port=127.0.0.1:2222 --zone ZONE --project PROJECT
+Host murmur-new-vps
+  HostName 193.106.250.61
+  User root
+  IdentityFile ~/.ssh/murmur_new_vps
+  IdentitiesOnly yes
 ```
 
-随后使用本机 SSH 配置连接隧道；不从仓库获取、复制或生成生产凭据。
-只读检查可查看服务状态和当前提交；日志、用户列表仍可能敏感，展示前脱敏。
+首选连接命令：
+
+```sh
+ssh -o BatchMode=yes murmur-new-vps
+```
+
+服务器已关闭密码与键盘交互认证，root 仅允许公钥登录。仓库只记录公钥连接位置，不保存密码、私钥内容或其他生产凭据。主机密钥变化时先通过供应商控制台核验指纹，不跳过 SSH 主机验证。
+
+旧 Google Cloud 主机、旧直连密钥和 IAP 流程均已退役；不再从历史文档、终端记录或脚本默认值恢复旧连接。只读检查可查看服务状态和当前提交；日志、用户列表仍可能敏感，展示前脱敏。
 
 ## 操作边界
 

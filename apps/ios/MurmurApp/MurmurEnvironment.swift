@@ -164,6 +164,8 @@ private actor UnavailableMurmurAPIClient: MurmurAPIClient {
     func removeDevice(deviceID: String) async throws { throw unavailable }
     func preferences() async throws -> MurmurPreferences { throw unavailable }
     func updatePreferences(_ preferences: MurmurPreferences) async throws { throw unavailable }
+    func musicAvailability() async throws -> MusicFeatureAvailability { throw unavailable }
+    func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws { throw unavailable }
     func resetLocalIdentity() async throws {}
     func deleteAccount() async throws { throw unavailable }
 
@@ -192,6 +194,8 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
     /// Under `--murmur-stub-reading-fails` the room's opening upload never
     /// lands.  That is what makes the room's own failure state reachable.
     private let failsReading = ProcessInfo.processInfo.arguments.contains("--murmur-stub-reading-fails")
+    private let arguments = ProcessInfo.processInfo.arguments
+    private var listenTogetherRoom: ListenTogetherRoomSnapshotV1?
 
     func storedIdentity() async throws -> MurmurIdentity? { identity }
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity { identity }
@@ -245,7 +249,138 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
     func removeDevice(deviceID: String) async throws {}
     func preferences() async throws -> MurmurPreferences { MurmurPreferences() }
     func updatePreferences(_ preferences: MurmurPreferences) async throws {}
+    func musicAvailability() async throws -> MusicFeatureAvailability {
+        guard arguments.contains(where: { $0.hasPrefix("--murmur-stub-netease-") }) else {
+            return MusicFeatureAvailability(
+                enabled: false, provider: "audius", playbackReporting: false
+            )
+        }
+        return MusicFeatureAvailability(
+            enabled: false,
+            provider: "audius",
+            playbackReporting: false,
+            providers: [
+                MusicProviderCapabilityV1(
+                    id: MusicProvider.netease.rawValue,
+                    capabilities: ["search", "resolve_shared"]
+                )
+            ],
+            listenTogether: ListenTogetherCapabilityV1(
+                enabled: true,
+                provider: MusicProvider.netease.rawValue,
+                commands: ListenTogetherCommand.allCases.map(\.rawValue)
+            )
+        )
+    }
+    func resolveSharedMusic(
+        text: String,
+        idempotencyKey: String
+    ) async throws -> MusicTrackAttachmentV1 {
+        uiNeteaseTrack
+    }
+    func createListenTogetherRoom(
+        initialTrack: MusicTrackAttachmentV1,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        let room = uiRoom(state: .waitingForUser, playback: .unknown, joined: false)
+        listenTogetherRoom = room
+        return room
+    }
+    func currentListenTogetherRoom() async throws -> ListenTogetherRoomSnapshotV1? {
+        if let listenTogetherRoom { return listenTogetherRoom }
+        let room: ListenTogetherRoomSnapshotV1?
+        if arguments.contains("--murmur-stub-netease-waiting") {
+            room = uiRoom(state: .waitingForUser, playback: .unknown, joined: false)
+        } else if arguments.contains("--murmur-stub-netease-paused") {
+            room = uiRoom(state: .connected, playback: .paused, joined: true)
+        } else if arguments.contains("--murmur-stub-netease-syncing") {
+            room = uiRoom(
+                state: .syncing,
+                playback: .unknown,
+                joined: true,
+                pendingCommand: .pause
+            )
+        } else if arguments.contains("--murmur-stub-netease-room-failed") {
+            room = uiRoom(
+                state: .failed,
+                playback: .unknown,
+                joined: false,
+                errorCode: "invite_expired"
+            )
+        } else if arguments.contains("--murmur-stub-netease-playing")
+                    || arguments.contains("--murmur-stub-netease-command-fails")
+                    || arguments.contains("--murmur-stub-netease-offline") {
+            room = uiRoom(state: .connected, playback: .playing, joined: true)
+        } else {
+            room = nil
+        }
+        listenTogetherRoom = room
+        return room
+    }
+    func commandListenTogetherRoom(
+        handle: String,
+        command: ListenTogetherCommand,
+        track: MusicTrackAttachmentV1?,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherCommandResultV1 {
+        let failed = arguments.contains("--murmur-stub-netease-command-fails")
+        let playback: ListenTogetherPlaybackState = switch command {
+        case .pause: failed ? .playing : .paused
+        case .resume: .playing
+        case .previous, .next, .playTrack: .playing
+        }
+        let room = uiRoom(
+            state: .connected,
+            playback: playback,
+            joined: true,
+            errorCode: failed ? "command_rejected" : nil,
+            track: track
+        )
+        listenTogetherRoom = room
+        return .init(status: failed ? .failed : .synchronized, room: room)
+    }
+    func closeListenTogetherRoom(
+        handle: String,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        listenTogetherRoom = nil
+        return uiRoom(state: .ended, playback: .unknown, joined: false)
+    }
     func resetLocalIdentity() async throws {}
     func deleteAccount() async throws {}
+
+    private var uiNeteaseTrack: MusicTrackAttachmentV1 {
+        MusicTrackAttachmentV1(
+            provider: MusicProvider.netease.rawValue,
+            trackID: "186016",
+            title: "花海",
+            artists: ["周杰伦"],
+            artworkURL: nil,
+            canonicalURL: URL(string: "https://music.163.com/song?id=186016")!,
+            durationSeconds: 264,
+            explicit: false
+        )
+    }
+
+    private func uiRoom(
+        state: ListenTogetherRoomState,
+        playback: ListenTogetherPlaybackState,
+        joined: Bool,
+        pendingCommand: ListenTogetherCommand? = nil,
+        errorCode: String? = nil,
+        track: MusicTrackAttachmentV1? = nil
+    ) -> ListenTogetherRoomSnapshotV1 {
+        ListenTogetherRoomSnapshotV1(
+            roomHandle: "ui-room",
+            state: state,
+            currentTrack: track ?? uiNeteaseTrack,
+            userJoined: joined,
+            pendingCommand: pendingCommand?.rawValue,
+            inviteURL: URL(string: "https://music.163.com/listen-together/invite/ui-room"),
+            updatedAt: "2026-09-01T00:00:00Z",
+            errorCode: errorCode,
+            playbackState: playback
+        )
+    }
 }
 #endif

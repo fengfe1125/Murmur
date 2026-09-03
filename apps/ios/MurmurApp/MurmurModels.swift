@@ -134,6 +134,38 @@ struct MurmurBubblePacing: Sendable, Equatable {
     }
 }
 
+/// What a photo carries about itself: when it was taken, and where.
+///
+/// 当年今日 sends a re-encoded JPEG, and a re-encoded JPEG has no EXIF left —
+/// without saying so explicitly, a photo from three years ago arrives looking
+/// like it was taken a second ago, and the one screen whose whole job is to ask
+/// about *that day* gets told the wrong day.  So the app states these facts
+/// rather than leaving a parser downstream to infer them from an image that no
+/// longer contains them.
+///
+/// `place` is reverse-geocoded on this device.  The coordinates still only ever
+/// become an anonymised ~110m fingerprint on the server, which does no
+/// geocoding of its own and keeps no latitude or longitude.
+struct PhotoProvenance: Codable, Equatable, Sendable {
+    var shotAt: Date?
+    var latitude: Double?
+    var longitude: Double?
+    var place: String?
+
+    enum CodingKeys: String, CodingKey {
+        case shotAt = "shot_at"
+        case latitude = "lat"
+        case longitude = "lon"
+        case place
+    }
+
+    /// Nothing worth saying.  An empty block is not sent at all rather than
+    /// sent as `{}` — the server would have to decide what that meant.
+    var isEmpty: Bool {
+        shotAt == nil && latitude == nil && longitude == nil && place == nil
+    }
+}
+
 struct PhotoAttachment: Identifiable, @unchecked Sendable {
     let id: UUID
     let originalURL: URL
@@ -141,6 +173,10 @@ struct PhotoAttachment: Identifiable, @unchecked Sendable {
     let filename: String
     let mimeType: String
     let byteCount: Int64
+    /// Filled in after the encode rather than during it: the place name is
+    /// resolved over the network alongside the encode, and whichever finishes
+    /// first should not hold up the other.
+    var provenance: PhotoProvenance?
 }
 
 struct MurmurBubble: Identifiable, Equatable, Sendable {
@@ -237,7 +273,10 @@ enum MurmurMomentIntent: String, Sendable {
 
 enum MurmurStreamEvent: Equatable, Sendable {
     case accepted(id: String?)
-    case bubble(id: String?, text: String)
+    /// A normal bubble may carry one provider-neutral song snapshot.  This is
+    /// deliberately still the existing durable bubble event: older payloads
+    /// decode with no attachment and there is no parallel music event stream.
+    case bubble(id: String?, text: String, musicTrack: MusicTrackAttachmentV1?)
     /// The three openers under a photo reading: another output of the same
     /// moment, not a new endpoint.  Short entry angles the person can pick up
     /// with one tap, and only 当年今日's room ever asks for them.
@@ -245,6 +284,13 @@ enum MurmurStreamEvent: Equatable, Sendable {
     case quiet(id: String?)
     case done(id: String?, move: String?, scene: String?)
     case failure(id: String?, MurmurFailure)
+}
+
+extension MurmurStreamEvent {
+    /// Source-compatible spelling for the many existing text-only producers.
+    static func bubble(id: String?, text: String) -> Self {
+        .bubble(id: id, text: text, musicTrack: nil)
+    }
 }
 
 protocol MurmurAPIClient: Sendable {
@@ -257,6 +303,14 @@ protocol MurmurAPIClient: Sendable {
         intent: MurmurMomentIntent?,
         contextMomentIDs: [String]
     ) async throws -> MomentReceipt
+    func createMoment(
+        note: String?,
+        photo: PhotoAttachment?,
+        musicTrack: MusicTrackAttachmentV1?,
+        idempotencyKey: String,
+        intent: MurmurMomentIntent?,
+        contextMomentIDs: [String]
+    ) async throws -> MomentReceipt
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error>
     func currentProactive() async throws -> ProactiveMoment?
     func acknowledge(momentID: String, reply: String?) async throws
@@ -265,11 +319,93 @@ protocol MurmurAPIClient: Sendable {
     func removeDevice(deviceID: String) async throws
     func preferences() async throws -> MurmurPreferences
     func updatePreferences(_ preferences: MurmurPreferences) async throws
+    func musicAvailability() async throws -> MusicFeatureAvailability
+    func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws
+    func resolveSharedMusic(text: String, idempotencyKey: String) async throws -> MusicTrackAttachmentV1
+    func createListenTogetherRoom(
+        initialTrack: MusicTrackAttachmentV1,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1
+    func currentListenTogetherRoom() async throws -> ListenTogetherRoomSnapshotV1?
+    func commandListenTogetherRoom(
+        handle: String,
+        command: ListenTogetherCommand,
+        track: MusicTrackAttachmentV1?,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherCommandResultV1
+    func closeListenTogetherRoom(
+        handle: String,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1
     func resetLocalIdentity() async throws
     func deleteAccount() async throws
 }
 
 extension MurmurAPIClient {
+    /// Old test doubles and offline clients stay safely feature-off until they
+    /// opt into the authenticated server capability.
+    func musicAvailability() async throws -> MusicFeatureAvailability {
+        MusicFeatureAvailability(enabled: false, provider: "audius", playbackReporting: false)
+    }
+
+    func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws {}
+
+    func resolveSharedMusic(text: String, idempotencyKey: String) async throws -> MusicTrackAttachmentV1 {
+        throw MurmurFailure(code: "netease_unavailable", message: "网易云音乐功能尚未开启。", retryable: false)
+    }
+
+    func createListenTogetherRoom(
+        initialTrack: MusicTrackAttachmentV1,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        throw MurmurFailure(code: "listen_together_unavailable", message: "一起听功能尚未开启。", retryable: false)
+    }
+
+    func currentListenTogetherRoom() async throws -> ListenTogetherRoomSnapshotV1? { nil }
+
+    func commandListenTogetherRoom(
+        handle: String,
+        command: ListenTogetherCommand,
+        track: MusicTrackAttachmentV1?,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherCommandResultV1 {
+        throw MurmurFailure(code: "listen_together_unavailable", message: "一起听功能尚未开启。", retryable: false)
+    }
+
+    func closeListenTogetherRoom(
+        handle: String,
+        idempotencyKey: String
+    ) async throws -> ListenTogetherRoomSnapshotV1 {
+        throw MurmurFailure(code: "listen_together_unavailable", message: "一起听功能尚未开启。", retryable: false)
+    }
+
+    /// Compatibility seam for clients and test doubles that predate song
+    /// attachments.  Real transports override this requirement; old callers
+    /// continue to use the original body byte-for-byte.
+    func createMoment(
+        note: String?,
+        photo: PhotoAttachment?,
+        musicTrack: MusicTrackAttachmentV1?,
+        idempotencyKey: String,
+        intent: MurmurMomentIntent?,
+        contextMomentIDs: [String]
+    ) async throws -> MomentReceipt {
+        guard musicTrack == nil else {
+            throw MurmurFailure(
+                code: "music_unavailable",
+                message: "这首歌暂时无法发送。",
+                retryable: false
+            )
+        }
+        return try await createMoment(
+            note: note,
+            photo: photo,
+            idempotencyKey: idempotencyKey,
+            intent: intent,
+            contextMomentIDs: contextMomentIDs
+        )
+    }
+
     /// Ordinary chat and older call sites keep producing the exact same
     /// multipart body.  Only an archived-day continuation opts into context.
     func createMoment(
@@ -281,6 +417,23 @@ extension MurmurAPIClient {
         try await createMoment(
             note: note,
             photo: photo,
+            idempotencyKey: idempotencyKey,
+            intent: intent,
+            contextMomentIDs: []
+        )
+    }
+
+    func createMoment(
+        note: String?,
+        photo: PhotoAttachment?,
+        musicTrack: MusicTrackAttachmentV1?,
+        idempotencyKey: String,
+        intent: MurmurMomentIntent?
+    ) async throws -> MomentReceipt {
+        try await createMoment(
+            note: note,
+            photo: photo,
+            musicTrack: musicTrack,
             idempotencyKey: idempotencyKey,
             intent: intent,
             contextMomentIDs: []

@@ -73,7 +73,7 @@ def fake_runner(stdout: str = "", ok_: bool = True, detail: str = ""):
     return run
 
 
-cfg = VpsConfig(gcloud_instance="inst", zone="z", project="p")
+cfg = VpsConfig(ssh_target="murmur-new-vps")
 
 print("\n── status：远端文本解析成结构化数据 " + "─" * 22)
 
@@ -179,23 +179,18 @@ print("\n── VpsConfig / ssh 参数拼接 " + "─" * 30)
 
 import os  # noqa: E402
 
-saved = {k: os.environ.get(k) for k in
-         ("MURMUR_VPS_SSH", "MURMUR_VPS_GCLOUD_INSTANCE", "MURMUR_VPS_ZONE")}
+saved = {"MURMUR_VPS_SSH": os.environ.get("MURMUR_VPS_SSH")}
 try:
     os.environ.pop("MURMUR_VPS_SSH", None)
-    os.environ.pop("MURMUR_VPS_GCLOUD_INSTANCE", None)
-    os.environ.pop("MURMUR_VPS_ZONE", None)
     c = VpsConfig.resolve()
-    check("零配置落到现网默认实例",
-          c.gcloud_instance == vps_panel.DEFAULT_INSTANCE
-          and c.zone == vps_panel.DEFAULT_ZONE)
-    os.environ["MURMUR_VPS_GCLOUD_INSTANCE"] = "other-inst"
-    check("环境变量覆盖默认实例",
-          VpsConfig.resolve().gcloud_instance == "other-inst")
+    check("零配置落到当前生产 SSH 别名",
+          c.ssh_target == vps_panel.DEFAULT_SSH_TARGET)
     os.environ["MURMUR_VPS_SSH"] = "me@example.com"
-    check("给了 ssh 就不用 gcloud",
-          VpsConfig.resolve().ssh_target == "me@example.com"
-          and VpsConfig.resolve().gcloud_instance is None)
+    check("环境变量覆盖默认 SSH 别名",
+          VpsConfig.resolve().ssh_target == "me@example.com")
+    check("CLI 参数优先于环境变量",
+          VpsConfig.resolve(ssh_target="other@example.com").ssh_target
+          == "other@example.com")
 finally:
     for k, v in saved.items():
         if v is None:
@@ -210,58 +205,6 @@ argv = vps_panel._ssh_argv(
     VpsConfig(ssh_target="me@example.com", ssh_key="/tmp/k"), "uptime")
 check("带了 key 就指定 identities",
       "-i" in argv and "/tmp/k" in argv and "IdentitiesOnly=yes" in argv)
-argv = vps_panel._ssh_argv(cfg, "uptime")
-check("gcloud 模式带实例/区/项目",
-      argv[:3] == ["gcloud", "compute", "ssh"] and "inst" in argv
-      and "--zone" in argv and "--project" in argv)
-
-print("\n── resolve_direct_ssh：gcloud 只用来拿 IP " + "─" * 22)
-
-import subprocess  # noqa: E402
-
-real_run = subprocess.run
-real_key = vps_panel.GCLOUD_SSH_KEY
-
-
-class FakeProc:
-    def __init__(self, out: str, code: int = 0):
-        self.stdout, self.returncode = out, code
-
-
-class FakeKey:
-    """Path 实例不让挂属性，整个换掉模块常量。"""
-
-    def __init__(self, present: bool):
-        self.present = present
-
-    def exists(self) -> bool:
-        return self.present
-
-    def __str__(self) -> str:
-        return "/home/me/.ssh/google_compute_engine"
-
-
-try:
-    vps_panel.GCLOUD_SSH_KEY = FakeKey(True)
-    subprocess.run = lambda *a, **kw: FakeProc("34.82.10.20\n")
-    d = vps_panel.resolve_direct_ssh(cfg)
-    import getpass
-    check("解析成 用户@IP 直连",
-          d is not None and d.ssh_target == f"{getpass.getuser()}@34.82.10.20"
-          and d.ssh_key.endswith("google_compute_engine"), str(d))
-
-    subprocess.run = lambda *a, **kw: FakeProc("", 1)
-    check("describe 失败回 None（退回 gcloud 慢速模式）",
-          vps_panel.resolve_direct_ssh(cfg) is None)
-
-    subprocess.run = lambda *a, **kw: FakeProc("INSTANCE_GROUPS\nnot-an-ip\n")
-    check("输出不是 IP 回 None", vps_panel.resolve_direct_ssh(cfg) is None)
-
-    vps_panel.GCLOUD_SSH_KEY = FakeKey(False)
-    check("本机没有 gcloud key 回 None", vps_panel.resolve_direct_ssh(cfg) is None)
-finally:
-    subprocess.run = real_run
-    vps_panel.GCLOUD_SSH_KEY = real_key
 
 print("\n── web 层：写接口必须过鉴权 " + "─" * 30)
 

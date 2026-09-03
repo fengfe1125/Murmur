@@ -32,8 +32,25 @@ from .app_auth import (
     AttestationRequired,
     InvalidAttestation,
 )
+from .app_listen_together import (
+    ROOM_COMMANDS,
+    ListenTogetherError,
+    RoomIPCClient,
+)
 from .app_lock import UserOperationLock
-from .app_settings import AppSettings
+from .app_music import (
+    MusicCatalog,
+    MusicCatalogUnavailable,
+    MusicError,
+    MusicTrackInvalid,
+    MusicTrackUnavailable,
+    NeteaseCatalogAdapter,
+    normalize_music_track,
+    normalize_playback_track,
+    parse_music_track,
+)
+from .app_music_links import MAX_SHARED_TEXT_BYTES, MusicLink, MusicLinkRejected
+from .app_settings import AppSettings, music_user_allowed
 from .app_store import (
     MOMENT_INTENTS,
     AccountDeleting,
@@ -149,6 +166,16 @@ def _translate_error(exc: Exception) -> APIError:
         return APIError(409, exc.code, "最多只能绑定三台设备。")
     if isinstance(exc, LastDevice):
         return APIError(409, exc.code, "不能移除最后一台设备；请改为删除账号。")
+    if isinstance(exc, MusicTrackInvalid):
+        return APIError(400, exc.code, "这首歌的信息无效。")
+    if isinstance(exc, MusicError):
+        # Catalog lookups and planning are best-effort dependencies; the client
+        # is told to try again rather than being handed a 500.
+        return APIError(
+            503 if exc.retryable else 400, exc.code,
+            "音乐服务暂时不可用。" if exc.retryable else "这首歌暂时不可用。",
+            retryable=exc.retryable,
+        )
     if isinstance(exc, IdempotencyConflict):
         return APIError(409, exc.code, "这个幂等键已经用于其他内容。")
     if isinstance(exc, MomentInFlight):
@@ -194,6 +221,76 @@ def _looks_like_image(data: bytes) -> bool:
         or data.startswith((b"GIF87a", b"GIF89a"))
         or data.startswith(b"RIFF") and data[8:12] == b"WEBP"
         or len(data) >= 12 and data[4:8] == b"ftyp"  # HEIC/HEIF container
+    )
+
+
+# 地名在这里只做长度上的兜底，内容不动：它是 App 反解出来的一段人读的文字，
+# 服务端没有第二个来源可以拿来校验它。
+MAX_PLACE_CHARS = 120
+_PROVENANCE_KEYS = {"shot_at", "lat", "lon", "place"}
+
+
+def _parse_provenance(value) -> str | None:
+    """照片自己带的事实：拍摄时间、坐标、机上反解出的地名。
+
+    重新编码过的 JPEG 没有 EXIF，所以这些不从图里读，由 App 显式声明。
+    存回去的是规范化后的 JSON——幂等摘要要算它，同一份内容必须得到同一串字节。
+
+    四个键全是可选的：老照片可能关了定位，反解可能超时，都不是错误。
+    """
+    if value in (None, ""):
+        return None
+    try:
+        raw = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise APIError(400, "validation_error", "provenance 无效。") from exc
+    if not isinstance(raw, dict) or not _PROVENANCE_KEYS.issuperset(raw):
+        raise APIError(400, "validation_error", "provenance 无效。")
+
+    clean: dict[str, object] = {}
+
+    shot_at = raw.get("shot_at")
+    if shot_at is not None:
+        if not isinstance(shot_at, str):
+            raise APIError(400, "validation_error", "provenance.shot_at 无效。")
+        try:
+            parsed = datetime.fromisoformat(shot_at)
+        except ValueError as exc:
+            raise APIError(
+                400, "validation_error", "provenance.shot_at 无效。"
+            ) from exc
+        clean["shot_at"] = parsed.isoformat()
+
+    lat, lon = raw.get("lat"), raw.get("lon")
+    if (lat is None) != (lon is None):
+        # 半个坐标折不出地点指纹，也没法解释它是什么意思。
+        raise APIError(400, "validation_error", "provenance 的经纬度要成对提交。")
+    if lat is not None:
+        # bool 是 int 的子类，挡掉，否则 True 会被当成 1.0 度。
+        if isinstance(lat, bool) or isinstance(lon, bool):
+            raise APIError(400, "validation_error", "provenance 的经纬度无效。")
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            raise APIError(400, "validation_error", "provenance 的经纬度无效。")
+        if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+            raise APIError(400, "validation_error", "provenance 的经纬度无效。")
+        clean["lat"], clean["lon"] = float(lat), float(lon)
+
+    place = raw.get("place")
+    if place is not None:
+        if not isinstance(place, str):
+            raise APIError(400, "validation_error", "provenance.place 无效。")
+        place = " ".join(place.split())
+        if len(place) > MAX_PLACE_CHARS:
+            raise APIError(400, "validation_error", "provenance.place 过长。")
+        if place:
+            clean["place"] = place
+
+    if not clean:
+        return None
+    return json.dumps(
+        {key: clean[key] for key in sorted(clean)},
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 
 
@@ -257,6 +354,93 @@ def apply_stop_preference(store: AppStore, user_id: str, text: str | None) -> bo
     return True
 
 
+# One table for both local and worker-reported room failures: the IPC client
+# re-raises a typed error carrying the same code, so the API never has to know
+# which side of the socket a room refusal came from.
+ROOM_ERROR_STATUS = {
+    "invalid_room_request": 400,
+    "room_not_found": 404,
+    "room_conflict": 409,
+    "room_idempotency_conflict": 409,
+    "room_experiment_disabled": 403,
+    "room_protocol_unsupported": 501,
+    "room_out_of_order": 503,
+    "room_transport_unavailable": 503,
+    "room_authentication_failed": 503,
+    "room_unreachable": 503,
+    "room_ipc_unavailable": 503,
+    "room_confirmation_timeout": 504,
+}
+# Fixed copy per code.  Room errors carry protocol detail that must never reach
+# a client, so the message is chosen here rather than taken from the exception.
+ROOM_ERROR_MESSAGE = {
+    "invalid_room_request": "这个一起听请求不对。",
+    "room_not_found": "现在没有正在进行的一起听。",
+    "room_conflict": "已经有一个一起听在进行了。",
+    "room_idempotency_conflict": "这个请求和之前那个不一样。",
+    "room_experiment_disabled": "一起听功能未开启。",
+    "room_protocol_unsupported": "一起听功能还没接通。",
+    "room_confirmation_timeout": "没等到网易云确认，先别当成已经同步了。",
+}
+ROOM_ERROR_FALLBACK = "一起听暂时不可用，稍后再试。"
+
+
+def room_api_error(exc: ListenTogetherError) -> APIError:
+    code = getattr(exc, "code", "listen_together_error")
+    return APIError(
+        ROOM_ERROR_STATUS.get(code, 503),
+        code,
+        ROOM_ERROR_MESSAGE.get(code, ROOM_ERROR_FALLBACK),
+        retryable=bool(getattr(exc, "retryable", False)),
+    )
+
+
+def _music_user_allowed(settings: AppSettings, user_id: str) -> bool:
+    return music_user_allowed(settings.music_user_allowlist, user_id)
+
+
+def audius_music_enabled_for(settings: AppSettings, user_id: str) -> bool:
+    """Whether this account may use the existing Audius vertical slice."""
+    return settings.music_enabled and _music_user_allowed(settings, user_id)
+
+
+def netease_catalog_enabled_for(settings: AppSettings, user_id: str) -> bool:
+    """Whether this account may search, resolve and share NetEase metadata."""
+    return settings.netease_catalog_enabled and _music_user_allowed(settings, user_id)
+
+
+def netease_room_enabled_for(settings: AppSettings, user_id: str) -> bool:
+    """The room experiment is always an explicit, non-empty allowlist."""
+    return (
+        settings.netease_room_experiment_enabled
+        and user_id in settings.netease_room_user_allowlist
+    )
+
+
+def music_provider_enabled_for(
+    settings: AppSettings, user_id: str, provider: str
+) -> bool:
+    """Whether this exact provider is switched on for this account."""
+    if provider == "audius":
+        return audius_music_enabled_for(settings, user_id)
+    if provider == "netease":
+        return netease_catalog_enabled_for(settings, user_id)
+    return False
+
+
+def music_enabled_for(settings: AppSettings, user_id: str) -> bool:
+    """Whether this account may use any provider on the music wire.
+
+    Two independent gates: the deployment switch, then the rollout allowlist.
+    An empty allowlist means "everyone the switch already allows" rather than
+    "nobody", so a full rollout does not require enumerating every account.
+    """
+    return (
+        audius_music_enabled_for(settings, user_id)
+        or netease_catalog_enabled_for(settings, user_id)
+    )
+
+
 def record_memory_reply(
     settings: AppSettings, cfg: Config, entry_id: int, reply: str
 ) -> None:
@@ -292,6 +476,8 @@ def create_app(
     cfg: Config | None = None,
     store: AppStore | None = None,
     authenticator: AppAuthenticator | None = None,
+    music_link: MusicLink | None = None,
+    room_client: RoomIPCClient | None = None,
 ):
     try:
         import python_multipart  # noqa: F401  # required by Request.form()
@@ -319,6 +505,19 @@ def create_app(
         settings.requests_per_minute, max_keys=settings.rate_limit_max_keys
     )
     body_gate = asyncio.Semaphore(settings.max_concurrent_uploads)
+    # Both stay None while their switch is off, so a disabled deployment holds
+    # no NetEase client and opens no socket.  The catalog here is NetEase-only:
+    # resolving a shared link must never fall through to another provider.
+    owns_music_link = music_link is None
+    music_catalog: MusicCatalog | None = None
+    if music_link is None and settings.netease_catalog_enabled:
+        music_catalog = MusicCatalog(
+            [NeteaseCatalogAdapter(base_url=settings.netease_catalog_base_url)],
+            default_provider="netease",
+        )
+        music_link = MusicLink(music_catalog)
+    if room_client is None and settings.netease_room_experiment_enabled:
+        room_client = RoomIPCClient(settings.netease_room_socket_path)
     # With postponed annotations the locally imported Request name must also be
     # visible to FastAPI's type-hint resolver; otherwise it becomes a query field.
     globals()["Request"] = Request
@@ -327,6 +526,10 @@ def create_app(
         try:
             yield
         finally:
+            if owns_music_link and music_link is not None:
+                music_link.close()
+                if music_catalog is not None:
+                    music_catalog.close()
             if owns_store:
                 store.close()
 
@@ -643,7 +846,7 @@ def create_app(
             auth = await authenticate(request, None, body_digest=wire_digest)
             try:
                 form = await request.form(
-                    max_files=1, max_fields=5, max_part_size=64 * 1024
+                    max_files=1, max_fields=7, max_part_size=64 * 1024
                 )
             except Exception as exc:
                 raise APIError(400, "validation_error", "multipart 内容无效。") from exc
@@ -690,6 +893,31 @@ def create_app(
                         if moment not in seen_context:
                             seen_context.add(moment)
                             context_moment_ids.append(moment)
+                # 当年今日推上来的是一张旧照片，App 顺手把这张照片自己的
+                # 事实一起送来：拍摄时间、坐标，以及机上反解好的地名。
+                # 这些不从图里猜——重新编码过的 JPEG 早就没有 EXIF 了。
+                provenance = _parse_provenance(form.get("provenance"))
+                # One song, as its own turn.  The client also sends a text
+                # fallback in `note`, so an older server — and an older client
+                # reading a newer server — still has something to show.
+                music_value = form.get("music_track")
+                if music_value is not None and hasattr(music_value, "read"):
+                    raise APIError(
+                        400, "validation_error", "music_track 必须是文本字段。"
+                    )
+                if music_value not in (None, "") and not music_enabled_for(
+                    settings, auth.user_id
+                ):
+                    raise APIError(403, "music_unavailable", "音乐功能未开启。")
+                music_track, music_canonical = parse_music_track(music_value)
+                # The wire now understands two providers, so "music is on" is
+                # not the same question as "this provider is on".  Without this
+                # a client could attach a card for a switched-off provider and
+                # have the snapshot stored with nothing able to verify it.
+                if music_track is not None and not music_provider_enabled_for(
+                    settings, auth.user_id, music_track["provider"]
+                ):
+                    raise APIError(403, "music_unavailable", "音乐功能未开启。")
                 upload = form.get("image")
                 image_hash = hashlib.sha256()
                 image_size = 0
@@ -726,9 +954,19 @@ def create_app(
                         raise APIError(
                             400, "validation_error", "上传内容不是支持的图片。"
                         )
-                if not note and not temp_path:
+                if not note and not temp_path and not music_track:
                     raise APIError(
-                        400, "validation_error", "文字和图片至少要有一个。"
+                        400, "validation_error", "文字、图片和歌曲至少要有一个。"
+                    )
+                # A song is a turn of its own in this version: pairing it with a
+                # photo would make one moment mean two different things.
+                if music_track and temp_path:
+                    raise APIError(
+                        400, "invalid_music_attachment", "歌曲不能和照片一起发送。"
+                    )
+                if provenance is not None and not temp_path:
+                    raise APIError(
+                        400, "validation_error", "provenance 只能随图片一起提交。"
                     )
                 if intent == "photo_reading" and (not temp_path or note):
                     raise APIError(
@@ -748,6 +986,13 @@ def create_app(
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ).encode("utf-8")
+                if provenance is not None:
+                    digest_input += b"\x00" + provenance.encode("utf-8")
+                # The song is part of what the key promises.  Reusing one key
+                # for a different track has to be a conflict, not a silent
+                # no-op that returns the first song's receipt.
+                if music_canonical is not None:
+                    digest_input += b"\x00" + music_canonical.encode("utf-8")
                 digest = hashlib.sha256(digest_input).hexdigest()
                 result = await asyncio.to_thread(
                     store.create_moment,
@@ -758,6 +1003,8 @@ def create_app(
                     request_digest=digest,
                     intent=intent,
                     context_moment_ids=context_moment_ids,
+                    provenance=provenance,
+                    music_track=music_canonical,
                 )
                 if not result.created and temp_path:
                     temp_path.unlink(missing_ok=True)
@@ -922,6 +1169,268 @@ def create_app(
             )
         except ValueError as exc:
             raise APIError(400, "validation_error", str(exc)) from exc
+
+    @app.get("/v1/music/config")
+    async def music_config(request: Request):
+        auth = await authenticate(request, b"")
+        audius_enabled = audius_music_enabled_for(settings, auth.user_id)
+        netease_enabled = netease_catalog_enabled_for(settings, auth.user_id)
+        room_enabled = netease_room_enabled_for(settings, auth.user_id)
+        result = {
+            "enabled": audius_enabled or netease_enabled,
+            # The singular field is the compatibility view read by shipped
+            # clients.  Prefer Audius while it remains available because only
+            # that provider has first-party in-App playback.
+            "provider": "audius" if audius_enabled or not netease_enabled else "netease",
+            "playback_reporting": (
+                audius_enabled and settings.music_playback_reporting
+            ),
+        }
+        if netease_enabled:
+            providers = []
+            if audius_enabled:
+                providers.append({
+                    "id": "audius",
+                    "capabilities": ["cards", "native_playback"],
+                })
+            netease_capabilities = ["cards", "external_open", "resolve_shared"]
+            if room_enabled:
+                netease_capabilities.append("listen_together")
+            providers.append({
+                "id": "netease", "capabilities": netease_capabilities,
+            })
+            result["providers"] = providers
+            result["listen_together"] = {
+                "enabled": room_enabled,
+                "provider": "netease",
+                "commands": [
+                    "play", "pause", "resume", "previous", "next", "play_track",
+                ],
+            }
+        return result
+
+    @app.post("/v1/music/resolve-shared")
+    async def resolve_shared_music(request: Request):
+        """Turn one shared link into catalog-authoritative song metadata.
+
+        Nothing here is sent to the model or written to the transcript: the
+        person still has to look at the result and send it themselves.  Titles,
+        artists and covers in the shared prose are never read — only the song
+        id inside a link on an allowed host, re-resolved against the catalog.
+        """
+        raw = await limited_json_body(request)
+        auth = await authenticate(request, raw)
+        if music_link is None or not netease_catalog_enabled_for(settings, auth.user_id):
+            raise APIError(403, "music_unavailable", "音乐功能未开启。")
+        data = _json(raw)
+        text = data.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise APIError(400, "validation_error", "分享内容无效。")
+        if len(text.encode("utf-8")) > MAX_SHARED_TEXT_BYTES:
+            raise APIError(413, "body_too_large", "分享内容过大。")
+        # Shape-checked and then dropped.  Resolving is a read: the key exists
+        # so the client can de-duplicate its own draft, not to make the server
+        # remember a share it was never asked to keep.
+        key = str(data.get("idempotency_key") or "").strip()
+        if not 8 <= len(key) <= 200:
+            raise APIError(400, "validation_error", "idempotency_key 无效。")
+        try:
+            track = await asyncio.to_thread(music_link.parse_shared_text, text)
+        except MusicLinkRejected as exc:
+            raise APIError(
+                400, "music_link_rejected", "这个链接打不开成一首歌。"
+            ) from exc
+        except MusicTrackUnavailable as exc:
+            raise APIError(
+                404, "music_track_unavailable", "这首歌现在拿不到。"
+            ) from exc
+        except MusicCatalogUnavailable as exc:
+            raise APIError(
+                503, "music_catalog_unavailable", "音乐服务暂时不可用，稍后再试。",
+                retryable=True,
+            ) from exc
+        except MusicError as exc:
+            # The catalog answered with something this server will not sign off
+            # on.  Retrying cannot help, and a 500 would read as our own bug.
+            raise APIError(
+                502, "music_catalog_unavailable", "音乐服务返回了看不懂的内容。"
+            ) from exc
+        if track is None:
+            raise APIError(422, "music_link_absent", "这段文字里没有网易云歌曲链接。")
+        return {"track": track}
+
+    @app.put("/v1/music/playback-state")
+    async def update_playback_state(request: Request):
+        raw = await limited_json_body(request)
+        auth = await authenticate(request, raw)
+        if not audius_music_enabled_for(settings, auth.user_id):
+            raise APIError(403, "music_unavailable", "音乐功能未开启。")
+        data = _json(raw)
+        if data.get("version") != 1:
+            raise APIError(400, "validation_error", "playback-state 版本不支持。")
+        session_id = str(data.get("session_id") or "").strip()
+        if not 8 <= len(session_id) <= 64:
+            raise APIError(400, "validation_error", "session_id 无效。")
+        sequence = data.get("sequence")
+        if (not isinstance(sequence, int) or isinstance(sequence, bool)
+                or not 0 <= sequence <= 1_000_000):
+            raise APIError(400, "validation_error", "sequence 无效。")
+        state = data.get("state")
+        if state not in {"started", "paused", "resumed", "completed", "stopped"}:
+            raise APIError(400, "validation_error", "state 无效。")
+        # Validated for shape and then dropped: TTL is measured on the server's
+        # own clock, so a client timestamp can never extend how long a listening
+        # state stays visible to the model.
+        occurred_at = data.get("occurred_at")
+        if not isinstance(occurred_at, str) or not 1 <= len(occurred_at) <= 64:
+            raise APIError(400, "validation_error", "occurred_at 无效。")
+        try:
+            datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise APIError(400, "validation_error", "occurred_at 无效。") from exc
+        track = normalize_playback_track(data.get("track"))
+        # Reporting can be turned off on its own while the rest of music stays
+        # on.  Accept and drop, so a client that has not refetched its config
+        # is not stuck retrying a request it is told is retryable.
+        if not settings.music_playback_reporting:
+            return {"accepted": False, "active": False, "expires_at": None}
+        return await asyncio.to_thread(
+            store.update_playback_state,
+            user_id=auth.user_id,
+            device_id=auth.device_id,
+            session_id=session_id,
+            sequence=sequence,
+            state=state,
+            track_json=json.dumps(
+                track, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ),
+            duration_seconds=track.get("duration_seconds"),
+        )
+
+    def room_transport(user_id: str) -> RoomIPCClient:
+        """Both gates, then the socket: an off switch never reaches the worker."""
+        if room_client is None or not netease_room_enabled_for(settings, user_id):
+            raise APIError(403, "listen_together_unavailable", "一起听功能未开启。")
+        return room_client
+
+    def room_handle(value: str) -> str:
+        if not isinstance(value, str) or not 1 <= len(value) <= 200:
+            raise APIError(400, "validation_error", "room_handle 无效。")
+        return value
+
+    def room_idempotency_key(data: dict) -> str:
+        key = str(data.get("idempotency_key") or "").strip()
+        if not 8 <= len(key) <= 200:
+            raise APIError(400, "validation_error", "idempotency_key 无效。")
+        return key
+
+    def room_track(value) -> dict:
+        try:
+            track = normalize_music_track(value)
+        except MusicTrackInvalid as exc:
+            raise APIError(400, "validation_error", "歌曲信息无效。") from exc
+        # A room is a NetEase surface.  An Audius id sent here would name a
+        # completely different song on the other side of the protocol.
+        if track["provider"] != "netease":
+            raise APIError(400, "validation_error", "一起听只支持网易云歌曲。")
+        return track
+
+    @app.post("/v1/listen-together/rooms", status_code=201)
+    async def create_listen_together_room(request: Request):
+        raw = await limited_json_body(request)
+        auth = await authenticate(request, raw)
+        transport = room_transport(auth.user_id)
+        data = _json(raw)
+        track = room_track(data.get("initial_track"))
+        key = room_idempotency_key(data)
+        try:
+            snapshot = await asyncio.to_thread(
+                transport.create,
+                user_id=auth.user_id, initial_track=track, idempotency_key=key,
+            )
+        except ListenTogetherError as exc:
+            # A fresh key plus an existing room means the user tapped “一起听”
+            # on another card.  Reuse that room and switch its track.  Replaying
+            # the original create key never enters this branch because the
+            # manager returns its idempotent create result first.
+            if getattr(exc, "code", None) != "room_conflict":
+                raise room_api_error(exc) from exc
+            try:
+                current = await asyncio.to_thread(
+                    transport.current, user_id=auth.user_id
+                )
+                if current is None:
+                    raise exc
+                reuse_key = "reuse:" + hashlib.sha256(key.encode("utf-8")).hexdigest()
+                result = await asyncio.to_thread(
+                    transport.command,
+                    user_id=auth.user_id,
+                    room_handle=current.room_handle,
+                    command="play_track",
+                    track=track,
+                    idempotency_key=reuse_key,
+                )
+                snapshot = result.room
+            except ListenTogetherError as reuse_exc:
+                raise room_api_error(reuse_exc) from reuse_exc
+        return snapshot.to_wire()
+
+    @app.get("/v1/listen-together/rooms/current")
+    async def current_listen_together_room(request: Request):
+        auth = await authenticate(request, b"")
+        transport = room_transport(auth.user_id)
+        try:
+            snapshot = await asyncio.to_thread(transport.current, user_id=auth.user_id)
+        except ListenTogetherError as exc:
+            raise room_api_error(exc) from exc
+        if snapshot is None:
+            raise APIError(404, "room_not_found", ROOM_ERROR_MESSAGE["room_not_found"])
+        return snapshot.to_wire()
+
+    @app.post("/v1/listen-together/rooms/{handle}/commands")
+    async def command_listen_together_room(handle: str, request: Request):
+        raw = await limited_json_body(request)
+        auth = await authenticate(request, raw)
+        transport = room_transport(auth.user_id)
+        data = _json(raw)
+        command = data.get("command")
+        if command not in ROOM_COMMANDS:
+            raise APIError(400, "validation_error", "command 无效。")
+        raw_track = data.get("track")
+        if command == "play_track":
+            if raw_track is None:
+                raise APIError(400, "validation_error", "换歌需要一首歌。")
+            track = room_track(raw_track)
+        else:
+            if raw_track is not None:
+                raise APIError(400, "validation_error", "这个命令不接受歌曲。")
+            track = None
+        key = room_idempotency_key(data)
+        try:
+            result = await asyncio.to_thread(
+                transport.command,
+                user_id=auth.user_id, room_handle=room_handle(handle),
+                command=command, track=track, idempotency_key=key,
+            )
+        except ListenTogetherError as exc:
+            raise room_api_error(exc) from exc
+        return result.to_wire()
+
+    @app.delete("/v1/listen-together/rooms/{handle}")
+    async def close_listen_together_room(handle: str, request: Request):
+        raw = await limited_json_body(request)
+        auth = await authenticate(request, raw)
+        transport = room_transport(auth.user_id)
+        key = room_idempotency_key(_json(raw))
+        try:
+            snapshot = await asyncio.to_thread(
+                transport.close,
+                user_id=auth.user_id, room_handle=room_handle(handle),
+                idempotency_key=key,
+            )
+        except ListenTogetherError as exc:
+            raise room_api_error(exc) from exc
+        return snapshot.to_wire()
 
     @app.delete("/v1/account", status_code=204)
     async def delete_account(request: Request):

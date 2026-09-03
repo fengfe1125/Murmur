@@ -32,7 +32,7 @@ struct MurmurRoomEventConsumer {
             switch event {
             case .accepted:
                 lastBubbleAt = Date()
-            case let .bubble(id, text):
+            case let .bubble(id, text, _):
                 guard !text.isEmpty else { continue }
                 try await pace(for: text, since: lastBubbleAt)
                 await onBubble(.init(
@@ -70,7 +70,7 @@ struct MurmurRoomEventConsumer {
 
     private static func eventID(of event: MurmurStreamEvent) -> String? {
         switch event {
-        case let .accepted(id), let .bubble(id, _), let .angles(id, _),
+        case let .accepted(id), let .bubble(id, _, _), let .angles(id, _),
              let .quiet(id), let .done(id, _, _), let .failure(id, _):
             id
         }
@@ -165,6 +165,12 @@ final class PhotoRoomModel: ObservableObject {
     private let uploadTimeoutSeconds: TimeInterval
     private let requestTimeoutSeconds: TimeInterval
     private let bubblePacing: MurmurBubblePacing
+    /// What the photo says about itself: when it was taken, and where.  Nil for
+    /// a room opened on something other than an old photo off the shelf.
+    private let provenance: PhotoProvenance?
+    /// Turns the coordinate into a name, on this device.  Asked exactly once,
+    /// at the moment the photo is sent.
+    private let placeLookup: any MurmurPlaceLookup
     /// Where the room's rows go.  Weak because the session owns both the room
     /// and the archive, not the other way round.
     private weak var transcript: (any MurmurRoomRecorder)?
@@ -195,6 +201,8 @@ final class PhotoRoomModel: ObservableObject {
         uploadTimeoutSeconds: TimeInterval = 300,
         requestTimeoutSeconds: TimeInterval = 45,
         bubblePacing: MurmurBubblePacing = .human,
+        provenance: PhotoProvenance? = nil,
+        placeLookup: any MurmurPlaceLookup = SystemPlaceLookup(),
         transcript: (any MurmurRoomRecorder)? = nil
     ) {
         self.image = image
@@ -203,6 +211,8 @@ final class PhotoRoomModel: ObservableObject {
         self.uploadTimeoutSeconds = uploadTimeoutSeconds
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.bubblePacing = bubblePacing
+        self.provenance = provenance
+        self.placeLookup = placeLookup
         self.transcript = transcript
     }
 
@@ -246,13 +256,38 @@ final class PhotoRoomModel: ObservableObject {
     /// file rather than writing a second copy of the same pixels.
     private func prepareAttachment() async throws -> PhotoAttachment {
         if let attachment { return attachment }
-        let loaded = try await photoLoader.load(libraryImage: image)
+        // The place name is asked for here and nowhere earlier: a coordinate
+        // leaves this phone only for a photo the person actually chose to send,
+        // never for one they merely scrolled past.  It resolves alongside the
+        // encode rather than in front of it — the upload is the thing that
+        // matters, and a slow geocode must not stand in its way.
+        let facts = provenance
+        let lookup = placeLookup
+        async let resolvedPlace = Self.place(for: facts, using: lookup)
+        var loaded = try await photoLoader.load(libraryImage: image)
+        if var facts {
+            // A name that did not arrive in time is simply absent.  The photo
+            // still goes, still with its own date — the server reads the place
+            // out of the picture the way it always did.
+            facts.place = await resolvedPlace
+            loaded.provenance = facts
+        }
         guard !closed else {
             await photoLoader.discard(loaded)
             throw CancellationError()
         }
         attachment = loaded
         return loaded
+    }
+
+    /// nonisolated and static so the wait happens off the main actor and needs
+    /// nothing from `self` while it does.
+    private nonisolated static func place(
+        for provenance: PhotoProvenance?, using lookup: any MurmurPlaceLookup
+    ) async -> String? {
+        guard let latitude = provenance?.latitude,
+              let longitude = provenance?.longitude else { return nil }
+        return await lookup.name(latitude: latitude, longitude: longitude)
     }
 
     /// The reading is over, whichever way it went: the full-resolution original

@@ -197,6 +197,82 @@ class AppAPITests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 400, response.text)
 
+    def test_provenance_is_normalized_persisted_and_part_of_idempotency(self):
+        # 重新编码过的 JPEG 没有 EXIF，照片自己的事实只能由 App 显式声明。
+        response = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={
+                "idempotency_key": "api-provenance-0001",
+                "intent": "photo_reading",
+                "provenance": json.dumps({
+                    "place": "  上海市 · 徐汇区  ", "lon": 121.447, "lat": 31.201,
+                    "shot_at": "2023-08-30T15:04:11+08:00",
+                }),
+            },
+            files={"image": ("photo.jpg", b"\xff\xd8\xfffake-jpeg", "image/jpeg")},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        row = self.store.moment_for_user(
+            response.json()["moment_id"], self.identity["user_id"]
+        )
+        self.assertEqual(
+            json.loads(row["provenance"]),
+            {
+                "lat": 31.201, "lon": 121.447, "place": "上海市 · 徐汇区",
+                "shot_at": "2023-08-30T15:04:11+08:00",
+            },
+        )
+
+        # 同一张图配另一组事实是另一次提交，幂等要认得出来。
+        changed = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={
+                "idempotency_key": "api-provenance-0001",
+                "intent": "photo_reading",
+                "provenance": json.dumps({"place": "别的地方"}),
+            },
+            files={"image": ("photo.jpg", b"\xff\xd8\xfffake-jpeg", "image/jpeg")},
+        )
+        self.assertEqual(changed.status_code, 409, changed.text)
+
+    def test_provenance_without_a_photo_is_refused(self):
+        response = self.client.post(
+            "/v1/moments", headers=self.authenticated_headers(),
+            data={
+                "note": "就一句话",
+                "idempotency_key": "api-provenance-no-image",
+                "provenance": json.dumps({"place": "星巴克"}),
+            },
+            files={"_multipart": (None, "1")},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+
+    def test_malformed_provenance_is_refused(self):
+        invalid_values = [
+            "not-json",
+            json.dumps(["星巴克"]),
+            json.dumps({"place": "星巴克", "surprise": 1}),
+            json.dumps({"lat": 31.201}),
+            json.dumps({"lat": 91, "lon": 0}),
+            json.dumps({"shot_at": "上周三"}),
+            json.dumps({"place": "远" * 121}),
+        ]
+        for index, block in enumerate(invalid_values):
+            with self.subTest(block=block):
+                response = self.client.post(
+                    "/v1/moments",
+                    headers=self.authenticated_headers(),
+                    data={
+                        "idempotency_key": f"api-invalid-provenance-{index}",
+                        "intent": "photo_reading",
+                        "provenance": block,
+                    },
+                    files={
+                        "image": ("photo.jpg", b"\xff\xd8\xfffake-jpeg", "image/jpeg")
+                    },
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+
     def test_unknown_intent_is_refused(self):
         response = self.client.post(
             "/v1/moments", headers=self.authenticated_headers(),

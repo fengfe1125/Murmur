@@ -82,10 +82,31 @@ class AppSettings:
     event_ttl_hours: int = 24
     push_delivery_budget_seconds: float = 30.0
     timezone: ZoneInfo = ZoneInfo("Asia/Shanghai")
+    # The music vertical slice is deliberately dark by default.  OAuth stays
+    # on the device; the server key is used only for public catalog lookups.
+    music_enabled: bool = False
+    music_playback_reporting: bool = True
+    music_user_allowlist: frozenset[str] = frozenset()
+    audius_api_key: str | None = None
+    audius_api_base_url: str = "https://api.audius.co/v1"
+    # NetEase is a separate, experimental vertical slice.  Catalog cards may
+    # be enabled without ever enabling the much riskier room protocol.
+    netease_catalog_enabled: bool = False
+    netease_catalog_base_url: str = "https://music.163.com"
+    netease_room_experiment_enabled: bool = False
+    netease_room_user_allowlist: frozenset[str] = frozenset()
+    netease_bot_secret_path: Path | None = None
+    netease_room_protocol_base_url: str | None = None
+    netease_room_disconnect_grace_seconds: float = 10 * 60
 
     @property
     def production(self) -> bool:
         return self.attest_mode == "production"
+
+    @property
+    def netease_room_socket_path(self) -> Path:
+        """Private app-api ↔ worker transport; never exposed over TCP."""
+        return self.data_root / "netease-listen-together.sock"
 
     @classmethod
     def from_env(cls, cfg=None) -> AppSettings:
@@ -181,6 +202,46 @@ class AppSettings:
                 "MURMUR_APP_PUSH_DELIVERY_BUDGET_SECONDS", "30"
             )),
             timezone=tz,
+            music_enabled=_bool(os.getenv("MURMUR_APP_MUSIC_ENABLED")),
+            music_playback_reporting=_bool(
+                os.getenv("MURMUR_APP_MUSIC_PLAYBACK_REPORTING"), True
+            ),
+            music_user_allowlist=frozenset(
+                item.strip() for item in
+                os.getenv("MURMUR_APP_MUSIC_USER_ALLOWLIST", "").split(",")
+                if item.strip()
+            ),
+            audius_api_key=os.getenv("MURMUR_AUDIUS_API_KEY") or None,
+            audius_api_base_url=os.getenv(
+                "MURMUR_AUDIUS_API_BASE_URL", "https://api.audius.co/v1"
+            ).rstrip("/"),
+            netease_catalog_enabled=_bool(
+                os.getenv("MURMUR_NETEASE_CATALOG_ENABLED")
+            ),
+            netease_catalog_base_url=os.getenv(
+                "MURMUR_NETEASE_CATALOG_BASE_URL", "https://music.163.com"
+            ).rstrip("/"),
+            netease_room_experiment_enabled=_bool(
+                os.getenv("MURMUR_NETEASE_ROOM_EXPERIMENT_ENABLED")
+            ),
+            netease_room_user_allowlist=frozenset(
+                item.strip() for item in
+                os.getenv("MURMUR_NETEASE_ROOM_USER_ALLOWLIST", "").split(",")
+                if item.strip()
+            ),
+            netease_bot_secret_path=(
+                Path(value).expanduser()
+                if (value := os.getenv("MURMUR_NETEASE_BOT_SECRET_PATH"))
+                else None
+            ),
+            netease_room_protocol_base_url=(
+                value.rstrip("/")
+                if (value := os.getenv("MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL"))
+                else None
+            ),
+            netease_room_disconnect_grace_seconds=float(os.getenv(
+                "MURMUR_NETEASE_ROOM_DISCONNECT_GRACE_SECONDS", "600"
+            )),
         )
 
     def validate(self) -> None:
@@ -224,6 +285,52 @@ class AppSettings:
             raise RuntimeError("invalid App API rate limiter settings")
         if self.push_delivery_budget_seconds <= 0:
             raise RuntimeError("push delivery budget must be positive")
+        if self.music_enabled:
+            missing = [
+                name for name, value in (
+                    ("MURMUR_AUDIUS_API_KEY", self.audius_api_key),
+                ) if not value
+            ]
+            if missing:
+                raise RuntimeError("Audius music integration missing: " + ", ".join(missing))
+            for name, value in (
+                ("MURMUR_AUDIUS_API_BASE_URL", self.audius_api_base_url),
+            ):
+                if not value.startswith("https://"):
+                    raise RuntimeError(f"{name} must use HTTPS")
+        if self.netease_catalog_enabled and not self.netease_catalog_base_url.startswith(
+            "https://"
+        ):
+            raise RuntimeError("MURMUR_NETEASE_CATALOG_BASE_URL must use HTTPS")
+        if self.netease_room_disconnect_grace_seconds <= 0:
+            raise RuntimeError("NetEase room disconnect grace must be positive")
+        if self.netease_room_experiment_enabled:
+            if not self.netease_catalog_enabled:
+                raise RuntimeError(
+                    "NetEase room experiment requires MURMUR_NETEASE_CATALOG_ENABLED=1"
+                )
+            if not self.netease_room_user_allowlist:
+                raise RuntimeError(
+                    "NetEase room experiment requires a non-empty user allowlist"
+                )
+            if not self.netease_bot_secret_path:
+                raise RuntimeError(
+                    "NetEase room experiment requires MURMUR_NETEASE_BOT_SECRET_PATH"
+                )
+            if not self.netease_bot_secret_path.is_absolute():
+                raise RuntimeError("NetEase bot secret path must be absolute")
+            if not self.netease_bot_secret_path.is_file():
+                raise RuntimeError("NetEase bot secret file does not exist")
+            if self.netease_bot_secret_path.stat().st_mode & 0o077:
+                raise RuntimeError("NetEase bot secret file must use mode 0600 or stricter")
+            if not self.netease_room_protocol_base_url:
+                raise RuntimeError(
+                    "NetEase room experiment requires a protocol base URL"
+                )
+            if not self.netease_room_protocol_base_url.startswith("https://"):
+                raise RuntimeError(
+                    "MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL must use HTTPS"
+                )
 
     def validate_android(self) -> None:
         missing = [
@@ -267,3 +374,14 @@ class AppSettings:
             raise RuntimeError("APNs configuration missing: " + ", ".join(missing))
         if not self.apns_key_path or not self.apns_key_path.is_file():
             raise RuntimeError("APNs signing key does not exist")
+
+
+def music_user_allowed(allowlist: frozenset[str], user_id: str) -> bool:
+    """这个账号在不在音乐灰度里。
+
+    空集合是「开关放行的所有人」，不是「没有人」——全量放开时不必把每个
+    user_id 都列一遍。房间白名单不走这条：它必须是显式的非空成员判断。
+
+    App API 和 worker 都用这一个：两面语义不一致，比两面都没有闸门更糟。
+    """
+    return not allowlist or user_id in allowlist

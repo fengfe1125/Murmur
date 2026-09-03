@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS entries (
     intent      TEXT,   -- 主动消息的意图，防止 10 条全是"在干嘛"
     has_photo   INTEGER NOT NULL DEFAULT 0,
     material_id TEXT,   -- 这条主动消息使用的具体素材，防止跨来源串线
+    music_track TEXT,   -- TrackV1 JSON；不含 token、流地址或播放状态
+    music_track_role TEXT CHECK(music_track_role IS NULL OR music_track_role IN ('in','out')),
     delivery_state TEXT NOT NULL DEFAULT 'committed'
                   CHECK (delivery_state IN ('pending', 'committed'))
 );
@@ -162,6 +164,8 @@ class Entry:
     kind: str | None = None
     intent: str | None = None
     material_id: str | None = None
+    music_track: str | None = None
+    music_track_role: str | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +222,8 @@ class Memory:
                            ("kind", "TEXT"), ("intent", "TEXT"),
                            ("has_photo", "INTEGER NOT NULL DEFAULT 0"),
                            ("material_id", "TEXT"),
+                           ("music_track", "TEXT"),
+                           ("music_track_role", "TEXT"),
                            ("delivery_state", "TEXT NOT NULL DEFAULT 'committed'")):
             if name not in cols:
                 self.conn.execute(f"ALTER TABLE entries ADD COLUMN {name} {decl}")
@@ -248,6 +254,8 @@ class Memory:
         intent: str | None = None,
         has_photo: bool = False,
         material_id: str | None = None,
+        music_track: str | None = None,
+        music_track_role: str | None = None,
         delivery_state: str = "committed",
     ) -> int:
         if delivery_state not in {"pending", "committed"}:
@@ -257,8 +265,8 @@ class Memory:
                 """INSERT INTO entries
                    (chat_id, thread, logged_at, shot_at, bucket, weekday, spot,
                     scene, move, said, note, kind, intent, has_photo, material_id,
-                    delivery_state)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    music_track, music_track_role, delivery_state)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     chat_id,
                     thread,
@@ -275,6 +283,8 @@ class Memory:
                     intent,
                     1 if has_photo else 0,
                     material_id,
+                    music_track,
+                    music_track_role,
                     delivery_state,
                 ),
             )
@@ -892,6 +902,10 @@ def _row_to_entry(r: sqlite3.Row) -> Entry:
         kind=r["kind"] if "kind" in r.keys() else None,
         intent=r["intent"] if "intent" in r.keys() else None,
         material_id=r["material_id"] if "material_id" in r.keys() else None,
+        music_track=r["music_track"] if "music_track" in r.keys() else None,
+        music_track_role=(
+            r["music_track_role"] if "music_track_role" in r.keys() else None
+        ),
     )
 
 

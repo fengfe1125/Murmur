@@ -7,33 +7,71 @@ struct MurmurApp: App {
     @UIApplicationDelegateAdaptor(MurmurAppDelegate.self) private var appDelegate
     @StateObject private var session: MurmurSessionModel
     @StateObject private var notifications: MurmurNotificationBridge
+    @StateObject private var music: MusicModule
 
     init() {
+        // One client for both: the music module reports playback through the
+        // same authenticated Murmur wire the conversation uses.
+        let api = MurmurEnvironment.makeAPIClient()
         _session = StateObject(wrappedValue: MurmurSessionModel(
-            api: MurmurEnvironment.makeAPIClient(),
+            api: api,
             transcriptStore: MurmurEnvironment.makeTranscriptStore(),
             archive: MurmurEnvironment.makeArchive()
         ))
         _notifications = StateObject(wrappedValue: .shared)
+        _music = StateObject(wrappedValue: MusicModule(api: api))
     }
 
     var body: some Scene {
         WindowGroup {
-            MurmurRootView(session: session)
+            MurmurRootView(session: session, music: music)
                 .environmentObject(notifications)
+                .preferredColorScheme(uiTestPreferredColorScheme)
         }
+    }
+
+    private var uiTestPreferredColorScheme: ColorScheme? {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--murmur-ui-test-dark") {
+            return .dark
+        }
+#endif
+        return nil
     }
 }
 
 @MainActor
 private struct MurmurRootView: View {
     @ObservedObject var session: MurmurSessionModel
+    @ObservedObject var music: MusicModule
     @EnvironmentObject private var notifications: MurmurNotificationBridge
     @AppStorage("murmur.notification-education-shown") private var didShowNotificationEducation = false
     @State private var showNotificationEducation = false
 
     var body: some View {
-        MurmurShell(model: session)
+        MurmurShell(model: session, music: music)
+            // What the server says about music arrives with the rest of the
+            // session, and can change between launches — so the module is told
+            // rather than deciding for itself.
+            .onChange(of: session.musicAvailability, initial: true) { _, availability in
+                music.apply(availability)
+            }
+            // Audius credentials are device-local and belong to whichever
+            // Murmur account is enrolled here. A different one — or none —
+            // must not inherit them.
+            //
+            // Deliberately not `initial: true`: the identity is nil until
+            // bootstrap has read it back, and treating that as "signed out"
+            // would clear the Audius credential on every single launch.
+            .onChange(of: session.identity?.userID, initial: false) { _, userID in
+                Task {
+                    guard let userID else {
+                        await music.forgetAudiusAccount()
+                        return
+                    }
+                    await music.account.restore(ownerMurmurUserID: userID)
+                }
+            }
             .task {
                 await session.bootstrap()
                 await notifications.refreshAuthorizationStatus()

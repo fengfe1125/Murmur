@@ -1,5 +1,5 @@
 """模型降级备案的回归测试：主模型挂了自动换 deepseek-v4-flash，
-带图消息走 mimo 多模态模型，降级调用不带 json_schema、不看图。"""
+带图消息走 deepseek-v4-flash-vision-exp，降级调用不带 json_schema、不看图。"""
 
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ class EngineFallbackTests(unittest.TestCase):
             db_path=str(Path(self.tmp.name) / "m.db"),
             model="kimi-k2.6",
             fallback_model="deepseek-v4-flash",
-            image_model="mimo-v2.5",
+            image_model="deepseek-v4-flash-vision-exp",
         )
         self.mem = Memory(str(Path(self.tmp.name) / "memory.db"))
         self.moment = Moment.text_only(self.cfg.tz)
@@ -161,13 +161,13 @@ class EngineFallbackTests(unittest.TestCase):
 
     def test_image_uses_image_model_first_without_schema(self):
         photo = Photo(None, None, None, None, "test", "QUJD")
-        client = FakeClient({"mimo-v2.5": GOOD_JSON})
+        client = FakeClient({"deepseek-v4-flash-vision-exp": GOOD_JSON})
         with patch("murmur.engine._client", return_value=client):
             reply = respond(self.moment, self.mem, self.cfg,
                             photo=photo, note="看图", chat_id=0)
         self.assertEqual(reply.say, ["这条是降级模型说的"])
         self.assertEqual(len(client.calls), 1)
-        self.assertEqual(client.calls[0]["model"], "mimo-v2.5")
+        self.assertEqual(client.calls[0]["model"], "deepseek-v4-flash-vision-exp")
         self.assertNotIn("response_format", client.calls[0])
         user_content = client.calls[0]["messages"][-1]["content"]
         self.assertTrue(any(x.get("type") == "image_url" for x in user_content))
@@ -175,15 +175,15 @@ class EngineFallbackTests(unittest.TestCase):
     def test_image_model_failure_falls_back_text_only(self):
         photo = Photo(None, None, None, None, "test", "QUJD")
         client = FakeClient(
-            {"mimo-v2.5": GOOD_JSON, "deepseek-v4-flash": GOOD_JSON},
-            errors={"mimo-v2.5": gateway_error()},
+            {"deepseek-v4-flash-vision-exp": GOOD_JSON, "deepseek-v4-flash": GOOD_JSON},
+            errors={"deepseek-v4-flash-vision-exp": gateway_error()},
         )
         with patch("murmur.engine._client", return_value=client):
             reply = respond(self.moment, self.mem, self.cfg,
                             photo=photo, note="看图", chat_id=0)
         self.assertEqual(reply.say, ["这条是降级模型说的"])
         self.assertEqual([c["model"] for c in client.calls],
-                         ["mimo-v2.5", "deepseek-v4-flash"])
+                         ["deepseek-v4-flash-vision-exp", "deepseek-v4-flash"])
         # 降级模型不看图：请求里不能再带 image_url
         fallback_content = client.calls[1]["messages"][-1]["content"]
         self.assertFalse(any(x.get("type") == "image_url" for x in fallback_content))
@@ -238,7 +238,7 @@ class EngineFallbackTests(unittest.TestCase):
             db_path=str(Path(self.tmp.name) / "m3.db"),
             model="glm-5.3",
             fallback_model="deepseek-v4-flash",
-            image_model="mimo-v2.5",
+            image_model="deepseek-v4-flash-vision-exp",
             json_schema=False,
         )
         client = FakeClient({"glm-5.3": PRIMARY_JSON})
@@ -378,11 +378,11 @@ class EngineFallbackTests(unittest.TestCase):
     def test_explicit_photo_quiet_remains_a_valid_non_output(self):
         cfg = make_config(
             db_path=str(Path(self.tmp.name) / "photo-quiet.db"),
-            model="kimi-k2.6", fallback_model="", image_model="mimo-v2.5",
+            model="kimi-k2.6", fallback_model="", image_model="deepseek-v4-flash-vision-exp",
             json_schema=False,
         )
         client = FakeClient({
-            "mimo-v2.5": '{"move":"quiet","say":[],"scene":"只是普通桌面"}'
+            "deepseek-v4-flash-vision-exp": '{"move":"quiet","say":[],"scene":"只是普通桌面"}'
         })
         photo = Photo(None, None, None, None, "test", "QUJD")
         with patch("murmur.engine._client", return_value=client):
@@ -823,11 +823,11 @@ class ReadPhotoSamplingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_config(
                 db_path=str(Path(tmp) / "read.db"), model="kimi-k2.6",
-                fallback_model="", image_model="mimo-v2.5",
+                fallback_model="", image_model="deepseek-v4-flash-vision-exp",
                 temperature=1.1, presence_penalty=0.3,
             )
             client = FakeClient({
-                "mimo-v2.5":
+                "deepseek-v4-flash-vision-exp":
                 '{"guess":"像是刚忙完","angles":["今天累吗"],"scene":"桌面"}'
             })
             photo = Photo(None, None, None, None, "test", "QUJD")
@@ -847,7 +847,7 @@ class ReadPhotoSamplingTests(unittest.TestCase):
                 db_path=str(Path(tmp) / "m-gw.db"),
                 model="kimi-k2.6",
                 fallback_model="deepseek-v4-flash",
-                image_model="mimo-v2.5",
+                image_model="deepseek-v4-flash-vision-exp",
                 fallback_base_url="https://second-gateway.test/v1",
                 fallback_api_key="sk-second",
             )

@@ -15,6 +15,7 @@ from openai import BadRequestError, OpenAI, OpenAIError
 
 from . import counters
 from .affect import has_negative_affect
+from .app_music import load_music_track, music_prompt_line
 from .config import Config
 from .memory import Entry, Memory
 from .moment import Moment
@@ -51,12 +52,16 @@ def history_turns(recent: list[Entry]) -> list[dict]:
     """
     turns: list[dict] = []
     for e in recent:
+        track = load_music_track(e.music_track)
         # 它主动开口的记录没有"他"那一轮：只有它说的话 + 他可能回的话。
         # 之前这里会把它拼成一条"[图：...]"的 user 消息——等于把它的
         # 主动消息算在了他头上，后面的模型会以为是他发了张图。
         if e.kind == "out":
-            if e.said:
-                turns.append({"role": "assistant", "content": e.said})
+            assistant_bits = [e.said] if e.said else []
+            if track:
+                assistant_bits.append(music_prompt_line(track, actor="Murmur"))
+            if assistant_bits:
+                turns.append({"role": "assistant", "content": "\n".join(assistant_bits)})
             if e.reply:
                 turns.append({"role": "user", "content": e.reply})
             continue
@@ -66,15 +71,20 @@ def history_turns(recent: list[Entry]) -> list[dict]:
             bits.append(f"[图：{e.scene}]")
         if e.note:
             bits.append(e.note)
+        if track and e.music_track_role == "in":
+            bits.append(music_prompt_line(track, actor="他"))
         if not bits:
             continue
         turns.append({"role": "user", "content": " ".join(bits)})
 
         # 它那一轮
-        if e.move == "quiet" or not e.said:
+        assistant_bits = [e.said] if e.said else []
+        if track and e.music_track_role == "out":
+            assistant_bits.append(music_prompt_line(track, actor="Murmur"))
+        if e.move == "quiet" or not assistant_bits:
             turns.append({"role": "assistant", "content": "（这次没说话）"})
         else:
-            turns.append({"role": "assistant", "content": e.said})
+            turns.append({"role": "assistant", "content": "\n".join(assistant_bits)})
 
         # 他之后又回的话，单独算一轮
         if e.reply:
@@ -87,9 +97,17 @@ def build_context(
     visits: int,
     note: str | None,
     has_photo: bool = True,
+    extra: list[str] | None = None,
 ) -> str:
     """只描述"这一条"消息。历史走 history_turns()。"""
-    lines = [f"此刻：{moment.describe()}"]
+    # 旧照片不能叫「此刻」。读图失败退回这里的那条路走的也是这个函数，
+    # 只在 read_photo 里分开说两个时间，等于只修了一半。
+    if moment.is_recalled:
+        lines = [moment.describe_recalled()]
+    else:
+        lines = [f"此刻：{moment.describe()}"]
+        if place := moment.describe_place():
+            lines.append(place)
 
     if visits >= 3:
         lines.append(
@@ -101,6 +119,8 @@ def build_context(
         lines.append(f"他随图说了：{note}" if has_photo else f"他说：{note}")
     if not has_photo:
         lines.append("（这次没有图，只有他这句话。必须回，不要选 quiet。）")
+    if extra:
+        lines.extend(extra)
 
     return "\n".join(lines)
 
@@ -275,11 +295,14 @@ def _salvage_bubbles(raw: str, limit: int) -> list[str]:
 
 # ---- 当年今日的读图（reading） -----------------------------------------------
 
-READING_TIMEOUT = 45.0  # 一次尝试的上限。mimo 想 20-30 秒还接得住，
-# 而成功的读图 2 秒就回来了：45 秒还在跑的那次，几乎一定是在烧隐藏思考、
-# 最后交白卷。早点认输去重试，比干等第二个 45 秒划算。
+READING_TIMEOUT = 45.0  # 一次尝试的上限。成功的读图 2 秒就回来了：
+# 45 秒还在跑的那次，几乎一定是在烧隐藏思考、最后交白卷。早点认输去
+# 重试，比干等第二个 45 秒划算。上限留得比当前模型需要的宽得多，是给
+# 思考重、一想二三十秒的多模态模型留的余量。
 READING_ATTEMPTS = 2  # 两次的最坏总时长仍是原来单次的 90 秒
-READING_MAX_TOKENS = 2500  # mimo-v2.5 的思考先烧掉约 1100，500/900 档实测全部截断
+READING_MAX_TOKENS = 2500  # 隐藏思考先烧一截才轮到正文。当前读图模型只
+# 烧几十个（实测 reasoning≈74、completion≈157），这个额度绰绰有余；留这么
+# 宽是因为思考重的模型能烧掉上千，500/900 档实测全部截断。换模型别下调。
 ANGLES_MAX_CHARS = 14  # 硬约束是 ≤12 个汉字，字符数留两格兜底
 GUESS_MAX_CHARS = 40  # 硬约束是 ≤30 个汉字，同上
 
@@ -417,10 +440,33 @@ def _read_once(model: str, content: list[dict], cfg: Config, dossier: str | None
     return ("{" + raw) if cfg.json_prefix else raw
 
 
+def _reading_context(moment: Moment, visits: int) -> str:
+    """读图那一屏的上下文。
+
+    和 build_context 分开写，因为这里说的是一张旧照片：「拍摄于」和「现在」
+    是两个时间，合成一个模型就会以为今天是三年前的那天。
+    """
+    lines = [moment.describe_recalled()]
+    if visits >= 3:
+        lines.append(
+            f"（系统提示，别点破）同一个地方的{moment.bucket}他发过 {visits} 次图，"
+            "这大概是他的日常场景。"
+        )
+    return "\n".join(lines)
+
+
 def read_photo(
-    moment: Moment, photo: Photo, cfg: Config, *, dossier: str | None = None
+    moment: Moment,
+    photo: Photo,
+    cfg: Config,
+    *,
+    visits: int = 0,
+    dossier: str | None = None,
 ) -> PhotoReading:
     """当年今日推过来一张旧照片，他还没说话：先看图，猜他想说什么。
+
+    上下文里「拍摄于」和「现在」是分开的两个时间，地名（如果 App 反解出来了）
+    也在里面——「那天下午你在这家店干嘛」这句话，信息全在这两样里，不在画面里。
 
     必须真的看得见图——这一屏的全部价值就是「上游读懂了这张照片」，
     所以只走 cfg.image_model，没有纯文字的降级档可言。两次都不成才抛出去，
@@ -442,7 +488,7 @@ def read_photo(
                 "url": f"data:{photo.media_type};base64,{photo.image_b64}"
             },
         },
-        {"type": "text", "text": f"此刻：{moment.describe()}"},
+        {"type": "text", "text": _reading_context(moment, visits)},
     ]
     last_error: Exception | None = None
     for attempt in range(1, READING_ATTEMPTS + 1):
@@ -685,10 +731,10 @@ def _fallback_attempts(
 ) -> list[tuple[str, bool, str | None, str | None]]:
     """(模型, 是否带 json_schema, base_url, api_key) 的尝试序列。
 
-    降级模型一律不带 json_schema——deepseek-v4-flash / mimo-v2.5 在
-    不支持 response_format，靠 SYSTEM 提示词里的
-    「只返回 JSON」约束输出，_extract_json 负责剥代码块。主模型是否
-    带由 MURMUR_JSON_SCHEMA 决定（glm / deepseek 系都不支持）。
+    降级模型一律不带 json_schema——deepseek-v4-flash 不支持
+    response_format，靠 SYSTEM 提示词里的「只返回 JSON」约束输出，
+    _extract_json 负责剥代码块。主模型是否带由 MURMUR_JSON_SCHEMA
+    决定（glm / deepseek 系都不支持）。
 
     后两个字段是第二家网关的端点与 key（MURMUR_FALLBACK_BASE_URL /
     MURMUR_FALLBACK_API_KEY）。不配就是 None = 跟主网关同一家——能用，
@@ -888,12 +934,13 @@ def respond(
     on_bubble=None,
     dossier: str | None = None,
     history_entries: list[Entry] | None = None,
+    context_extra: list[str] | None = None,
 ) -> Reply:
     """photo 为 None 时是纯文字消息——照样要回。
 
     传了 on_bubble 就走流式：每写完一条气泡立刻回调，第一条不用等全部生成完。
 
-    降级备案：带图消息走 MURMUR_IMAGE_MODEL（mimo-v2.5，能看图）；
+    降级备案：带图消息走 MURMUR_IMAGE_MODEL（deepseek-v4-flash-vision-exp，能看图）；
     任何模型抛网关错误或吐不出 JSON 时，自动换 MURMUR_FALLBACK_MODEL
     （deepseek-v4-flash）再试一次——降级模型不支持 json_schema、
     也不看图，所以降级调用去掉 response_format，带图消息降级时退回
@@ -904,6 +951,7 @@ def respond(
         mem.spot_visits(chat_id, moment.spot, moment.bucket),
         note,
         has_photo=photo is not None,
+        extra=context_extra,
     )
     history = history_turns(
         history_entries if history_entries is not None
@@ -920,7 +968,9 @@ def respond(
         }
 
     if image_block is not None and (cfg.image_model or "").strip():
-        # 带图消息：mimo 系多模态模型（不支持 json_schema，靠提示词约束）
+        # 带图消息：多模态模型（deepseek-v4-flash-vision-exp）。它不吃
+        # json_schema——传 response_format 直接 400「This response_format
+        # type is unavailable now」，所以靠提示词约束输出。
         attempts = _fallback_attempts(cfg, primary=cfg.image_model, use_schema=False)
     else:
         attempts = _fallback_attempts(

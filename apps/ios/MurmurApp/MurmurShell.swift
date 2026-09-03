@@ -47,8 +47,10 @@ extension EnvironmentValues {
 /// lifecycle's host rather than anything the reader sees.
 struct MurmurShell: View {
     @ObservedObject var model: MurmurSessionModel
+    @ObservedObject var music: MusicModule
     @EnvironmentObject private var notifications: MurmurNotificationBridge
     @State private var tab: MurmurTab = .chat
+    @State private var showPlayer = false
     /// Window-local keyboard geometry. A second scene owns a second state, so
     /// neither can move the other's composer with a late transition.
     @StateObject private var keyboard = MurmurKeyboardState()
@@ -105,11 +107,13 @@ struct MurmurShell: View {
         Group {
             switch tab {
             case .chat:
-                MurmurChatView(model: model).environmentObject(notifications)
+                MurmurChatView(model: model, music: music)
+                    .environmentObject(notifications)
             case .onThisDay:
                 OnThisDayTabView(model: model, onThisDay: onThisDay)
             case .me:
-                MurmurSettingsView(model: model).environmentObject(notifications)
+                MurmurSettingsView(model: model, music: music)
+                    .environmentObject(notifications)
             }
         }
         .environment(\.murmurTabBarClearance, barHeight)
@@ -130,15 +134,30 @@ struct MurmurShell: View {
         // the page grow past its own bounds and took the composer with it.
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .overlay(alignment: .bottom) {
-            MurmurTabBar(selection: $tab)
-                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { barHeight = $0 }
-                .offset(y: barIsFolded ? barHeight + 40 : 0)
-                .opacity(barIsFolded ? 0 : 1)
-                .allowsHitTesting(!barIsFolded)
-                .animation(
-                    reduceMotion ? .easeInOut(duration: 0.15) : .easeInOut(duration: 0.22),
-                    value: barIsFolded
-                )
+            VStack(spacing: 8) {
+                // Rides just above the bar and folds away with it: the keyboard
+                // takes the whole floor, and a strip left behind over a raised
+                // composer would be a second thing floating in the same place.
+                MusicMiniPlayer(player: music.player) { showPlayer = true }
+                MurmurTabBar(selection: $tab)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                        barHeight = $0
+                    }
+            }
+            .offset(y: barIsFolded ? barHeight + 40 : 0)
+            .opacity(barIsFolded ? 0 : 1)
+            .allowsHitTesting(!barIsFolded)
+            .animation(
+                reduceMotion ? .easeInOut(duration: 0.15) : .easeInOut(duration: 0.22),
+                value: barIsFolded
+            )
+            .animation(
+                reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.86),
+                value: music.nowPlaying
+            )
+        }
+        .sheet(isPresented: $showPlayer) {
+            MusicPlayerSheet(player: music.player)
         }
     }
 }

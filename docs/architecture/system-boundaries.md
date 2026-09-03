@@ -22,4 +22,29 @@
 照片房间开场可以返回 bubble 和 angles；失败回落时客户端必须容忍没有 angles。
 旧日期续聊使用现有上下文关联，不在本轮发明新的日记 API。
 
+音乐（Audius）是同一条 wire 上的可选扩展，默认关闭，不新增 SSE 事件类型：
+`POST /v1/moments` 多一个可选的 `music_track` 文本字段，歌曲与照片不能同条发送，
+纯歌曲消息必须同时带文字兜底；歌曲卡片挂在既有 `bubble` 事件的额外字段上，
+旧客户端忽略该字段后仍能显示那行文字。新增 `GET /v1/music/config` 与
+`PUT /v1/music/playback-state` 两个认证接口，前者是客户端唯一的功能开关来源。
+OAuth 不在服务端：用户的 Audius 令牌只存在手机 Keychain，服务端只用自己的
+应用 key 查公开曲库元数据，且不代理音频。
+
+网易云是这条 wire 上第二个 provider，两个开关各自独立、默认全关。曲库开关只放开
+`music_track.provider=netease` 与元数据查询：网易歌曲卡不进 Murmur 原生播放器，
+播放一律回到网易云官方 App。`GET /v1/music/config` 保留 `enabled`/`provider`/
+`playback_reporting` 三个旧字段，新增的 `providers` 与 `listen_together` 只在开关
+打开时出现，旧客户端忽略即可。`POST /v1/music/resolve-shared` 把用户粘贴或分享的
+一条链接换成服务端重新查回的歌曲，分享文案里的歌名、艺人和封面一律不采信；解析结果
+不进模型、不进 transcript，要由人自己确认后再发。
+
+一起听是隔离 PoC，四个接口 `POST /v1/listen-together/rooms`、
+`GET /v1/listen-together/rooms/current`、`POST …/{handle}/commands`、
+`DELETE …/{handle}` 都只有在房间开关加非空白名单之后才可用，关闭时统一拒绝。房间只活在
+`murmur-app-worker` 进程内存里，App API 经数据目录下 `0600` 的 Unix socket 调用它，
+不落库、不加 systemd unit、重启不恢复。对外只有 `RoomSnapshotV1`：网易账号、外部
+房间 ID、Cookie 和协议序号都不过这条边界，确认不了的命令只会是 `accepted` 或
+`failed`，绝不写成 `synchronized`。详见
+[一起听运行手册](../operations/netease-listen-together-poc-runbook.md)。
+
 现有存档与未来日记之间的领域区别见 [术语](../../CONTEXT.md)；数据流见 [数据生命周期](data-lifecycle.md)。

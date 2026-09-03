@@ -5,6 +5,50 @@ import XCTest
 
 @MainActor
 final class MurmurSessionModelTests: XCTestCase {
+    func testSubmittingMusicKeepsDraftAndQueuesFallbackWithTrack() async throws {
+        let api = FakeMurmurAPIClient()
+        let model = MurmurSessionModel(api: api, bubblePacing: .instant)
+        await model.bootstrap()
+        model.draftText = "这句还没写完"
+        let track = testMusicTrack()
+
+        model.submitMusic(track)
+        try await waitUntil { model.messages.contains { $0.author == .murmur } }
+
+        XCTAssertEqual(model.draftText, "这句还没写完")
+        let outgoing = try XCTUnwrap(model.messages.first)
+        XCTAssertEqual(outgoing.musicTrack, track)
+        XCTAssertEqual(outgoing.text, "🎵 夜航 — 林一, 小野\nhttps://audius.co/lin/night-sail")
+        let tracks = await api.submittedMusicTracks
+        let notes = await api.submittedNotes
+        XCTAssertEqual(tracks, [track])
+        XCTAssertEqual(notes, [outgoing.text])
+    }
+
+    func testMusicTrackSurvivesTranscriptReload() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let track = testMusicTrack()
+        await store.save([.init(author: .murmur, text: "听听这首", musicTrack: track)])
+
+        let restored = await store.load()
+        XCTAssertEqual(restored.first?.musicTrack, track)
+    }
+
+    private func testMusicTrack() -> MusicTrackAttachmentV1 {
+        MusicTrackAttachmentV1(
+            trackID: "night-sail",
+            title: "夜航",
+            artists: ["林一", "小野"],
+            artworkURL: URL(string: "https://images.audius.co/night-sail.jpg"),
+            canonicalURL: URL(string: "https://audius.co/lin/night-sail")!,
+            durationSeconds: 201,
+            explicit: false
+        )
+    }
+
     func testTranscriptSurvivesAReloadAndMarksInterruptedSendsFailed() async throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -63,6 +107,33 @@ final class MurmurSessionModelTests: XCTestCase {
         // The same moment, not a second one: the key came off the row.
         let keys = await api.idempotencyKeys
         XCTAssertEqual(keys, ["key-from-last-launch"])
+    }
+
+    /// The screen holds every entrance animation back until the restore has
+    /// been reported, so a path out of `loadTranscript` that forgets to say so
+    /// would leave the conversation unable to animate for the rest of the run.
+    func testTheRestoreIsReportedOnEveryPathOutOfLoadTranscript() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await MurmurTranscriptStore(directory: directory).save([
+            .init(author: .you, text: "上次说的那句"),
+        ])
+        let model = MurmurSessionModel(
+            api: FakeMurmurAPIClient(),
+            transcriptStore: MurmurTranscriptStore(directory: directory),
+            bubblePacing: .instant
+        )
+
+        XCTAssertFalse(model.transcriptRestored)
+        await model.loadTranscript()
+        XCTAssertTrue(model.transcriptRestored)
+
+        // And again on the path that finds the scrollback already in memory
+        // and reads nothing at all.
+        await model.loadTranscript()
+        XCTAssertTrue(model.transcriptRestored)
+        XCTAssertEqual(model.messages.count, 1)
     }
 
     func testAdoptedPhotoSurvivesASaveThatDoesNotNameItYet() async throws {
@@ -228,6 +299,31 @@ final class MurmurSessionModelTests: XCTestCase {
         // The fake streams both bubbles at once; each still waits its turn.
         XCTAssertGreaterThan(elapsed, .milliseconds(130))
         XCTAssertEqual(model.bubbles.map(\.text), ["先这一句", "再这一句"])
+    }
+
+    func testProactiveBubblesLandOneAtATimeRatherThanAsABlock() async throws {
+        let api = FakeMurmurAPIClient(mode: .proactiveThreeBubbles)
+        let model = MurmurSessionModel(
+            api: api,
+            bubblePacing: MurmurBubblePacing(perCharacter: 0.02, minimum: 0.08, maximum: 0.2)
+        )
+        await model.bootstrap()
+
+        let start = ContinuousClock.now
+        await model.checkProactive()
+        let elapsed = start.duration(to: ContinuousClock.now)
+
+        // The server hands over all three at once.  The first is not held back
+        // — it was written before the app was even open — and every one after
+        // it takes its turn, the way a streamed reply does.  Dropped into the
+        // transcript in a single pass they arrived as one block in one frame,
+        // which is what the screen then animated.
+        XCTAssertEqual(model.messages.map(\.text), ["想到你了", "刚路过那家店", "今天风很好"])
+        XCTAssertGreaterThan(elapsed, .milliseconds(130))
+        // The acknowledgement says the message has been shown, so it comes
+        // after the last bubble rather than before the first.
+        let acknowledgements = await api.acknowledgements
+        XCTAssertEqual(acknowledgements.map(\.momentID), ["proactive-3"])
     }
 
     func testPacingScalesWithLengthAndStaysWithinItsBounds() {
@@ -775,6 +871,7 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
     enum Mode: Sendable {
         case normal, streamFailsOnce, disconnectThenResume, terminalFailureThenSuccess
         case idempotencyConflict, proactiveReply, attestationKeyUnknown, slowCreates, neverCreates, neverStreams
+        case proactiveThreeBubbles
         case orderedBubbles
     }
 
@@ -788,6 +885,8 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
     private(set) var acknowledgements: [(momentID: String, reply: String?)] = []
     private(set) var resetLocalIdentityCalls = 0
     private(set) var deviceTokens: [String?] = []
+    private(set) var submittedMusicTracks: [MusicTrackAttachmentV1?] = []
+    private(set) var submittedNotes: [String?] = []
     private var storedPreferences = MurmurPreferences(dailyFrequency: 2, quietStart: "21:00", quietEnd: "09:00")
 
     init(mode: Mode = .normal) { self.mode = mode }
@@ -819,6 +918,21 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
         return .init(momentID: "moment-\(createCount)", status: "queued")
     }
 
+    func createMoment(
+        note: String?, photo: PhotoAttachment?, musicTrack: MusicTrackAttachmentV1?,
+        idempotencyKey: String, intent: MurmurMomentIntent?, contextMomentIDs: [String]
+    ) async throws -> MomentReceipt {
+        submittedMusicTracks.append(musicTrack)
+        submittedNotes.append(note)
+        return try await createMoment(
+            note: note,
+            photo: photo,
+            idempotencyKey: idempotencyKey,
+            intent: intent,
+            contextMomentIDs: contextMomentIDs
+        )
+    }
+
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> {
         lastEventIDs.append(lastEventID)
         streamCount += 1
@@ -826,7 +940,7 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
         let currentCreateCount = createCount
         return AsyncThrowingStream { continuation in
             switch mode {
-            case .normal, .proactiveReply, .slowCreates:
+            case .normal, .proactiveReply, .proactiveThreeBubbles, .slowCreates:
                 continuation.yield(.accepted(id: "accepted-\(currentCreateCount)"))
                 continuation.yield(.bubble(id: "bubble-\(currentCreateCount)", text: "reply-\(currentCreateCount)"))
                 continuation.yield(.done(id: "done-\(currentCreateCount)", move: nil, scene: nil))
@@ -877,8 +991,20 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
 
     func currentProactive() async throws -> ProactiveMoment? {
         proactiveCalls += 1
-        guard mode == .proactiveReply else { return nil }
-        return .init(momentID: "proactive-1", bubbles: ["想到你了"], text: nil, move: nil, scene: nil)
+        switch mode {
+        case .proactiveReply:
+            return .init(momentID: "proactive-1", bubbles: ["想到你了"], text: nil, move: nil, scene: nil)
+        case .proactiveThreeBubbles:
+            // What a real proactive message looks like: the server hands over
+            // everything Murmur decided to say, all at once.
+            return .init(
+                momentID: "proactive-3",
+                bubbles: ["想到你了", "刚路过那家店", "今天风很好"],
+                text: nil, move: nil, scene: nil
+            )
+        default:
+            return nil
+        }
     }
     func acknowledge(momentID: String, reply: String?) async throws {
         acknowledgements.append((momentID, reply))

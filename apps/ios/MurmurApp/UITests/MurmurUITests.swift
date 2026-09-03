@@ -3,6 +3,115 @@ import UIKit
 
 @MainActor
 final class MurmurUITests: XCTestCase {
+    func testListenTogetherPlayingHeaderAndMenu() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-netease-playing"])
+        let status = app.staticTexts["已连接，正在一起听"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5))
+
+        let pause = app.buttons["暂停一起听"]
+        let more = app.buttons["更多一起听操作"]
+        XCTAssertTrue(pause.exists)
+        XCTAssertTrue(more.exists)
+        assertMinimumHitArea(pause)
+        assertMinimumHitArea(more)
+        more.tap()
+        for item in ["上一首", "下一首", "在网易云打开", "结束一起听"] {
+            XCTAssertTrue(app.buttons[item].waitForExistence(timeout: 2), item)
+        }
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "Listen Together · Playing Menu"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testListenTogetherWaitingPausedAndSyncingStatesAreDeterministic() throws {
+        for (argument, text, action) in [
+            ("--murmur-stub-netease-waiting", "等待加入 / 点此打开网易云邀请", "打开网易云一起听邀请"),
+            ("--murmur-stub-netease-paused", "房间仍保持连接", "继续一起听"),
+            ("--murmur-stub-netease-syncing", "暂停同步中…", "正在同步一起听操作"),
+        ] {
+            let app = launchApp(arguments: [argument])
+            XCTAssertTrue(app.staticTexts[text].waitForExistence(timeout: 5), argument)
+            let control = app.buttons[action]
+            XCTAssertTrue(control.exists, argument)
+            assertMinimumHitArea(control)
+            app.terminate()
+        }
+    }
+
+    func testListenTogetherCommandFailureStaysInTheHeaderAndCanRetry() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-netease-command-fails"])
+        let pause = app.buttons["暂停一起听"]
+        XCTAssertTrue(pause.waitForExistence(timeout: 5))
+        pause.tap()
+        XCTAssertTrue(app.staticTexts["这次没有同步成功"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["重试上一次一起听操作"].exists)
+        XCTAssertFalse(app.alerts["网易云音乐"].exists)
+    }
+
+    func testListenTogetherTerminalAndOfflineStatesStayDistinct() throws {
+        var app = launchApp(arguments: ["--murmur-stub-netease-room-failed"])
+        XCTAssertTrue(app.staticTexts["邀请已过期，点此重试"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["重新创建一起听邀请"].exists)
+        app.terminate()
+
+        app = launchApp(arguments: ["--murmur-stub-netease-offline"])
+        XCTAssertTrue(app.staticTexts["Murmur 连接异常"].waitForExistence(timeout: 5))
+        let disabled = app.buttons["Murmur 连接异常，控制暂不可用"]
+        XCTAssertTrue(disabled.exists)
+        XCTAssertFalse(disabled.isEnabled)
+    }
+
+    func testNeteaseShareConfirmationUsesTrustedPreviewAndDoesNotStartARoom() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-netease-share"])
+        XCTAssertTrue(app.staticTexts["把这首歌发给 Murmur？"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["花海"].exists)
+        XCTAssertTrue(app.staticTexts["周杰伦"].exists)
+        XCTAssertTrue(app.buttons["在网易云里核对"].exists)
+        XCTAssertTrue(app.buttons["取消"].exists)
+        XCTAssertTrue(app.buttons["confirm-netease-share"].exists)
+        XCTAssertFalse(app.staticTexts["等待加入 / 点此打开网易云邀请"].exists)
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "NetEase · Share Confirmation"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testListenTogetherDarkAccessibilityXXXLKeepsControlsReachable() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--murmur-ui-testing",
+            "--murmur-reset-transcript",
+            "--murmur-stub-keyboard-overlap",
+            "--murmur-stub-netease-playing",
+            "--murmur-ui-test-dark",
+        ]
+        app.launchEnvironment["AppleInterfaceStyle"] = "Dark"
+        app.launchEnvironment["UIPreferredContentSizeCategoryName"] =
+            "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge"
+        app.launch()
+
+        let pause = app.buttons["暂停一起听"]
+        let more = app.buttons["更多一起听操作"]
+        XCTAssertTrue(pause.waitForExistence(timeout: 5))
+        XCTAssertTrue(more.exists)
+        XCTAssertTrue(pause.isHittable)
+        XCTAssertTrue(more.isHittable)
+        assertMinimumHitArea(pause)
+        assertMinimumHitArea(more)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(pause.frame))
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(more.frame))
+
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "Listen Together · Dark Accessibility XXXL"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testAMomentSurvivesAColdLaunch() throws {
         continueAfterFailure = false
         let app = launchApp()

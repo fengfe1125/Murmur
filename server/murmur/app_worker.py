@@ -7,13 +7,14 @@ the single source of delivery state.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -25,7 +26,15 @@ from . import counters
 from .affect import apply_message as preview_affect
 from .affect import prompt_context
 from .app_lock import UserOperationLock
-from .app_settings import AppSettings
+from .app_music import (
+    MUSIC_NOT_FOUND_LINE,
+    AppMusic,
+    load_music_track,
+    music_fallback_text,
+    music_prompt_line,
+    playback_prompt_line,
+)
+from .app_settings import AppSettings, music_user_allowed
 from .app_store import AccountDeleting, AppStore, Job, NotFound
 from .config import Config
 from .continuity import refresh_open_loops
@@ -88,6 +97,15 @@ class ProcessedMoment:
     # 当年今日 的读图才有：三个递到他手边的话头，跟着 guess 一起发。
     # 普通 moment 永远是空的——聊天窗口里没有这一行。
     angles: list[str] = field(default_factory=list)
+    # 这一轮的歌，最多一首。role 说明它是谁发的：'in' 是他附上的，
+    # 'out' 是它被点名之后找出来的。一条 moment 不会两者都有。
+    music_track: dict | None = None
+    music_track_role: str | None = None
+
+    @property
+    def music_card(self) -> dict | None:
+        """要作为一张卡片发出去的那首歌——只有它自己挑的那首才发。"""
+        return self.music_track if self.music_track_role == "out" else None
 
 
 class MomentProcessor(Protocol):
@@ -96,13 +114,75 @@ class MomentProcessor(Protocol):
     ) -> ProcessedMoment: ...
 
 
+def _provenance(job: Job) -> dict:
+    """App 随图声明的事实：拍摄时间、坐标、机上反解出的地名。
+
+    写坏了当没有。这条路径宁可少一句地名，也不该因为一个字段把整条
+    moment 弄失败——API 那层已经校验过一遍了，这里只是不信任地读回来。
+    """
+    # getattr 而不是 job.provenance：同 _archive_context 里的
+    # context_moment_ids，Job 的可选字段在测试替身里未必存在。
+    raw = getattr(job, "provenance", None)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _apply_provenance(photo: Photo, provenance: dict) -> Photo:
+    """把 App 声明的事实盖到从图里读出来的之上。
+
+    当年今日推上来的是重新编码过的 JPEG，EXIF 已经没了，_read_gps 和
+    _read_shot_at 一定读出 None——不盖的话，一张三年前的照片会被当成
+    刚拍的。普通发图走原图，EXIF 还在，那时 App 不声明，也就盖不动。
+    两条路径共用同一个 Photo。
+    """
+    shot_at = photo.shot_at
+    if raw := provenance.get("shot_at"):
+        try:
+            shot_at = datetime.fromisoformat(raw)
+        except (TypeError, ValueError):
+            pass
+    lat, lon = provenance.get("lat"), provenance.get("lon")
+    return replace(
+        photo,
+        shot_at=shot_at,
+        lat=photo.lat if lat is None else float(lat),
+        lon=photo.lon if lon is None else float(lon),
+    )
+
+
 class EngineMomentProcessor:
     def __init__(
-        self, cfg: Config, data_root: Path, *, max_image_pixels: int = 100_000_000
+        self,
+        cfg: Config,
+        data_root: Path,
+        *,
+        max_image_pixels: int = 100_000_000,
+        music: AppMusic | None = None,
+        playback_state: Callable[[str], dict | None] | None = None,
+        rooms=None,
+        room_user_allowlist: frozenset[str] = frozenset(),
+        music_user_allowlist: frozenset[str] = frozenset(),
     ):
         self.cfg = cfg
         self.data_root = data_root
         self.max_image_pixels = max_image_pixels
+        # None 就是这台部署没开音乐。整条音乐路径靠这一个 None 关掉，
+        # 不需要在下面每一处再问一次开关。
+        self.music = music
+        self.playback_state = playback_state
+        # The worker owns this process-local manager.  Keeping it optional is
+        # the feature gate: ordinary deployments never parse or execute room
+        # commands at all.
+        self.rooms = rooms
+        self.room_user_allowlist = room_user_allowlist
+        # 开关是 `self.music` 在不在，这一条是灰度名单——和 App API 那面
+        # 同一个判断，空集合等于放行。房间白名单不是这个语义，别混用。
+        self.music_user_allowlist = music_user_allowlist
 
     def __call__(
         self, job: Job, memory: Memory, on_bubble: Callable[[str], None]
@@ -111,8 +191,12 @@ class EngineMomentProcessor:
             load_app_photo(job.image_path, self.max_image_pixels)
             if job.image_path else None
         )
+        provenance = _provenance(job)
+        if photo is not None:
+            photo = _apply_provenance(photo, provenance)
         moment = (
-            Moment.of(photo, self.cfg.tz) if photo is not None
+            Moment.of(photo, self.cfg.tz, place=provenance.get("place"))
+            if photo is not None
             else Moment.text_only(self.cfg.tz)
         )
         chat_id, label = thread_key("app", "direct", job.user_id)
@@ -136,17 +220,182 @@ class EngineMomentProcessor:
             if tone := prompt_context(state):
                 prompt_parts.append(tone)
         prompt_dossier = "\n\n".join(prompt_parts) or None
+        if controlled := self._control_existing_room(job, moment):
+            return controlled
+        # 歌先定下来，模型后说话。定在这里有两个原因：它要进这一轮的
+        # prompt（不然它会答一句和卡片无关的话），而且点歌那一轮必须关掉
+        # 逐条气泡流——先把曲目确定并落库，再一次性输出文字和卡片。
+        music = self._music_for(job.user_id)
+        shared = music.verify_shared(job.music_track) if music else None
+        choice = music.choose_for(job.note) if music and shared is None else None
+        chosen = choice.track if choice else None
+        if room_turn := self._apply_music_to_room(job, moment, chosen):
+            return room_turn
+        context_extra: list[str] = []
+        if shared is not None:
+            context_extra.append(music_prompt_line(shared, actor="他"))
+        if chosen is not None:
+            context_extra.append(
+                music_prompt_line(chosen, actor="你")
+                + "（这首歌会作为卡片和你的话一起发出去，"
+                "所以说一句把它递过去的话，不要复述标题和艺人。）"
+            )
+        elif choice is not None and choice.not_found:
+            context_extra.append(
+                "（他点了歌，但一首都没找到。别编一首出来，"
+                "顺着他的话说下去就行，那句说明会另外发。）"
+            )
+        if self.playback_state is not None:
+            if line := playback_prompt_line(self.playback_state(job.user_id)):
+                context_extra.append(line)
         if job.intent == "photo_reading" and photo is not None:
-            reading = self._read(job, moment, photo, prompt_dossier)
+            reading = self._read(
+                job, moment, photo, prompt_dossier,
+                # 没有坐标就没有「来过几次」可数，也就不必去问库——
+                # spot_visits 自己也是这么早退的。
+                visits=(
+                    memory.spot_visits(chat_id, moment.spot, moment.bucket)
+                    if moment.spot else 0
+                ),
+            )
             if reading is not None:
                 return reading
         reply = respond(
             moment, memory, self.cfg, photo=photo, note=job.note, chat_id=chat_id,
-            on_bubble=on_bubble,
+            # 点歌那一轮不流式：一条崩溃后重来的 moment 不能换一首歌，也不能
+            # 把同一张卡片发两次。曲目落库之后才由调用方一次性发出去。
+            on_bubble=None if chosen is not None else on_bubble,
             dossier=prompt_dossier,
             history_entries=self._archive_context(memory, job),
+            context_extra=context_extra or None,
         )
-        return ProcessedMoment(reply, moment, photo)
+        if choice is not None and choice.not_found:
+            # 他点了歌却一首都没找到。那句说明是固定的，而且要跟它自己的话
+            # 一起进 `say`：这样它会被落库、被崩溃后的重放原样带回来，不必在
+            # 发事件那一层再单独记一件事。这一轮也不许沉默。
+            reply = Reply(
+                scene=reply.scene,
+                move="speak",
+                say=[*reply.say, MUSIC_NOT_FOUND_LINE],
+            )
+        track = chosen if chosen is not None else shared
+        return ProcessedMoment(
+            reply, moment, photo,
+            music_track=track,
+            music_track_role=("out" if chosen is not None
+                              else "in" if shared is not None else None),
+        )
+
+    def _music_for(self, user_id: str) -> AppMusic | None:
+        """这一轮这个账号能用的音乐，没有就是没有。
+
+        灰度名单只在 App API 那面查过，聊天这面是另一条进来的路：不在这里
+        再查一次，关掉的账号照样能用自然语言把歌搜出来。
+        """
+        if self.music is None:
+            return None
+        if not music_user_allowed(self.music_user_allowlist, user_id):
+            return None
+        return self.music
+
+    def _control_existing_room(
+        self, job: Job, moment: Moment
+    ) -> ProcessedMoment | None:
+        """Execute only the small, explicit room-control vocabulary."""
+        if self.rooms is None or job.user_id not in self.room_user_allowlist:
+            return None
+        from .app_listen_together import (
+            ListenTogetherError,
+            parse_room_chat_intent,
+        )
+
+        intent = parse_room_chat_intent(job.note)
+        if intent is None:
+            return None
+        try:
+            current = self.rooms.current(user_id=job.user_id, refresh=False)
+            if current is None:
+                line = "现在还没有一起听房间。先选一首网易云歌曲，再点「和 Murmur 一起听」。"
+            elif intent.action == "close":
+                self.rooms.close(
+                    user_id=job.user_id,
+                    room_handle=current.room_handle,
+                    idempotency_key=f"chat:{job.moment_id}:close",
+                )
+                line = "好，这次一起听结束了。"
+            else:
+                result = self.rooms.command(
+                    user_id=job.user_id,
+                    room_handle=current.room_handle,
+                    command=intent.action,
+                    idempotency_key=f"chat:{job.moment_id}:{intent.action}",
+                )
+                line = self._room_command_line(result.status)
+        except ListenTogetherError:
+            # A room control is a permanent conversational result, not a model
+            # job worth retrying.  The typed API/UI path still exposes the safe
+            # error code; chat only says what the person can act on.
+            line = "这次没能和网易云同步，你可以在房间卡片里再试一次。"
+        return ProcessedMoment(
+            Reply(scene="（一起听控制）", move="speak", say=[line]),
+            moment,
+            None,
+        )
+
+    def _apply_music_to_room(
+        self, job: Job, moment: Moment, chosen: dict | None
+    ) -> ProcessedMoment | None:
+        """Create a room on an explicit request, or change an active room."""
+        if (
+            self.rooms is None
+            or job.user_id not in self.room_user_allowlist
+            or chosen is None
+            or chosen.get("provider") != "netease"
+        ):
+            return None
+        from .app_listen_together import (
+            ListenTogetherError,
+            explicitly_requests_listen_together,
+        )
+
+        explicit = explicitly_requests_listen_together(job.note)
+        try:
+            current = self.rooms.current(user_id=job.user_id, refresh=False)
+            if current is None and not explicit:
+                return None
+            if current is None:
+                self.rooms.create(
+                    user_id=job.user_id,
+                    initial_track=chosen,
+                    idempotency_key=f"chat:{job.moment_id}:create",
+                )
+                line = "房间准备好了。点歌曲卡片里的邀请，去网易云加入。"
+            else:
+                result = self.rooms.command(
+                    user_id=job.user_id,
+                    room_handle=current.room_handle,
+                    command="play_track",
+                    track=chosen,
+                    idempotency_key=f"chat:{job.moment_id}:play-track",
+                )
+                line = self._room_command_line(result.status, changing_track=True)
+        except ListenTogetherError:
+            line = "一起听现在没有连上；这首歌我先发给你。"
+        return ProcessedMoment(
+            Reply(scene="（一起听点歌）", move="speak", say=[line]),
+            moment,
+            None,
+            music_track=chosen,
+            music_track_role="out",
+        )
+
+    @staticmethod
+    def _room_command_line(status: str, *, changing_track: bool = False) -> str:
+        if status == "synchronized":
+            return "已经换好了。" if changing_track else "好，已经同步了。"
+        if status == "accepted":
+            return "命令已发出，还在等网易云确认。"
+        return "这次没有同步成功，房间卡片会保留真实状态。"
 
     @staticmethod
     def _archive_context(memory: Memory, job: Job) -> list[Entry] | None:
@@ -178,7 +427,8 @@ class EngineMomentProcessor:
         return entries or None
 
     def _read(
-        self, job: Job, moment: Moment, photo: Photo, dossier: str | None
+        self, job: Job, moment: Moment, photo: Photo, dossier: str | None,
+        *, visits: int = 0,
     ) -> ProcessedMoment | None:
         """当年今日 推过来的那一张：先看图，猜他想说什么，再递三个话头。
 
@@ -187,7 +437,9 @@ class EngineMomentProcessor:
         回复：这间房宁可少三个话头，也不能开门就是一片空白。
         """
         try:
-            reading = read_photo(moment, photo, self.cfg, dossier=dossier)
+            reading = read_photo(
+                moment, photo, self.cfg, visits=visits, dossier=dossier
+            )
         except Exception as error:
             log.warning(
                 "App photo reading fell back moment_id=%s error_type=%s",
@@ -211,6 +463,7 @@ class AppWorker:
         processor: MomentProcessor | None = None,
         scheduler=None,
         *,
+        rooms=None,
         worker_id: str | None = None,
         heartbeat_interval: float = 30.0,
         lease_seconds: float = 180.0,
@@ -222,6 +475,9 @@ class AppWorker:
             cfg, settings.data_root, max_image_pixels=settings.max_image_pixels
         )
         self.scheduler = scheduler
+        # Listen-together rooms live only in this process.  The manager is
+        # optional so every existing deployment keeps the worker it had.
+        self.rooms = rooms
         self.worker_id = worker_id or f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         if heartbeat_interval <= 0 or lease_seconds <= heartbeat_interval * 2:
             raise ValueError("worker lease must exceed two heartbeat intervals")
@@ -229,6 +485,7 @@ class AppWorker:
         self.lease = timedelta(seconds=lease_seconds)
         self._next_proactive_check = 0.0
         self._next_cleanup = 0.0
+        self._stopping = threading.Event()
 
     def _safe_remove_upload(self, raw_path: str | None) -> None:
         if not raw_path:
@@ -290,8 +547,9 @@ class AppWorker:
             cur = memory.conn.execute(
                 """INSERT INTO entries
                    (chat_id,thread,logged_at,shot_at,bucket,weekday,spot,
-                    scene,move,said,note,kind,intent,has_photo)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    scene,move,said,note,kind,intent,has_photo,
+                    music_track,music_track_role)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     chat_id,
                     label,
@@ -308,6 +566,12 @@ class AppWorker:
                     "in",
                     None,
                     1 if result.photo is not None else 0,
+                    # 落的是服务端核验过的那一份，不是客户端提交的快照。
+                    (json.dumps(
+                        result.music_track, ensure_ascii=False,
+                        separators=(",", ":"), sort_keys=True,
+                    ) if result.music_track else None),
+                    result.music_track_role,
                 ),
             )
             entry_id = int(cur.lastrowid)
@@ -384,6 +648,19 @@ class AppWorker:
                     lost.set()
                     return False
                 emitted.add(bubble)
+            # 上一次崩溃前已经选好并落库的那首歌。从库里读回来重发，绝不
+            # 重新调模型、也绝不重新选一首——那样他会收到两首不同的歌。
+            keys = linked.keys()
+            card = (
+                load_music_track(linked["music_track"])
+                if "music_track" in keys and "music_track_role" in keys
+                and linked["music_track_role"] == "out"
+                else None
+            )
+            if card is not None:
+                self._append_music_card(job, card, emitted, lost)
+                if lost.is_set():
+                    return False
             preview_path: str | None = None
             if linked["has_photo"] and job.image_path and Path(job.image_path).is_file():
                 photo = load_app_photo(job.image_path, self.settings.max_image_pixels)
@@ -398,7 +675,8 @@ class AppWorker:
                 move=linked["move"] or "quiet",
                 memory_entry_id=int(linked["id"]),
                 preview_path=preview_path,
-                quiet=(linked["move"] == "quiet" or not bubbles),
+                quiet=((linked["move"] == "quiet" or not bubbles)
+                       and card is None),
             )
             if completed:
                 # Raw originals have a shorter lifetime than sleep-time dossier
@@ -407,6 +685,25 @@ class AppWorker:
                 self._refresh_continuity(memory, job, int(linked["id"]))
                 self._refresh_dossier(memory, job)
             return completed
+
+    def _append_music_card(
+        self, job: Job, track: dict, emitted: set[str], lost: threading.Event
+    ) -> None:
+        """把这一轮的歌作为一条普通气泡发出去。
+
+        故意仍然是 `bubble`，而不是一种新事件：旧客户端会忽略多出来的字段，
+        只显示文字兜底那一行，音乐不必自带一条事件流。发在文字之后、done
+        之前，而且和文字气泡走同一套去重——崩溃重来时不能发出第二张卡片。
+        """
+        text = music_fallback_text(track)
+        if lost.is_set() or text in emitted:
+            return
+        if self.store.append_job_event(
+            job, self.worker_id, "bubble", {"text": text, "music_track": track}
+        ):
+            emitted.add(text)
+        else:
+            lost.set()
 
     def _append_angles(self, job: Job, result: ProcessedMoment,
                        lost: threading.Event) -> None:
@@ -526,10 +823,16 @@ class AppWorker:
                     )
                     return True
                 result = self.processor(job, memory, on_bubble)
+                card = result.music_card
                 # A fake/non-streaming processor, or a model response salvaged after
                 # truncated JSON, can return bubbles that were not emitted live.
-                for bubble in result.reply.say:
-                    on_bubble(bubble)
+                #
+                # 点歌那一轮一条都不在这里发：曲目要先跟这条 entry 一起落库，
+                # 否则中途崩掉之后重来的那一次可能换一首歌，或者把同一张卡片
+                # 发第二次。下面拿到锁、写完 Memory 之后再一次性发。
+                if card is None:
+                    for bubble in result.reply.say:
+                        on_bubble(bubble)
                 # 三个话头在 done 之前发：读图已经把它们一起带回来了，
                 # 这里只是把它们放上事件流，普通 moment 到这里什么都不做。
                 self._append_angles(job, result, lost)
@@ -541,6 +844,12 @@ class AppWorker:
                     if lost.is_set() or not self.store.owns_job(job, self.worker_id):
                         return True
                     entry_id = self._record_memory_once(memory, job, result)
+                    if card is not None:
+                        # 歌已经在库里了，现在才发。重来的那一次会从
+                        # `_complete_linked` 读回同一首，不会重新选。
+                        for bubble in result.reply.say:
+                            on_bubble(bubble)
+                        self._append_music_card(job, card, emitted, lost)
                     preview_path: str | None = None
                     if result.photo is not None:
                         preview_path = str(save_preview(
@@ -553,7 +862,9 @@ class AppWorker:
                         move=result.reply.move,
                         memory_entry_id=entry_id,
                         preview_path=preview_path,
-                        quiet=result.reply.silent,
+                        # 发出过一张卡片就不算这一轮没说话，哪怕模型自己选了
+                        # quiet：屏幕上确实多了一条东西。
+                        quiet=result.reply.silent and card is None,
                     )
                     if cleaned_by_terminal_owner:
                         self._safe_remove_upload(job.image_path)
@@ -614,6 +925,9 @@ class AppWorker:
         from datetime import timedelta
 
         self.store.cleanup_events(timedelta(hours=self.settings.event_ttl_hours))
+        # 听歌状态只是这一阵子的上下文。读的时候会顺手清掉过期的那一行，但一个
+        # 不再打开 App 的人不会再被读到——所以这里也扫一遍。
+        self.store.cleanup_playback_states()
         self.settings.upload_dir.mkdir(parents=True, exist_ok=True)
         cutoff = time.time() - 24 * 60 * 60
         for path in self.settings.upload_dir.glob("murmur-upload-*"):
@@ -638,13 +952,37 @@ class AppWorker:
                 log.error("proactive scheduler cycle failed error_type=%s",
                           type(error).__name__)
             self._next_proactive_check = clock + 30.0
+        if self.rooms is not None:
+            # `maintain` decides for itself which rooms are due, so calling it
+            # every cycle costs one lock.  A room that cannot be confirmed is
+            # ended inside the manager; nothing here has to know how.
+            try:
+                self.rooms.maintain()
+            except Exception as error:
+                log.error("room maintenance cycle failed error_type=%s",
+                          type(error).__name__)
         return did_work
 
     def serve_forever(self, poll_interval: float = 0.75) -> None:
         log.info("App worker %s started", self.worker_id)
-        while True:
-            if not self.run_cycle():
-                time.sleep(poll_interval)
+        try:
+            while not self._stopping.is_set():
+                if not self.run_cycle():
+                    time.sleep(poll_interval)
+        finally:
+            # A room outlives this process only as far as NetEase is concerned,
+            # so leaving without trying to close it strands the other person in
+            # a room nothing is driving any more.
+            if self.rooms is not None:
+                try:
+                    self.rooms.shutdown()
+                except Exception as error:
+                    log.error("room shutdown failed error_type=%s",
+                              type(error).__name__)
+
+    def stop(self) -> None:
+        """Ask ``serve_forever`` to finish the current cycle and return."""
+        self._stopping.set()
 
 
 def run() -> None:
@@ -701,7 +1039,129 @@ def run() -> None:
             ), lock_root=settings.data_root,
             delivery_budget_seconds=settings.push_delivery_budget_seconds,
         )
-        AppWorker(store, cfg, settings, scheduler=scheduler).serve_forever()
+        rooms, room_ipc = _start_listen_together(settings)
+        worker = AppWorker(
+            store, cfg, settings,
+            processor=build_processor(cfg, settings, store, rooms=rooms),
+            scheduler=scheduler, rooms=rooms,
+        )
+        try:
+            if rooms is not None:
+                _install_room_shutdown(worker)
+            worker.serve_forever()
+        finally:
+            if room_ipc is not None:
+                room_ipc.close()
+
+
+def build_catalog(settings: AppSettings):
+    """Whatever catalogs this deployment has switched on, or ``None``.
+
+    NetEase is the chat recommendation provider whenever its explicit gate is
+    on.  Audius remains registered so old cards and its native picker keep
+    working, but enabling the PoC must actually make Murmur's "放首歌" path
+    return the provider the experiment is about.
+    """
+    from .app_music import (
+        AudiusCatalogAdapter,
+        MusicCatalog,
+        NeteaseCatalogAdapter,
+    )
+
+    adapters = []
+    if settings.netease_catalog_enabled:
+        adapters.append(NeteaseCatalogAdapter(
+            base_url=settings.netease_catalog_base_url
+        ))
+    if settings.music_enabled and settings.audius_api_key:
+        adapters.append(AudiusCatalogAdapter(
+            settings.audius_api_key, base_url=settings.audius_api_base_url
+        ))
+    if not adapters:
+        return None
+    return MusicCatalog(adapters, default_provider=adapters[0].provider)
+
+
+def build_processor(
+    cfg: Config, settings: AppSettings, store: AppStore, *, rooms=None
+) -> EngineMomentProcessor:
+    """The processor this deployment actually runs, music included or not.
+
+    Music is off unless a switch is on and that provider is configured, so a
+    worker on a machine without one behaves exactly as it did before.
+    """
+    music = None
+    catalog = build_catalog(settings)
+    if catalog is not None:
+        from .app_music import AppMusicPlanner
+
+        music = AppMusic(catalog, AppMusicPlanner(cfg))
+    return EngineMomentProcessor(
+        cfg, settings.data_root,
+        max_image_pixels=settings.max_image_pixels,
+        music=music,
+        # 播放状态只是这一轮的上下文，过期就没有了。取不到不算错。
+        playback_state=(store.current_playback if music is not None else None),
+        rooms=rooms,
+        room_user_allowlist=(
+            settings.netease_room_user_allowlist if rooms is not None else frozenset()
+        ),
+        music_user_allowlist=(
+            settings.music_user_allowlist if music is not None else frozenset()
+        ),
+    )
+
+
+def _start_listen_together(settings: AppSettings):
+    """Start the room manager and its private socket, or return ``(None, None)``.
+
+    Rooms are held by this process and nowhere else: no database table, no
+    restart recovery, and a socket only the App API user can open.  The adapter
+    is constructed without a transport, so with the switch on but no reviewed
+    transport injected every room request fails closed with a typed error
+    instead of pretending a room exists.
+    """
+    if not settings.netease_room_experiment_enabled:
+        return None, None
+    from .app_listen_together import (
+        ExperimentalNeteaseRoomAdapter,
+        ListenTogetherRoomManager,
+        RoomIPCServer,
+    )
+
+    grace = settings.netease_room_disconnect_grace_seconds
+    manager = ListenTogetherRoomManager(
+        ExperimentalNeteaseRoomAdapter(
+            enabled=True, unreachable_timeout_seconds=grace
+        ),
+        unreachable_timeout_seconds=grace,
+    )
+    server = RoomIPCServer(manager, settings.netease_room_socket_path)
+    server.start()
+    log.info("listen-together room manager started")
+    return manager, server
+
+
+def _install_room_shutdown(worker: AppWorker) -> None:
+    """Turn SIGTERM into a normal loop exit so rooms get closed on the way out.
+
+    Only installed when the room experiment is on: every other deployment keeps
+    the default disposition it has always had.  A second signal is left to the
+    default handler, so a stuck close can still be killed.
+    """
+    import signal
+
+    def handle(signum, _frame):
+        signal.signal(signum, signal.SIG_DFL)
+        worker.stop()
+
+    for name in ("SIGTERM", "SIGINT"):
+        try:
+            signal.signal(getattr(signal, name), handle)
+        except (ValueError, OSError, AttributeError):
+            # Not the main thread, or no such signal here: the finally in
+            # serve_forever still runs on a normal exit.
+            log.warning("could not install %s handler for room shutdown", name)
 
 
 def _start_balance_poller(cfg: Config) -> None:

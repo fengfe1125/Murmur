@@ -124,7 +124,9 @@ private actor CountingLibrary: OnThisDayLibrary {
             OnThisDayCandidate(
                 id: "day-\(offset)",
                 creationDate: date,
-                origin: .sameDay(yearsAgo: offset + 1)
+                origin: .sameDay(yearsAgo: offset + 1),
+                latitude: 31.201,
+                longitude: 121.447
             )
         }
     }
@@ -140,6 +142,130 @@ private actor CountingLibrary: OnThisDayLibrary {
 
     func image(for candidate: OnThisDayCandidate, targetPixels: CGFloat) async -> UIImage? {
         UIImage(systemName: "photo")
+    }
+}
+
+/// What a card says about itself once it is the card on screen.
+@MainActor
+final class OnThisDayProvenanceTests: XCTestCase {
+    /// The pixels and the facts are published together or the send can pair one
+    /// photo with another photo's day.  `index` moves the instant 下滑 lands and
+    /// the image arrives whenever the library is ready; anything derived from
+    /// the index describes, for the width of that gap, a photo that is not on
+    /// screen.
+    func testTheCandidateOnScreenIsTheOneThePixelsCameFrom() async {
+        let model = OnThisDayModel(library: CountingLibrary(sameDay: 3, album: 0))
+        await model.requestAuthorization()
+        await settle { model.currentImage != nil }
+        XCTAssertEqual(model.currentCandidate?.id, model.candidates[model.index].id)
+
+        await model.advanceAndSettle()
+        await settle { model.currentImage != nil }
+        XCTAssertEqual(model.currentCandidate?.id, model.candidates[model.index].id)
+    }
+
+    /// An empty shelf has no card, so it has nothing to say about one either.
+    func testAnEmptyShelfDescribesNothing() async {
+        let model = OnThisDayModel(library: CountingLibrary(sameDay: 0, album: 0))
+        await model.requestAuthorization()
+        XCTAssertNil(model.currentCandidate)
+    }
+
+    func testACandidateHandsOverItsDateAndWhereItWasTaken() {
+        let taken = Date(timeIntervalSince1970: 1_693_382_651)
+        let provenance = OnThisDayCandidate(
+            id: "a", creationDate: taken, origin: .sameDay(yearsAgo: 3),
+            latitude: 31.201, longitude: 121.447
+        ).provenance
+        XCTAssertEqual(provenance.shotAt, taken)
+        XCTAssertEqual(provenance.latitude, 31.201)
+        XCTAssertEqual(provenance.longitude, 121.447)
+        // The name needs the network, so it is not resolved until the photo is
+        // actually being sent.
+        XCTAssertNil(provenance.place)
+    }
+
+    /// Location off that day, or a photo that never came from a camera.  The
+    /// date still travels; only the coordinate is missing.
+    func testAPhotoWithNoCoordinateStillKnowsItsDay() {
+        let provenance = OnThisDayCandidate(
+            id: "a", creationDate: Date(), origin: .elsewhere
+        ).provenance
+        XCTAssertNil(provenance.latitude)
+        XCTAssertNil(provenance.longitude)
+        XCTAssertNotNil(provenance.shotAt)
+        XCTAssertFalse(provenance.isEmpty)
+    }
+
+    private func settle(_ condition: @escaping () -> Bool) async {
+        for _ in 0..<400 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+/// Turning a placemark into something a person would say.
+final class PlaceCompositionTests: XCTestCase {
+    private func compose(
+        poi: String? = nil, name: String? = nil,
+        locality: String? = nil, subLocality: String? = nil
+    ) -> String? {
+        SystemPlaceLookup.compose(
+            areaOfInterest: poi, name: name,
+            locality: locality, subLocality: subLocality
+        )
+    }
+
+    /// 「星巴克（衡山路店）」 is what he would call it; 「衡山路 880 号」 is what a
+    /// database calls it.  The POI wins whenever there is one.
+    func testThePointOfInterestWinsOverTheStreetAddress() {
+        XCTAssertEqual(
+            compose(
+                poi: "星巴克（衡山路店）", name: "衡山路 880 号",
+                locality: "上海市", subLocality: "徐汇区"
+            ),
+            "上海市 · 徐汇区 · 星巴克（衡山路店）"
+        )
+    }
+
+    func testTheStreetAddressStandsInWhenThereIsNoPointOfInterest() {
+        XCTAssertEqual(
+            compose(name: "衡山路 880 号", locality: "上海市"),
+            "上海市 · 衡山路 880 号"
+        )
+    }
+
+    /// A full street address already opens with the city and the district;
+    /// 「上海市 · 徐汇区 · 上海市徐汇区衡山路 880 号」 is repetition wearing the
+    /// clothes of detail.  The rule is plain containment — a district that is
+    /// merely *near* the name in spirit, like 徐汇区 and 徐汇滨江, is still said,
+    /// because guessing at that is how a place name starts being wrong.
+    func testADistrictAlreadyInsideTheNameIsNotSaidTwice() {
+        XCTAssertEqual(
+            compose(
+                name: "上海市徐汇区衡山路 880 号",
+                locality: "上海市", subLocality: "徐汇区"
+            ),
+            "上海市徐汇区衡山路 880 号"
+        )
+        XCTAssertEqual(
+            compose(poi: "徐汇滨江", locality: "上海市", subLocality: "徐汇区"),
+            "上海市 · 徐汇区 · 徐汇滨江"
+        )
+    }
+
+    func testNothingToSayIsSaidAsNothing() {
+        XCTAssertNil(compose())
+        XCTAssertNil(compose(poi: "   ", name: nil))
+        // A district with no subject is not a place, it is a filing category.
+        XCTAssertNil(compose(locality: "上海市", subLocality: "徐汇区"))
+    }
+
+    /// Trimmed here rather than downstream: this phone decides what it says.
+    func testALongNameIsTrimmedToWhatTheServerWillKeep() {
+        let composed = compose(poi: String(repeating: "远", count: 200))
+        XCTAssertEqual(composed?.count, SystemPlaceLookup.maximumCharacters)
     }
 }
 

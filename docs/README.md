@@ -11,6 +11,7 @@
 | 遗留分支、worktree 与原件去向 | [处置清单](development/branch-disposition.md) |
 | 本轮重组验证与部署边界 | [验收记录](development/reorganization-status.md) |
 | 安装、连接、更新 | [部署](operations/deployment.md)、[VPS 连接](operations/vps-connection.md)、[布局切换](operations/layout-transition.md) |
+| 外部平台、API 与选型的调研结论 | [调研笔记](research/README.md) |
 | 历史提案与交接 | [归档索引](archive/README.md) |
 
 现行规范是已接受的规则；现状记录是带依据的代码/验证快照；提案尚未承诺实现；归档只供追溯。

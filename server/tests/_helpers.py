@@ -65,6 +65,51 @@ def make_config(db_path: str | Path = "/tmp/murmur-test.db", **overrides) -> Con
     return Config(**values)
 
 
+class EnrolledClient:
+    """One development-mode device already through enrolment.
+
+    Every authenticated request needs its own challenge, and a challenge is
+    single-use — reusing one reads as `invalid_challenge`, which looks like a
+    signing bug rather than the test holding a spent token.  `headers()` mints
+    a fresh one per call so a test never has to think about it.
+    """
+
+    def __init__(self, client, store, development_token: str,
+                 *, key_id: str = "dev-api-phone"):
+        self.client = client
+        self.development = {"X-Murmur-Development-Token": development_token}
+        invite = store.create_invite()
+        challenge = client.post(
+            "/v1/auth/challenges", json={"purpose": "enrollment"}
+        ).json()
+        response = client.post(
+            "/v1/enrollments", headers=self.development,
+            json={
+                "challenge_id": challenge["challenge_id"], "invite_code": invite,
+                "key_id": key_id, "environment": "development",
+                "device_name": "iPhone",
+            },
+        )
+        if response.status_code != 201:
+            raise AssertionError(f"enrolment failed: {response.text}")
+        self.identity = response.json()
+
+    @property
+    def user_id(self) -> str:
+        return self.identity["user_id"]
+
+    def headers(self) -> dict:
+        response = self.client.post(
+            "/v1/auth/challenges", headers=self.development,
+            json={"purpose": "request", "key_id": self.identity["key_id"]},
+        )
+        return {
+            **self.development,
+            "X-Murmur-Key-ID": self.identity["key_id"],
+            "X-Murmur-Challenge-ID": response.json()["challenge_id"],
+        }
+
+
 def run_unittest(*, verbosity: int = 2) -> None:
     """Run the calling script's unittest suite with the repo-standard summary."""
     program = unittest.main(verbosity=verbosity, exit=False)

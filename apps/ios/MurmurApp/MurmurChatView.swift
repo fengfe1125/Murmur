@@ -157,10 +157,20 @@ extension View {
 /// conversation and the one disc that says whether the wire is good.
 struct MurmurChatView: View {
     @ObservedObject var model: MurmurSessionModel
+    @ObservedObject var music: MusicModule
+    @ObservedObject private var netease: NeteaseMusicModel
     @EnvironmentObject private var notifications: MurmurNotificationBridge
+    @Environment(\.openURL) private var openURL
     @State private var showCamera = false
     @State private var topChromeHeight: CGFloat = 0
     @State private var topFadeHeight: CGFloat = 0
+    @State private var showRoomMenu = false
+
+    init(model: MurmurSessionModel, music: MusicModule) {
+        self.model = model
+        self.music = music
+        self._netease = ObservedObject(wrappedValue: music.netease)
+    }
 
     var body: some View {
         // The chrome floats: the conversation owns the whole screen and the
@@ -171,7 +181,7 @@ struct MurmurChatView: View {
         // of the scene draws all the way up behind the status bar, and the
         // conversation ends up tangled in the clock.
         VStack(spacing: 0) {
-            MomentWorkbench(model: model, showCamera: $showCamera)
+            MomentWorkbench(model: model, showCamera: $showCamera, music: music)
                 .safeAreaPadding(.top, topChromeHeight)
         }
         // A scroll view draws all the way up behind the status bar whatever
@@ -199,13 +209,39 @@ struct MurmurChatView: View {
             .ignoresSafeArea()
         }
         .overlay(alignment: .top) {
-            MurmurTopChrome(connection: model.connection)
+            ZStack(alignment: .top) {
+                if showRoomMenu {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea()
+                        .onTapGesture { showRoomMenu = false }
+                        .accessibilityLabel("关闭一起听菜单")
+                }
+                MurmurTopChrome(
+                    connection: model.connection,
+                    room: netease.room,
+                    presentation: netease.presentationState(connection: model.connection),
+                    showsRoomMenu: $showRoomMenu,
+                    onPrimary: performPrimaryRoomAction,
+                    onPrevious: { Task { await netease.command(.previous) } },
+                    onNext: { Task { await netease.command(.next) } },
+                    onOpen: openRoomInNetease,
+                    onClose: { Task { await netease.closeRoom() } }
+                )
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
                     topChromeHeight = frame.height
                     // Where the disc ends in the window is where the chat
                     // becomes fully legible again.
                     topFadeHeight = frame.maxY
                 }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .onChange(of: netease.room?.roomHandle, initial: false) { _, _ in
+            showRoomMenu = false
+        }
+        .onChange(of: netease.room?.isActive, initial: false) { _, active in
+            if active != true { showRoomMenu = false }
         }
         .background(MurmurTheme.paper.ignoresSafeArea())
         .sheet(isPresented: $showCamera) {
@@ -216,6 +252,43 @@ struct MurmurChatView: View {
             .ignoresSafeArea()
         }
     }
+
+    private func performPrimaryRoomAction() {
+        switch netease.presentationState(connection: model.connection) {
+        case .waiting:
+            openRoomInNetease()
+        case .playing:
+            Task { await netease.command(.pause) }
+        case .paused:
+            Task { await netease.command(.resume) }
+        case .commandFailed:
+            Task { await netease.retryLastCommand() }
+        case .roomFailed:
+            guard let track = netease.room?.currentTrack else { return }
+            Task {
+                if let inviteURL = await netease.createRoom(for: track) {
+                    openURL(inviteURL)
+                }
+            }
+        case .inactive, .syncing, .offline:
+            break
+        }
+    }
+
+    private func openRoomInNetease() {
+        guard let inviteURL = netease.room?.inviteURL else { return }
+        openURL(inviteURL)
+    }
+}
+
+struct ListenTogetherHeaderVisibility: Equatable, Sendable {
+    let showStatusTag: Bool
+    let showLiveBars: Bool
+
+    init(availableWidth: CGFloat, isPlaying: Bool) {
+        showStatusTag = availableWidth >= 361
+        showLiveBars = availableWidth >= 289 && isPlaying
+    }
 }
 
 /// Independent discs floating over the transcript: the mark, 当年今日 and the
@@ -223,19 +296,56 @@ struct MurmurChatView: View {
 /// and the conversation is the 44pt of each disc.
 private struct MurmurTopChrome: View {
     let connection: MurmurConnectionState
+    let room: ListenTogetherRoomSnapshotV1?
+    let presentation: ListenTogetherPresentationState
+    @Binding var showsRoomMenu: Bool
+    let onPrimary: () -> Void
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+    let onOpen: () -> Void
+    let onClose: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        Group {
+            if presentation == .inactive {
+                inactiveChrome
+            } else {
+                activeChrome
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if showsRoomMenu, presentation != .inactive {
+                NeteaseRoomMenuOverlay(
+                    remoteActionsDisabled: presentation == .offline,
+                    onPrevious: closeThen(onPrevious),
+                    onNext: closeThen(onNext),
+                    onOpen: closeThen(onOpen),
+                    onClose: closeThen(onClose)
+                )
+                .frame(width: 280)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.trailing, 16)
+                .offset(y: 108)
+                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
+                .zIndex(3)
+            }
+        }
+        .animation(
+            reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.86),
+            value: presentation
+        )
+    }
+
+    private var inactiveChrome: some View {
         HStack(spacing: 8) {
-            // No action of its own — the mark answers a press the way the
-            // gear does, and that is all.
-            Button {} label: {
+            Button(action: {}) {
                 MurmurFloatingDisc { MurmurMark(size: 38) }
             }
             .murmurDiscButtonStyle()
             .accessibilityLabel("Murmur")
             Spacer(minLength: 0)
-            // "已连接" is the normal case and just adds noise; a broken
-            // connection still has to be visible.
             if connection != .connected {
                 Text(connection.label)
                     .font(MurmurTheme.body(.caption2, weight: .medium))
@@ -253,11 +363,296 @@ private struct MurmurTopChrome: View {
         .frame(maxWidth: .infinity)
     }
 
+    private var activeChrome: some View {
+        GeometryReader { geometry in
+            let available = geometry.size.width
+            let visibility = ListenTogetherHeaderVisibility(
+                availableWidth: available,
+                isPlaying: presentation == .playing
+            )
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text("Murmur")
+                        .font(MurmurTheme.display(.title3))
+                        .foregroundStyle(MurmurTheme.ink)
+                    Spacer(minLength: 8)
+                    if visibility.showStatusTag {
+                        Text(statusTag)
+                            .font(MurmurTheme.body(.caption2, weight: .semibold))
+                            .foregroundStyle(statusColor)
+                            .padding(.horizontal, 10)
+                            .frame(height: 23)
+                            .background(statusColor.opacity(0.13), in: Capsule())
+                    }
+                }
+
+                HStack(spacing: 9) {
+                    Image(systemName: "music.note")
+                        .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                        .foregroundStyle(MurmurTheme.accentInk)
+                        .frame(width: 40, height: 40)
+                        .background(MurmurTheme.accent, in: RoundedRectangle(cornerRadius: 10))
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(trackLine)
+                            .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                            .foregroundStyle(MurmurTheme.ink)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(statusLine)
+                            .font(MurmurTheme.body(.caption2))
+                            .foregroundStyle(statusColor)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if visibility.showLiveBars {
+                        MurmurLiveBars()
+                            .frame(width: 20, height: 22)
+                            .accessibilityHidden(true)
+                    }
+
+                    Button(action: onPrimary) {
+                        Group {
+                            if presentation.isSyncing {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: primarySymbol)
+                                    .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                            }
+                        }
+                        .foregroundStyle(primaryColor)
+                        .frame(width: 46, height: 46)
+                        .background(MurmurTheme.raisedPaper.opacity(0.74), in: Circle())
+                        .overlay { Circle().stroke(MurmurTheme.rule, lineWidth: 1) }
+                        .contentShape(Circle())
+                    }
+                    .frame(width: 46, height: 46)
+                    .buttonStyle(.plain)
+                    .disabled(presentation.isSyncing || presentation == .offline)
+                    .accessibilityLabel(primaryAccessibilityLabel)
+
+                    Button {
+                        showsRoomMenu.toggle()
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                            .foregroundStyle(MurmurTheme.ink)
+                            .frame(width: 46, height: 46)
+                            .background(MurmurTheme.raisedPaper.opacity(0.74), in: Circle())
+                            .overlay { Circle().stroke(MurmurTheme.rule, lineWidth: 1) }
+                            .contentShape(Circle())
+                    }
+                    .frame(width: 46, height: 46)
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("更多一起听操作")
+                    .accessibilityValue(showsRoomMenu ? "已展开" : "已收起")
+                }
+            }
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
+            .padding(.vertical, 8)
+            .frame(width: available, height: 90)
+            .murmurGlass()
+            .overlay {
+                if presentation.isRoomFailure {
+                    RoundedRectangle(cornerRadius: MurmurTheme.glassCorner, style: .continuous)
+                        .stroke(MurmurTheme.coral, lineWidth: 1)
+                }
+            }
+        }
+        .frame(maxWidth: MurmurTheme.contentWidth, minHeight: 90, maxHeight: 90)
+        .padding(.horizontal, 16)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var trackLine: String {
+        guard let track = room?.currentTrack else { return "和 Murmur 一起听" }
+        guard let artist = track.artists.first, !artist.isEmpty else { return track.title }
+        return "\(track.title) · \(artist)"
+    }
+
+    private var statusTag: String {
+        switch presentation {
+        case .waiting: "等待加入"
+        case .playing: "已连接"
+        case .paused: "已暂停"
+        case .syncing: "同步中"
+        case .commandFailed: "同步失败"
+        case .roomFailed: "邀请过期"
+        case .offline: "连接异常"
+        case .inactive: ""
+        }
+    }
+
+    private var statusLine: String {
+        switch presentation {
+        case .waiting: "等待加入 / 点此打开网易云邀请"
+        case .playing: "已连接，正在一起听"
+        case .paused: "房间仍保持连接"
+        case .syncing(let command): syncingLine(for: command)
+        case .commandFailed: "这次没有同步成功"
+        case .roomFailed: "邀请已过期，点此重试"
+        case .offline: "Murmur 连接异常"
+        case .inactive: ""
+        }
+    }
+
+    private var primarySymbol: String {
+        switch presentation {
+        case .waiting: "arrow.up.forward.app.fill"
+        case .playing: "pause.fill"
+        case .paused: "play.fill"
+        case .commandFailed, .roomFailed: "arrow.clockwise"
+        case .inactive, .syncing, .offline: "circle"
+        }
+    }
+
+    private var primaryAccessibilityLabel: String {
+        switch presentation {
+        case .waiting: "打开网易云一起听邀请"
+        case .playing: "暂停一起听"
+        case .paused: "继续一起听"
+        case .commandFailed: "重试上一次一起听操作"
+        case .roomFailed: "重新创建一起听邀请"
+        case .syncing: "正在同步一起听操作"
+        case .offline: "Murmur 连接异常，控制暂不可用"
+        case .inactive: "Murmur"
+        }
+    }
+
+    private var statusColor: Color {
+        presentation.isFailure ? MurmurTheme.coral : MurmurTheme.secondaryInk
+    }
+
+    private var primaryColor: Color {
+        presentation.isFailure ? MurmurTheme.coral : MurmurTheme.ink
+    }
+
+    private func syncingLine(for command: ListenTogetherCommand?) -> String {
+        switch command {
+        case .pause: "暂停同步中…"
+        case .resume: "继续同步中…"
+        case .previous: "上一首同步中…"
+        case .next: "下一首同步中…"
+        case .playTrack: "切歌同步中…"
+        case nil: "正在确认播放状态…"
+        }
+    }
+
     private var connectionCaptionColor: Color {
         switch connection {
         case .connected, .checking: MurmurTheme.secondaryInk
         case .needsEnrollment, .offline: MurmurTheme.coral
         }
+    }
+
+    private func closeThen(_ action: @escaping () -> Void) -> () -> Void {
+        {
+            showsRoomMenu = false
+            action()
+        }
+    }
+}
+
+private extension ListenTogetherPresentationState {
+    var isSyncing: Bool {
+        if case .syncing = self { return true }
+        return false
+    }
+
+    var isFailure: Bool {
+        switch self {
+        case .commandFailed, .roomFailed, .offline: true
+        default: false
+        }
+    }
+
+    var isRoomFailure: Bool {
+        if case .roomFailed = self { return true }
+        return false
+    }
+}
+
+private struct MurmurLiveBars: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var phase = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 3) {
+            ForEach([10.0, 18.0, 13.0], id: \.self) { height in
+                Capsule()
+                    .fill(MurmurTheme.accent)
+                    .frame(width: 3, height: reduceMotion ? height : (phase ? height : height * 0.55))
+            }
+        }
+        .task {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) {
+                phase = true
+            }
+        }
+    }
+}
+
+private struct NeteaseRoomMenuOverlay: View {
+    let remoteActionsDisabled: Bool
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+    let onOpen: () -> Void
+    let onClose: () -> Void
+
+    @AccessibilityFocusState private var firstItemFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            menuButton("上一首", systemImage: "backward.fill", disabled: remoteActionsDisabled, action: onPrevious)
+                .accessibilityFocused($firstItemFocused)
+            Divider().padding(.horizontal, 10)
+            menuButton("下一首", systemImage: "forward.fill", disabled: remoteActionsDisabled, action: onNext)
+            Divider().padding(.horizontal, 10)
+            menuButton("在网易云打开", systemImage: "arrow.up.forward.app.fill", action: onOpen)
+            Divider().padding(.horizontal, 10)
+            menuButton(
+                "结束一起听",
+                systemImage: "xmark",
+                role: .destructive,
+                disabled: remoteActionsDisabled,
+                action: onClose
+            )
+        }
+        .padding(.vertical, 9)
+        .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(MurmurTheme.rule, lineWidth: 1)
+        }
+        .shadow(color: MurmurTheme.ink.opacity(0.14), radius: 18, y: 8)
+        .onAppear { firstItemFocused = true }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("一起听操作")
+    }
+
+    private func menuButton(
+        _ title: String,
+        systemImage: String,
+        role: ButtonRole? = nil,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(role: role, action: action) {
+            Label(title, systemImage: systemImage)
+                .font(MurmurTheme.body(.body, weight: title == "结束一起听" ? .semibold : .regular))
+                .foregroundStyle(title == "结束一起听" ? MurmurTheme.coral : MurmurTheme.ink)
+                .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 18)
+        .disabled(disabled)
     }
 }
 
@@ -478,10 +873,18 @@ struct EnrollmentView: View {
     }
 }
 
+private struct NeteaseRoomPollingKey: Equatable {
+    let roomHandle: String?
+    let mayPoll: Bool
+}
+
 private struct MomentWorkbench: View {
     @ObservedObject var model: MurmurSessionModel
     @Binding var showCamera: Bool
+    @ObservedObject var music: MusicModule
+    @ObservedObject private var netease: NeteaseMusicModel
     @State private var showPhotoSource = false
+    @State private var showMusicPicker = false
     @State private var openPhoto: MurmurPhotoPreview?
     /// Bumped whenever the field takes focus.  The keyboard notification alone
     /// is not enough: tapping a field that is already first responder raises no
@@ -509,6 +912,15 @@ private struct MomentWorkbench: View {
     @Environment(\.murmurTabBarClearance) private var tabBarClearance
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.openURL) private var openURL
+
+    init(model: MurmurSessionModel, showCamera: Binding<Bool>, music: MusicModule) {
+        self.model = model
+        self._showCamera = showCamera
+        self.music = music
+        self.netease = music.netease
+    }
 
     private var keyboardSupplement: CGFloat {
         MurmurKeyboardClearance.supplemental(
@@ -534,7 +946,20 @@ private struct MomentWorkbench: View {
                 MurmurDiagnostics.record("tapped conversation")
 #endif
                 composerFocused = false
-            }
+            },
+            nowPlaying: music.nowPlaying,
+            onPlayMusic: { music.player.tap($0) },
+            onListenTogether: music.isListenTogetherAvailable ? { track in
+                Task {
+                    let needsInvite = netease.room?.isActive != true
+                    if let inviteURL = await netease.createRoom(for: track), needsInvite {
+                        openURL(inviteURL)
+                    }
+                }
+            } : nil,
+            activeListenTogetherTrackID: netease.room?.isActive == true
+                ? netease.room?.currentTrack?.trackID : nil,
+            hasActiveListenTogetherRoom: netease.room?.isActive == true
         )
             // A tap anywhere off the menu closes it, the way a popover does.
             // The catcher covers the transcript and nothing else: over the
@@ -593,6 +1018,17 @@ private struct MomentWorkbench: View {
                         showPhotoSource: $showPhotoSource,
                         onFocus: { focusPulse += 1 },
                         onPickFromLibrary: { showLibrary = true },
+                        // Two gates, and both have to be open: this build has
+                        // an Audius registration, and Murmur's server says this
+                        // account may use music at all.
+                        onPickMusic: music.isAvailable ? { showMusicPicker = true } : nil,
+                        onSubmitText: music.isNeteaseCatalogAvailable ? { text in
+                            guard model.draftPhoto == nil,
+                                  netease.recognizePastedText(text)
+                            else { return false }
+                            model.draftText = ""
+                            return true
+                        } : nil,
                         focused: $composerFocused
                     )
                 }
@@ -606,6 +1042,33 @@ private struct MomentWorkbench: View {
                 )
             }
         .photosPicker(isPresented: $showLibrary, selection: $selectedItem, matching: .images)
+        .sheet(isPresented: $showMusicPicker) {
+            MusicPickerView(
+                client: music.library,
+                account: music.account,
+                onSend: { model.submitMusic($0) }
+            )
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { netease.preview != nil },
+                set: { if !$0, netease.preview != nil { netease.discardPreview() } }
+            )
+        ) {
+            if let preview = netease.preview {
+                NeteaseSharedMusicPreviewView(
+                    preview: preview,
+                    onConfirm: {
+                        guard let track = netease.confirmPreview() else { return }
+                        model.submitMusic(track)
+                    },
+                    onCancel: { netease.discardPreview() }
+                )
+                .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.height(377)])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(MurmurTheme.paper)
+            }
+        }
         .fullScreenCover(item: $openPhoto) { photo in
             MurmurPhotoLightbox(url: photo.url)
         }
@@ -628,9 +1091,32 @@ private struct MomentWorkbench: View {
         .task {
             await model.loadTranscript()
             await model.checkProactive()
+            if music.isNeteaseCatalogAvailable {
+                netease.loadPendingShareDraft()
+            }
+            if music.isListenTogetherAvailable {
+                await netease.refreshRoom()
+            }
 #if DEBUG
             stubPhotoIfAsked()
 #endif
+        }
+        .task(id: NeteaseRoomPollingKey(
+            roomHandle: netease.room?.roomHandle,
+            mayPoll: music.isListenTogetherAvailable && scenePhase == .active
+        )) {
+            while !Task.isCancelled,
+                  music.isListenTogetherAvailable,
+                  scenePhase == .active,
+                  netease.room?.isActive == true
+            {
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch {
+                    return
+                }
+                await netease.refreshRoom()
+            }
         }
         // The keyboard is loaded before it is wanted, not when the field is
         // tapped.  Once on arrival, and again on the way back from the
@@ -639,7 +1125,49 @@ private struct MomentWorkbench: View {
         .onChange(of: scenePhase, initial: false) { _, phase in
             guard phase == .active else { return }
             warmKeyboard()
-            Task { await model.checkProactive() }
+            Task {
+                await model.checkProactive()
+                if music.isNeteaseCatalogAvailable {
+                    netease.loadPendingShareDraft()
+                }
+                if music.isListenTogetherAvailable {
+                    await netease.refreshRoom()
+                }
+            }
+        }
+        .onChange(of: music.isNeteaseCatalogAvailable, initial: true) { _, enabled in
+            guard enabled else { return }
+            netease.loadPendingShareDraft()
+#if DEBUG
+            netease.seedUITestSharePreviewIfRequested()
+#endif
+        }
+        .onChange(of: music.isListenTogetherAvailable, initial: true) { _, enabled in
+            guard enabled else { return }
+            Task { await netease.refreshRoom() }
+        }
+        .overlay(alignment: .top) {
+            if netease.isResolvingShare {
+                Label("正在识别网易云歌曲…", systemImage: "music.note")
+                    .font(MurmurTheme.body(.footnote, weight: .medium))
+                    .foregroundStyle(MurmurTheme.ink)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(MurmurTheme.raisedPaper, in: Capsule())
+                    .overlay { Capsule().stroke(MurmurTheme.rule, lineWidth: 1) }
+                    .padding(.top, 8)
+            }
+        }
+        .alert(
+            "网易云音乐",
+            isPresented: Binding(
+                get: { netease.failureMessage != nil },
+                set: { if !$0 { netease.clearFailure() } }
+            )
+        ) {
+            Button("知道了") { netease.clearFailure() }
+        } message: {
+            Text(netease.failureMessage ?? "")
         }
         .onChange(of: composerFocused, initial: true) { _, focused in
             keyboard.focusDidChange(focused)
@@ -699,6 +1227,10 @@ private struct MomentComposer: View {
     @Binding var showPhotoSource: Bool
     let onFocus: () -> Void
     let onPickFromLibrary: () -> Void
+    var onPickMusic: (() -> Void)?
+    /// Returns true when the text was consumed by an attachment flow (for
+    /// example a pasted NetEase link that must be previewed before sending).
+    var onSubmitText: ((String) -> Bool)?
     /// Owned by the workbench, so tapping the conversation can drop focus in the
     /// same turn the tap is seen rather than a pass later.
     @FocusState.Binding var focused: Bool
@@ -794,6 +1326,7 @@ private struct MomentComposer: View {
                     PhotoSourceMenu(
                         onLibrary: onPickFromLibrary,
                         onCamera: { showCamera = true },
+                        onMusic: onPickMusic,
                         onDismiss: { closePhotoSource() }
                     )
                     // Lift by its own measured height so the card's bottom
@@ -857,6 +1390,7 @@ private struct MomentComposer: View {
     /// conversation.
     private func submit() {
         guard model.canSubmit else { return }
+        if onSubmitText?(model.draftText) == true { return }
         model.submit()
     }
 }
@@ -869,6 +1403,7 @@ private final class FocusClock {
 
 struct MurmurSettingsView: View {
     @ObservedObject var model: MurmurSessionModel
+    @ObservedObject var music: MusicModule
     @EnvironmentObject private var notifications: MurmurNotificationBridge
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDelete = false
@@ -894,6 +1429,13 @@ struct MurmurSettingsView: View {
                     Text("每个邀请用户最多可绑定 3 台设备。新增设备需要管理员签发设备码。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+
+                // Only when the server has actually turned music on for this
+                // account: an account that has never seen the feature should
+                // not be offered a music setting it cannot use.
+                if music.isAvailable {
+                    AudiusSection(music: music)
                 }
 
                 Section("设备") {
@@ -1230,9 +1772,75 @@ private struct DraftPhotoTile: View {
 
 /// The add-photo menu, drawn in the app's own paper instead of system chrome
 /// so it belongs to the composer it rises out of.
+/// The Audius account, in 我的.
+///
+/// Connecting is what unlocks 收藏 and 歌单 in the picker; public search works
+/// without it. Disconnecting clears the credential on this device whether or
+/// not Audius can be reached to revoke it.
+private struct AudiusSection: View {
+    @ObservedObject var music: MusicModule
+    @State private var working = false
+
+    var body: some View {
+        Section("音乐") {
+            switch music.account.state {
+            case let .signedIn(user):
+                LabeledContent("Audius", value: user.handle.isEmpty ? user.name : "@\(user.handle)")
+                Button("断开 Audius", role: .destructive) {
+                    working = true
+                    Task {
+                        await music.account.logout()
+                        working = false
+                    }
+                }
+                .disabled(working)
+            case .authorizing:
+                HStack {
+                    ProgressView()
+                    Text("正在连接 Audius")
+                }
+                .foregroundStyle(.secondary)
+            case .needsReconnect:
+                Text("Audius 授权已失效，需要重新连接。")
+                    .font(.footnote)
+                    .foregroundStyle(MurmurTheme.coral)
+                connectButton(title: "重新连接 Audius")
+            case let .failed(message):
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(MurmurTheme.coral)
+                connectButton(title: "再试一次")
+            case .signedOut:
+                connectButton(title: "连接 Audius")
+            case .unavailable:
+                Text("这个版本还没有配置 Audius。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Text("连接后可以在聊天里发送你的 Audius 收藏和歌单。搜索公开曲库不需要连接。Murmur 不会收到你的 Audius 授权或完整收听记录。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func connectButton(title: String) -> some View {
+        Button(title) {
+            working = true
+            Task {
+                await music.account.login()
+                working = false
+            }
+        }
+        .disabled(working)
+    }
+}
+
 private struct PhotoSourceMenu: View {
     let onLibrary: () -> Void
     let onCamera: () -> Void
+    /// nil when music is off for this build or this account, in which case the
+    /// menu is exactly what it was before songs existed.
+    var onMusic: (() -> Void)?
     let onDismiss: () -> Void
 
     private var hasCamera: Bool {
@@ -1253,6 +1861,16 @@ private struct PhotoSourceMenu: View {
                 row("拍照", icon: "camera") {
                     onDismiss()
                     onCamera()
+                }
+            }
+            if let onMusic {
+                Rectangle()
+                    .fill(MurmurTheme.rule)
+                    .frame(height: 1)
+                    .padding(.leading, 48)
+                row("音乐", icon: "music.note") {
+                    onDismiss()
+                    onMusic()
                 }
             }
         }
@@ -1403,7 +2021,11 @@ private struct CameraPicker: UIViewControllerRepresentable {
 
 #if DEBUG
 #Preview {
-    MurmurChatView(model: MurmurSessionModel(api: PreviewMurmurAPIClient()))
+    let api = PreviewMurmurAPIClient()
+    MurmurChatView(
+        model: MurmurSessionModel(api: api),
+        music: MusicModule(api: api, configuration: nil)
+    )
         .environmentObject(MurmurNotificationBridge.shared)
         .environmentObject(MurmurKeyboardState())
         .environment(\.murmurTabBarClearance, 72)

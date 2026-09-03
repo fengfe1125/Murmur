@@ -1,4 +1,9 @@
 MURMUR_API_BASE_URL =
+// Audius is off unless a registration is supplied locally.  Declared
+// here so an unconfigured build resolves the key to empty rather than
+// shipping the literal variable name in its bundle.
+MURMUR_AUDIUS_API_KEY =
+MURMUR_AUDIUS_REDIRECT_URI = murmur-audius:/$()/oauth/callback
 #include? "Release.local.xcconfig"
 
 // Custom keys only; GENERATE_INFOPLIST_FILE merges Apple's on top.

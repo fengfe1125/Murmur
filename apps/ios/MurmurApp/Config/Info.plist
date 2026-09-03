@@ -14,5 +14,9 @@
 	<string>$(MURMUR_API_BASE_URL)</string>
 	<key>MurmurDevelopmentToken</key>
 	<string>$(MURMUR_DEVELOPMENT_TOKEN)</string>
+	<key>AudiusAPIKey</key>
+	<string>$(MURMUR_AUDIUS_API_KEY)</string>
+	<key>AudiusRedirectURI</key>
+	<string>$(MURMUR_AUDIUS_REDIRECT_URI)</string>
 </dict>
 </plist>

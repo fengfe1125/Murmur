@@ -24,6 +24,12 @@ final class MurmurSessionModel: ObservableObject {
     /// The scrollback the person reads.  Held here rather than derived from
     /// `bubbles`, which only ever describes the moment in flight.
     @Published private(set) var messages: [MurmurMessage] = []
+    /// Whether the scrollback on disk has been read back yet.
+    ///
+    /// The screen has to be able to tell a restore from an arrival: rows read
+    /// back off disk were already there, so they must not animate in, and the
+    /// opening line must not be shown over a history that is still being read.
+    @Published private(set) var transcriptRestored = false
     /// Why an outgoing row never landed, keyed by that row.
     ///
     /// A send that failed belongs to the line the person wrote, not to the
@@ -44,6 +50,14 @@ final class MurmurSessionModel: ObservableObject {
     /// The typing indicator reads this rather than `phase`, so choosing a photo
     /// mid-answer does not make Murmur look like it stopped talking.
     @Published private(set) var isAwaitingReply = false
+    /// Enabled only when Murmur's authenticated server advertises the exact
+    /// music wire this client implements.  Local Audius configuration is a
+    /// separate gate owned by app composition.
+    @Published private(set) var musicAvailability = MusicFeatureAvailability(
+        enabled: false,
+        provider: "audius",
+        playbackReporting: false
+    )
 
     let transcriptStore: MurmurTranscriptStore
     /// 当年今日's own history, kept apart from the conversation.  Owned here
@@ -109,6 +123,12 @@ final class MurmurSessionModel: ObservableObject {
     // ---- Transcript ---------------------------------------------------------
 
     func loadTranscript() async {
+        // Set on every path out of here — a second call that finds the
+        // scrollback already in memory included — because the screen holds its
+        // entrance animations back until it is true.  Set in the same turn as
+        // the rows themselves, so the pass that commits them is the pass that
+        // knows they are a restore.
+        defer { transcriptRestored = true }
         guard messages.isEmpty else { return }
         messages = await transcriptStore.load()
     }
@@ -194,11 +214,64 @@ final class MurmurSessionModel: ObservableObject {
                 settingsMessage = MurmurFailure.from(error).message
             }
             if hasPendingPushRegistration { await syncDevice(token: pendingAPNSToken) }
+            await refreshMusicAvailability()
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--murmur-stub-netease-offline") {
+                connection = .offline("UI Test")
+            }
+#endif
         } catch {
             let mapped = MurmurFailure.from(error)
             requiresDeviceReconnect = mapped.requiresDeviceReconnect
             connection = .offline(mapped.message)
         }
+    }
+
+    private func refreshMusicAvailability() async {
+        do {
+            let availability = try await withTimeout(seconds: requestTimeoutSeconds) { [api] in
+                try await api.musicAvailability()
+            }
+            musicAvailability = availability
+            if availability.enabled {
+                Self.cacheMusicAvailability(availability)
+            } else {
+                Self.clearMusicAvailabilityCache()
+            }
+        } catch {
+            musicAvailability = Self.cachedMusicAvailability() ?? MusicFeatureAvailability(
+                enabled: false,
+                provider: "audius",
+                playbackReporting: false
+            )
+        }
+    }
+
+    private static let musicAvailabilityCacheKey = "murmur.music-availability"
+    private static let musicAvailabilityCachedAtKey = "murmur.music-availability-cached-at"
+    private static let musicAvailabilityTTL: TimeInterval = 24 * 60 * 60
+
+    private static func cacheMusicAvailability(_ availability: MusicFeatureAvailability) {
+        guard let data = try? JSONEncoder().encode(availability) else { return }
+        UserDefaults.standard.set(data, forKey: musicAvailabilityCacheKey)
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: musicAvailabilityCachedAtKey)
+    }
+
+    private static func cachedMusicAvailability() -> MusicFeatureAvailability? {
+        let defaults = UserDefaults.standard
+        let cachedAt = defaults.double(forKey: musicAvailabilityCachedAtKey)
+        guard cachedAt > 0,
+              Date().timeIntervalSince1970 - cachedAt <= musicAvailabilityTTL,
+              let data = defaults.data(forKey: musicAvailabilityCacheKey),
+              let availability = try? JSONDecoder().decode(MusicFeatureAvailability.self, from: data),
+              availability.enabled
+        else { return nil }
+        return availability
+    }
+
+    private static func clearMusicAvailabilityCache() {
+        UserDefaults.standard.removeObject(forKey: musicAvailabilityCacheKey)
+        UserDefaults.standard.removeObject(forKey: musicAvailabilityCachedAtKey)
     }
 
     func enroll(inviteCode: String) async {
@@ -273,7 +346,9 @@ final class MurmurSessionModel: ObservableObject {
     /// in the view so it borrows the app's own authenticated client, photo
     /// loader and timeouts: the room's upload goes out the same door as every
     /// other, and its temporary original lands under the same swept prefix.
-    func makePhotoRoom(image: UIImage) -> PhotoRoomModel {
+    func makePhotoRoom(
+        image: UIImage, provenance: PhotoProvenance? = nil
+    ) -> PhotoRoomModel {
         PhotoRoomModel(
             image: image,
             api: api,
@@ -281,6 +356,11 @@ final class MurmurSessionModel: ObservableObject {
             uploadTimeoutSeconds: uploadTimeoutSeconds,
             requestTimeoutSeconds: requestTimeoutSeconds,
             bubblePacing: bubblePacing,
+            // What the photo says about itself.  Without it a picture from
+            // three years ago arrives looking like it was taken a second ago,
+            // and the one screen whose job is to ask about that day gets told
+            // the wrong day.
+            provenance: provenance,
             // Into the archive, never the conversation: what is said about an
             // old photo belongs to the day it was said on, and the chat stays
             // a chat.  当年今日 reads that archive back as a calendar.
@@ -394,6 +474,7 @@ final class MurmurSessionModel: ObservableObject {
             messageID: outgoing.id,
             note: note.isEmpty ? nil : note,
             photo: photo,
+            musicTrack: nil,
             idempotencyKey: key,
             replyToProactiveMomentID: note.isEmpty ? nil : proactiveMomentID
         )
@@ -415,6 +496,31 @@ final class MurmurSessionModel: ObservableObject {
             }
         }
         enqueue(submission)
+    }
+
+    /// Sends a song as its own turn.  What is already typed or attached in the
+    /// composer is intentionally left untouched: a song cannot be combined
+    /// with a caption or photo, and opening the picker must not destroy a draft.
+    func submitMusic(_ track: MusicTrackAttachmentV1) {
+        let key = UUID().uuidString.lowercased()
+        let fallback = "🎵 \(track.title) — \(track.artists.joined(separator: ", "))\n\(track.canonicalURL.absoluteString)"
+        let outgoing = MurmurMessage(
+            author: .you,
+            text: fallback,
+            musicTrack: track,
+            sentAt: Date(),
+            delivery: .sending,
+            idempotencyKey: key
+        )
+        append(outgoing)
+        enqueue(Submission(
+            messageID: outgoing.id,
+            note: fallback,
+            photo: nil,
+            musicTrack: track,
+            idempotencyKey: key,
+            replyToProactiveMomentID: nil
+        ))
     }
 
     /// Send one failed row again.
@@ -454,7 +560,7 @@ final class MurmurSessionModel: ObservableObject {
             }
             self.rebuildTasks.removeValue(forKey: messageID)
             let note = row.text.isEmpty ? nil : row.text
-            guard note != nil || photo != nil else {
+            guard note != nil || photo != nil || row.musicTrack != nil else {
                 // Nothing left to send: the picture this row carried is gone
                 // from transcript storage and there were never any words.
                 self.markRebuildFailed(messageID)
@@ -464,6 +570,7 @@ final class MurmurSessionModel: ObservableObject {
                 messageID: messageID,
                 note: note,
                 photo: photo,
+                musicTrack: row.musicTrack,
                 idempotencyKey: row.idempotencyKey ?? UUID().uuidString.lowercased(),
                 replyToProactiveMomentID: nil
             ))
@@ -750,6 +857,7 @@ final class MurmurSessionModel: ObservableObject {
                 try await api.createMoment(
                     note: submission.note,
                     photo: submission.photo,
+                    musicTrack: submission.musicTrack,
                     idempotencyKey: submission.idempotencyKey,
                     intent: nil
                 )
@@ -789,15 +897,18 @@ final class MurmurSessionModel: ObservableObject {
                             lastBubbleAt = Date()
                             // Two ticks: Murmur has started composing.
                             updatePending { $0.delivery = .answered }
-                        case let .bubble(_, text):
-                            if !text.isEmpty {
-                                try await pace(for: text)
+                        case let .bubble(_, text, musicTrack):
+                            if !text.isEmpty || musicTrack != nil {
+                                if !text.isEmpty { try await pace(for: text) }
                                 let id = eventID ?? UUID().uuidString
+                                if !text.isEmpty {
                                 bubbles.append(.init(id: id, text: text))
+                                }
                                 append(.init(
                                     id: "\(receipt.momentID)-\(id)",
                                     author: .murmur,
                                     text: text,
+                                    musicTrack: musicTrack,
                                     momentID: receipt.momentID
                                 ))
                                 lastBubbleAt = Date()
@@ -892,9 +1003,35 @@ final class MurmurSessionModel: ObservableObject {
             }
             move = proactive.move
             scene = proactive.scene
+            // A send already on the wire keeps its own phase; a proactive
+            // message arriving must not make it look finished.  Settled before
+            // the bubbles land: the chrome should not wait out the pacing
+            // below to say the connection is good.
+            if !isRunning && queue.isEmpty {
+                phase = bubbles.isEmpty ? .quiet : .complete
+            }
+            connection = .connected
             // A message Murmur sent on its own belongs in the scrollback like
             // any other; without this it only ever existed in the notification.
+            //
+            // They land on the same clock a streamed reply lands on: the first
+            // at once — it was written before the app was even open — and each
+            // one after it held back for roughly the time it would take to type
+            // it.  Appended in a single pass they arrived as one block in one
+            // frame, and three bubbles rising together is a machine emptying a
+            // buffer rather than somebody saying three things.  Paced with a
+            // sleep of its own rather than through `pace(for:)`, which counts
+            // from `lastBubbleAt` — that clock belongs to a reply that may be
+            // streaming right now.
+            var isFirstArrival = true
             for bubble in bubbles where !messages.contains(where: { $0.id == bubble.id }) {
+                if !isFirstArrival {
+                    let beat = bubblePacing.delay(for: bubble.text)
+                    // Cancellation takes the theatre away and nothing else:
+                    // what is left still belongs in the scrollback.
+                    if beat > 0 { try? await Task.sleep(for: .seconds(beat)) }
+                }
+                isFirstArrival = false
                 append(.init(
                     id: bubble.id,
                     author: .murmur,
@@ -902,12 +1039,8 @@ final class MurmurSessionModel: ObservableObject {
                     momentID: proactive.momentID
                 ))
             }
-            // A send already on the wire keeps its own phase; a proactive
-            // message arriving must not make it look finished.
-            if !isRunning && queue.isEmpty {
-                phase = bubbles.isEmpty ? .quiet : .complete
-            }
-            connection = .connected
+            // The acknowledgement says the message has been shown, so it goes
+            // after the last bubble has actually landed.
             try await api.acknowledge(momentID: proactive.momentID, reply: nil)
         } catch {
             if expectedMomentID != nil {
@@ -971,6 +1104,7 @@ private struct Submission: Sendable {
     let messageID: String
     let note: String?
     let photo: PhotoAttachment?
+    let musicTrack: MusicTrackAttachmentV1?
     let idempotencyKey: String
     let replyToProactiveMomentID: String?
 }
@@ -978,7 +1112,7 @@ private struct Submission: Sendable {
 private extension MurmurStreamEvent {
     var eventID: String? {
         switch self {
-        case let .accepted(id), let .bubble(id, _), let .angles(id, _), let .quiet(id),
+        case let .accepted(id), let .bubble(id, _, _), let .angles(id, _), let .quiet(id),
              let .done(id, _, _), let .failure(id, _): id
         }
     }

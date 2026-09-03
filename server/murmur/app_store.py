@@ -127,6 +127,14 @@ class Job:
     # A bounded, ordered set of earlier App moments whose linked Memory rows
     # should replace the generic recent-history window for this turn.
     context_moment_ids: tuple[str, ...] = ()
+    # Canonical JSON the App sent with the photo: when it was taken, where,
+    # and the place name it reverse-geocoded on device.  A re-encoded JPEG
+    # carries no EXIF, so 当年今日's old photo would otherwise arrive looking
+    # like it was taken just now.
+    provenance: str | None = None
+    # Canonical TrackV1 JSON supplied by the App.  OAuth credentials and
+    # playback URLs are never part of a job.
+    music_track: str | None = None
 
 
 # The non-ordinary things an inbound moment can be asking for.  NULL is the
@@ -222,6 +230,10 @@ CREATE TABLE IF NOT EXISTS app_moments (
     preview_path     TEXT,
     intent           TEXT CHECK(intent IS NULL OR intent IN ('photo_reading')),
     context_moment_ids TEXT,
+    -- 照片自己带的事实：拍摄时间、坐标、机上反解出的地名。和 image_path
+    -- 一样是临时的，每条终结路径上一起清空。
+    provenance       TEXT,
+    music_track      TEXT,
     request_digest   TEXT NOT NULL,
     idempotency_key  TEXT NOT NULL,
     status           TEXT NOT NULL,
@@ -278,6 +290,17 @@ CREATE TABLE IF NOT EXISTS app_push_deliveries (
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     PRIMARY KEY(moment_id, device_id)
+);
+
+CREATE TABLE IF NOT EXISTS app_playback_states (
+    user_id      TEXT PRIMARY KEY REFERENCES app_users(id) ON DELETE CASCADE,
+    device_id    TEXT NOT NULL REFERENCES app_devices(id) ON DELETE CASCADE,
+    session_id   TEXT NOT NULL,
+    sequence     INTEGER NOT NULL,
+    state        TEXT NOT NULL CHECK(state IN ('started','paused','resumed')),
+    track_json   TEXT NOT NULL,
+    changed_at   TEXT NOT NULL,
+    expires_at   TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_app_challenge_expiry
@@ -365,6 +388,14 @@ class AppStore:
             self.conn.execute(
                 "ALTER TABLE app_moments ADD COLUMN context_moment_ids TEXT"
             )
+        if "provenance" not in moment_columns:
+            # 老 moment 从来没带过照片自己的事实，NULL 就是它们的准确值。
+            # 已经终结的行本来也该是 NULL——这一列只在处理途中有内容。
+            self.conn.execute(
+                "ALTER TABLE app_moments ADD COLUMN provenance TEXT"
+            )
+        if "music_track" not in moment_columns:
+            self.conn.execute("ALTER TABLE app_moments ADD COLUMN music_track TEXT")
         if "proactive_memory_finalized" not in moment_columns:
             # Rows from before the durable continuity outbox predate this
             # workflow and must not be replayed as unfinished work.
@@ -734,6 +765,8 @@ class AppStore:
         request_digest: str,
         intent: str | None = None,
         context_moment_ids: list[str] | tuple[str, ...] | None = None,
+        provenance: str | None = None,
+        music_track: str | None = None,
     ) -> MomentResult:
         if intent is not None and intent not in MOMENT_INTENTS:
             raise ValueError("unknown moment intent")
@@ -783,10 +816,11 @@ class AppStore:
                         raise MomentInFlight("another moment is still being processed")
                     db.execute(
                         "UPDATE app_moments SET note=?,image_path=?,intent=?,"
-                        "context_moment_ids=?,status='queued',"
+                        "context_moment_ids=?,provenance=?,music_track=?,status='queued',"
                         "scene=NULL,move=NULL,memory_entry_id=NULL,preview_path=NULL,"
                         "push_preview=NULL,failure_retryable=NULL,updated_at=? WHERE id=?",
-                        (note, image_path, intent, context_json, now, existing["id"]),
+                        (note, image_path, intent, context_json, provenance, music_track, now,
+                         existing["id"]),
                     )
                     db.execute("DELETE FROM app_events WHERE moment_id=?", (existing["id"],))
                     db.execute(
@@ -827,10 +861,10 @@ class AppStore:
             db.execute(
                 "INSERT INTO app_moments"
                 "(id,user_id,source,note,image_path,intent,context_moment_ids,"
-                "request_digest,idempotency_key,status,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "provenance,music_track,request_digest,idempotency_key,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (moment_id, user_id, "inbound", note, image_path, intent, context_json,
-                 request_digest, idempotency_key, "queued", now, now),
+                 provenance, music_track, request_digest, idempotency_key, "queued", now, now),
             )
             db.execute(
                 "INSERT INTO app_jobs(id,moment_id,created_at,updated_at) VALUES(?,?,?,?)",
@@ -963,7 +997,7 @@ class AppStore:
             while True:
                 row = db.execute(
                     "SELECT j.id,j.moment_id,j.attempts,m.user_id,m.note,m.image_path,m.intent,"
-                    "m.context_moment_ids "
+                    "m.context_moment_ids,m.provenance,m.music_track "
                     "FROM app_jobs j JOIN app_moments m ON m.id=j.moment_id "
                     "JOIN app_users u ON u.id=m.user_id "
                     "WHERE (j.status='queued' OR (j.status='processing' AND j.lease_until<?)) "
@@ -985,7 +1019,7 @@ class AppStore:
                     )
                     db.execute(
                         "UPDATE app_moments SET status='failed',note=NULL,image_path=NULL,"
-                        "failure_retryable=0,updated_at=? WHERE id=?",
+                        "provenance=NULL,music_track=NULL,failure_retryable=0,updated_at=? WHERE id=?",
                         (now, row["moment_id"]),
                     )
                     self._append_event_tx(db, row["moment_id"], "error", {
@@ -1016,6 +1050,7 @@ class AppStore:
                 return Job(
                     row["id"], row["moment_id"], row["user_id"], row["note"],
                     row["image_path"], row["intent"], context_ids,
+                    row["provenance"], row["music_track"],
                 )
 
     def renew_job(
@@ -1064,8 +1099,8 @@ class AppStore:
             )
             db.execute(
                 "UPDATE app_moments SET status='complete',note=NULL,scene=?,move=?,"
-                "memory_entry_id=?,preview_path=?,image_path=NULL,failure_retryable=NULL,"
-                "updated_at=? WHERE id=?",
+                "memory_entry_id=?,preview_path=?,image_path=NULL,provenance=NULL,"
+                "music_track=NULL,failure_retryable=NULL,updated_at=? WHERE id=?",
                 (scene, move, memory_entry_id, preview_path, _iso(), job.moment_id),
             )
             db.execute(
@@ -1086,7 +1121,8 @@ class AppStore:
         with self._tx() as db:
             db.execute(
                 "UPDATE app_moments SET status='complete',note=NULL,scene=?,move=?,memory_entry_id=?,"
-                "preview_path=?,image_path=NULL,failure_retryable=NULL,updated_at=? WHERE id=?",
+                "preview_path=?,image_path=NULL,provenance=NULL,music_track=NULL,failure_retryable=NULL,"
+                "updated_at=? WHERE id=?",
                 (scene, move, memory_entry_id, preview_path, _iso(), job.moment_id),
             )
             db.execute(
@@ -1107,7 +1143,7 @@ class AppStore:
                 return False
             db.execute(
                 "UPDATE app_moments SET status='failed',note=NULL,image_path=NULL,"
-                "failure_retryable=?,updated_at=? WHERE id=?",
+                "provenance=NULL,music_track=NULL,failure_retryable=?,updated_at=? WHERE id=?",
                 (1 if retryable else 0, _iso(), job.moment_id),
             )
             db.execute(
@@ -1287,6 +1323,93 @@ class AppStore:
             # scheduler rebuilds it from the new preferences on its next cycle.
             db.execute("DELETE FROM app_proactive_slots WHERE user_id=?", (user_id,))
         return self.preferences(user_id)
+
+    # ---- Ephemeral playback context ----------------------------------------------
+
+    def update_playback_state(
+        self,
+        *,
+        user_id: str,
+        device_id: str,
+        session_id: str,
+        sequence: int,
+        state: str,
+        track_json: str,
+        duration_seconds: int | None,
+    ) -> dict:
+        """Apply one discrete player transition without retaining a history."""
+        if state not in {"started", "paused", "resumed", "completed", "stopped"}:
+            raise ValueError("invalid playback state")
+        now = _now()
+        with self._tx() as db:
+            current = db.execute(
+                "SELECT * FROM app_playback_states WHERE user_id=?", (user_id,)
+            ).fetchone()
+            if state == "started":
+                # A new load is authoritative.  A duplicate event for the same
+                # session remains idempotent rather than extending its TTL.
+                if (current and current["session_id"] == session_id
+                        and int(current["sequence"]) >= sequence):
+                    return {
+                        "accepted": False, "active": True,
+                        "expires_at": current["expires_at"],
+                    }
+            else:
+                if not current or current["session_id"] != session_id:
+                    return {"accepted": False, "active": bool(current),
+                            "expires_at": current["expires_at"] if current else None}
+                if int(current["sequence"]) >= sequence:
+                    return {"accepted": False, "active": True,
+                            "expires_at": current["expires_at"]}
+                if current["track_json"] != track_json:
+                    raise Conflict("playback session changed tracks")
+
+            if state in {"completed", "stopped"}:
+                db.execute("DELETE FROM app_playback_states WHERE user_id=?", (user_id,))
+                return {"accepted": True, "active": False, "expires_at": None}
+
+            if state == "paused":
+                ttl = 15 * 60
+            else:
+                ttl = min(2 * 60 * 60, max(30 * 60, (duration_seconds or 1200) + 10 * 60))
+            expires_at = _iso(now + timedelta(seconds=ttl))
+            db.execute(
+                "INSERT INTO app_playback_states"
+                "(user_id,device_id,session_id,sequence,state,track_json,changed_at,expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET "
+                "device_id=excluded.device_id,session_id=excluded.session_id,"
+                "sequence=excluded.sequence,state=excluded.state,track_json=excluded.track_json,"
+                "changed_at=excluded.changed_at,expires_at=excluded.expires_at",
+                (user_id, device_id, session_id, sequence, state, track_json,
+                 _iso(now), expires_at),
+            )
+            return {"accepted": True, "active": True, "expires_at": expires_at}
+
+    def current_playback(self, user_id: str) -> dict | None:
+        with self._tx() as db:
+            db.execute(
+                "DELETE FROM app_playback_states WHERE user_id=? AND expires_at<=?",
+                (user_id, _iso()),
+            )
+            row = db.execute(
+                "SELECT state,track_json,changed_at,expires_at FROM app_playback_states "
+                "WHERE user_id=?", (user_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "state": row["state"],
+            "track": json.loads(row["track_json"]),
+            "changed_at": row["changed_at"],
+            "expires_at": row["expires_at"],
+        }
+
+    def cleanup_playback_states(self) -> int:
+        with self._tx() as db:
+            cur = db.execute(
+                "DELETE FROM app_playback_states WHERE expires_at<=?", (_iso(),)
+            )
+            return cur.rowcount
 
     def update_device(
         self,
