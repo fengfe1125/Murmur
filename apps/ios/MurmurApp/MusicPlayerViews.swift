@@ -55,9 +55,7 @@ struct MusicMiniPlayer: View {
     @ViewBuilder
     private func artwork(for track: MusicTrackAttachmentV1) -> some View {
         let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
-        AsyncImage(url: track.artworkURL) { image in
-            image.resizable().aspectRatio(contentMode: .fill)
-        } placeholder: {
+        CachedArtwork(url: track.artworkURL) {
             shape.fill(MurmurTheme.secondaryInk.opacity(0.18))
         }
         .frame(width: artworkSide, height: artworkSide)
@@ -169,9 +167,7 @@ struct MusicPlayerSheet: View {
     @ViewBuilder
     private func artwork(for track: MusicTrackAttachmentV1) -> some View {
         let shape = RoundedRectangle(cornerRadius: MurmurTheme.corner, style: .continuous)
-        AsyncImage(url: track.artworkURL) { image in
-            image.resizable().aspectRatio(contentMode: .fill)
-        } placeholder: {
+        CachedArtwork(url: track.artworkURL) {
             shape.fill(MurmurTheme.secondaryInk.opacity(0.14))
                 .overlay {
                     Image(systemName: "music.note")

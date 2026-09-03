@@ -38,6 +38,40 @@ enum ListenTogetherTrackRelationship: Equatable, Sendable {
     }
 }
 
+/// One song's cover, loaded once and remembered.
+///
+/// Six places draw a cover and all six used a bare `AsyncImage`, which caches
+/// nothing.  In the transcript's LazyVStack that means every scroll re-issues
+/// the request, so covers blink in and out.  This view keeps them.
+///
+/// It also separates "still loading" from "there is no cover": `AsyncImage`'s
+/// two-closure form routes a 404 and an empty URL into the same placeholder,
+/// which is why a broken cover was indistinguishable from a song that simply
+/// has none.
+struct CachedArtwork<Placeholder: View>: View {
+    let url: URL?
+    var maximumPixels: CGFloat = 320
+    @ViewBuilder var placeholder: () -> Placeholder
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                placeholder()
+            }
+        }
+        .task(id: url) {
+            guard let url else { image = nil; return }
+            image = await MurmurImageCache.shared.remoteImage(
+                for: url, maximumPixels: maximumPixels
+            )
+        }
+    }
+}
+
 /// One song, sitting in the scrollback like any other message.
 ///
 /// It draws only what the sender's snapshot recorded. Nothing here reaches the
@@ -140,9 +174,7 @@ struct MusicCardView: View {
     @ViewBuilder
     private var artwork: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
-        AsyncImage(url: track.artworkURL) { image in
-            image.resizable().aspectRatio(contentMode: .fill)
-        } placeholder: {
+        CachedArtwork(url: track.artworkURL) {
             // A song with no cover still has a shape, so the row does not
             // reflow when the image arrives.
             shape.fill(secondary.opacity(0.18))

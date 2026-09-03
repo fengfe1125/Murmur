@@ -468,9 +468,7 @@ struct NeteaseSharedMusicPreviewView: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 12) {
-                        AsyncImage(url: preview.track.artworkURL) { image in
-                            image.resizable().scaledToFill()
-                        } placeholder: {
+                        CachedArtwork(url: preview.track.artworkURL) {
                             RoundedRectangle(cornerRadius: 11)
                                 .fill(MurmurTheme.accent)
                                 .overlay {
