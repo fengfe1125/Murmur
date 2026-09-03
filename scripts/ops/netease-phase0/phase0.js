@@ -295,7 +295,12 @@ class NeteasePhase0 {
     return {
       state: "active", currentSongId, playStatus: this.room.playStatus,
       progressMs: this.currentProgress(), playlistLength: this.room.playlist.length,
-      inviteUrl: invite.toString(), ...extra,
+      inviteUrl: invite.toString(),
+      // Murmur 的 transport 要按外部房间号寻址，并且要拿服务端自己的序号来
+      // 判断状态有没有倒退。两者本来都只留在进程内，界面用不到，接入才要。
+      roomId: this.room.roomId,
+      serverSeq: this.room.lastServerSeq,
+      ...extra,
     };
   }
 

@@ -1116,10 +1116,13 @@ def _start_listen_together(settings: AppSettings):
     """Start the room manager and its private socket, or return ``(None, None)``.
 
     Rooms are held by this process and nowhere else: no database table, no
-    restart recovery, and a socket only the App API user can open.  The adapter
-    is constructed without a transport, so with the switch on but no reviewed
-    transport injected every room request fails closed with a typed error
-    instead of pretending a room exists.
+    restart recovery, and a socket only the App API user can open.
+
+    The transport is injected only when a protocol base URL is configured.
+    Without one the adapter keeps its fail-closed behaviour: every room request
+    returns a typed error rather than pretending a room exists.  That is what
+    makes `MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL` the real switch — the room
+    flag alone still cannot reach NetEase.
     """
     if not settings.netease_room_experiment_enabled:
         return None, None
@@ -1130,9 +1133,15 @@ def _start_listen_together(settings: AppSettings):
     )
 
     grace = settings.netease_room_disconnect_grace_seconds
+    transport = None
+    if settings.netease_room_protocol_base_url:
+        from .app_netease_room import NeteaseHTTPRoomTransport
+
+        transport = NeteaseHTTPRoomTransport(settings.netease_room_protocol_base_url)
+        log.info("listen-together transport configured")
     manager = ListenTogetherRoomManager(
         ExperimentalNeteaseRoomAdapter(
-            enabled=True, unreachable_timeout_seconds=grace
+            enabled=True, transport=transport, unreachable_timeout_seconds=grace
         ),
         unreachable_timeout_seconds=grace,
     )
