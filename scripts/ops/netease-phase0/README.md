@@ -45,6 +45,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now murmur-netease-phase0
 ```
 
+unit 里带了 `--capability-file`：接口挂在一个随机能力值下面，默认每次启动都换，
+而 Murmur 的 worker 是按固定地址接进来的——不固定住，服务一重启 worker 就一直
+404。有了这个文件，能力值第一次生成后就一直复用，浏览器那个地址也不会变。
+`MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL` 要带上这个前缀，形如
+`http://127.0.0.1:18763/<能力值>`。
+
 这个 unit **不由 `murmur-update` 管理**，也不放进 `infra/deploy/`——那个目录下的每个
 `.service` 都会被更新器安装。代价要知道：更新器不会替它恢复，机器重装或 unit 被删之后
 要人工装回来。它对应的边界记在[回滚计划](../../../docs/operations/netease-poc-rollback-plan-2026-08-31.md)第 4 节。

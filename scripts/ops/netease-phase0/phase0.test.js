@@ -10,6 +10,7 @@ const { safeShape } = require("./inspect-status");
 const { positiveIds } = require("./check-playable");
 const { validateStatus } = require("./soak");
 const { buildCases, safeBaseUrl, summarize } = require("./command-benchmark");
+const { resolveCapability } = require("./server");
 const { sessionCookie } = require("./logout-session");
 const { createFaultableApi } = require("./server");
 
@@ -346,4 +347,38 @@ test("startup cleanup ends a remotely active stale room", async (t) => {
   item.remote.roomId = "stale-room";
   assert.deepEqual(await item.phase0.closeStaleRemoteRoom(), { state: "stale_room_ended" });
   assert.equal(item.remote.inRoom, false);
+});
+
+test("capability stays put across restarts once it is pinned to a file", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "phase0-cap-"));
+  const file = path.join(directory, "capability");
+  try {
+    // 不给文件就每次都换——研究工具要的是一次性地址。
+    assert.notEqual(resolveCapability(""), resolveCapability(""));
+
+    // 给了文件，第一次生成并落盘，之后一直复用：接进 Murmur 之后这个值同时
+    // 是 worker 的接入地址，每次重启换一个就等于每次重启都 404。
+    const first = resolveCapability(file);
+    assert.match(first, /^[A-Za-z0-9_-]{32,64}$/);
+    assert.equal(fs.readFileSync(file, "utf8").trim(), first);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    assert.equal(resolveCapability(file), first);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a capability file with anything unexpected in it is refused", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "phase0-cap-bad-"));
+  const file = path.join(directory, "capability");
+  try {
+    // 能力值直接进 URL 路径。放行一个奇怪的形状，等于把这个端点悄悄
+    // 变成别的东西——宁可起不来。
+    for (const bad of ["", "short", "has/slash/inside/it/and/is/long/enough/x", "a".repeat(80)]) {
+      fs.writeFileSync(file, bad);
+      assert.throws(() => resolveCapability(file), /valid capability/);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

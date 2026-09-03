@@ -29,6 +29,7 @@ ExecStart=/opt/murmur-netease-poc/runtime/node/bin/node \
   --api-root /opt/murmur-netease-poc/vendor/api-enhanced \
   --state-dir /opt/murmur-netease-poc/secrets \
   --runtime-dir /opt/murmur-netease-poc/work/run \
+  --capability-file /opt/murmur-netease-poc/secrets/capability \
   --host 127.0.0.1 \
   --port 18763
 
