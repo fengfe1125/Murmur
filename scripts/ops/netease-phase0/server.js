@@ -157,6 +157,27 @@ function createServer({ phase0, capability, publicDirectory, faultController = n
   });
 }
 
+/// 能力值默认每次启动重新随机——研究工具只要一个一次性的私密地址。
+///
+/// 但接进 Murmur 之后它同时是 worker 的接入地址：每次重启换一个，worker 就会
+/// 一直 404，直到有人手工改配置再重启。给了 --capability-file 就把它固定下来：
+/// 文件在就复用，不在就生成并以 0600 落盘。
+function resolveCapability(capabilityFileArg) {
+  if (!capabilityFileArg) return crypto.randomBytes(24).toString("base64url");
+  const capabilityFile = path.resolve(capabilityFileArg);
+  if (fs.existsSync(capabilityFile)) {
+    const existing = fs.readFileSync(capabilityFile, "utf8").trim();
+    // 只认自己写过的形状：路径里塞进别的东西会变成一个静默的开放端点。
+    if (!/^[A-Za-z0-9_-]{32,64}$/.test(existing)) {
+      throw new Error("capability file does not contain a valid capability");
+    }
+    return existing;
+  }
+  const created = crypto.randomBytes(24).toString("base64url");
+  writePrivateFile(capabilityFile, created);
+  return created;
+}
+
 async function main() {
   const apiRootArg = argument("api-root", "");
   const stateDirectoryArg = argument("state-dir", "");
@@ -177,7 +198,7 @@ async function main() {
   const upstreamApi = apiRequire("./main.js");
   const faultController = createFaultableApi(upstreamApi);
   const QRCode = apiRequire("qrcode");
-  const capability = crypto.randomBytes(24).toString("base64url");
+  const capability = resolveCapability(argument("capability-file", ""));
   const phase0 = new NeteasePhase0({
     api: faultController.api,
     qrToSvg: (value) => QRCode.toString(value, {
@@ -232,4 +253,6 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createFaultableApi, createServer, readJson, sendJson, writePrivateFile };
+module.exports = {
+  createFaultableApi, createServer, readJson, resolveCapability, sendJson, writePrivateFile,
+};
