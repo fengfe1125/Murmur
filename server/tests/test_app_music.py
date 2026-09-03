@@ -1152,6 +1152,56 @@ class MusicWorkerTests(unittest.TestCase):
         self.assertIsNone(row["music_track"])
 
 
+class _StubCompletion:
+    """最小的 chat.completions.create 替身，只回一段 JSON。"""
+
+    def __init__(self, payload: str):
+        self.payload = payload
+
+    def create(self, **kwargs):
+        message = type("M", (), {"content": self.payload})()
+        choice = type("C", (), {"message": message})()
+        return type("R", (), {"choices": [choice]})()
+
+
+class _StubClient:
+    def __init__(self, payload: str):
+        self.chat = type("Chat", (), {"completions": _StubCompletion(payload)})()
+
+
+class MusicPlannerQueryTests(unittest.TestCase):
+    """query 要能真的拿去搜——曲库把词按「与」匹配歌名，词多就是 0 条。"""
+
+    def planner(self, payload: str) -> AppMusicPlanner:
+        return AppMusicPlanner(make_config(), client=_StubClient(payload))
+
+    def test_a_discover_query_keeps_only_the_first_two_words(self):
+        """模型爱写同义词清单，还会被 schema 截断在词中间。只取前两个词。"""
+        payload = json.dumps({
+            "requested": True, "mode": "discover",
+            "query": "安静 歌曲 放松 轻音乐 钢琴曲 助眠 舒缓 氛围音乐 冥想 纯音乐 二",
+            "title": None, "artist": None,
+        })
+        self.assertEqual(self.planner(payload).plan("来首安静的歌").query, "安静 歌曲")
+
+    def test_a_short_discover_query_is_left_alone(self):
+        payload = json.dumps({
+            "requested": True, "mode": "discover", "query": "民谣",
+            "title": None, "artist": None,
+        })
+        self.assertEqual(self.planner(payload).plan("想听点民谣").query, "民谣")
+
+    def test_an_exact_query_is_never_trimmed(self):
+        """点名那条要「歌名 艺人」两段都在，砍掉艺人就会搜出一堆翻唱。"""
+        payload = json.dumps({
+            "requested": True, "mode": "exact",
+            "query": "杀死那个石家庄人 万能青年旅店",
+            "title": "杀死那个石家庄人", "artist": "万能青年旅店",
+        })
+        plan = self.planner(payload).plan("放首杀死那个石家庄人")
+        self.assertEqual(plan.query, "杀死那个石家庄人 万能青年旅店")
+
+
 class MusicProcessorTests(unittest.TestCase):
     """处理器这一层：什么时候去问模型、卡片和文字怎么各就各位。"""
 

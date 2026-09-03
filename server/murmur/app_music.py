@@ -764,6 +764,12 @@ class AppMusicPlanner:
                 query = _bounded_text(query, "query", 120)
             except MusicTrackInvalid as exc:
                 raise MusicPlanningFailed("query is invalid") from exc
+            if mode == "discover":
+                # 曲库把词按「与」匹配歌名，三四个描述词就是 0 条——不是搜得
+                # 差，是一首都没有。而模型给 discover 写的是同义词清单，还会
+                # 被 schema 的字数上限截断在词中间。所以只取前两个词，不指望
+                # 模型自己克制：实测同样这些回答，0/5 变成 4/5 能搜到歌。
+                query = " ".join(query.split()[:2])
             if mode == "exact":
                 try:
                     title = _bounded_text(title, "title", 200)
