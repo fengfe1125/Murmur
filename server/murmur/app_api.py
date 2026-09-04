@@ -39,6 +39,7 @@ from .app_listen_together import (
 )
 from .app_lock import UserOperationLock
 from .app_music import (
+    MAX_MUSIC_SEARCH_RESULTS,
     MusicCatalog,
     MusicCatalogUnavailable,
     MusicError,
@@ -477,6 +478,7 @@ def create_app(
     store: AppStore | None = None,
     authenticator: AppAuthenticator | None = None,
     music_link: MusicLink | None = None,
+    music_catalog: MusicCatalog | None = None,
     room_client: RoomIPCClient | None = None,
 ):
     try:
@@ -509,12 +511,16 @@ def create_app(
     # no NetEase client and opens no socket.  The catalog here is NetEase-only:
     # resolving a shared link must never fall through to another provider.
     owns_music_link = music_link is None
-    music_catalog: MusicCatalog | None = None
+    # Owned separately from the link: a caller may inject only the catalog (the
+    # search route's tests do), and closing something we were handed is not
+    # ours to do.
+    owns_music_catalog = music_catalog is None
     if music_link is None and settings.netease_catalog_enabled:
-        music_catalog = MusicCatalog(
-            [NeteaseCatalogAdapter(base_url=settings.netease_catalog_base_url)],
-            default_provider="netease",
-        )
+        if music_catalog is None:
+            music_catalog = MusicCatalog(
+                [NeteaseCatalogAdapter(base_url=settings.netease_catalog_base_url)],
+                default_provider="netease",
+            )
         music_link = MusicLink(music_catalog)
     if room_client is None and settings.netease_room_experiment_enabled:
         room_client = RoomIPCClient(settings.netease_room_socket_path)
@@ -528,8 +534,8 @@ def create_app(
         finally:
             if owns_music_link and music_link is not None:
                 music_link.close()
-                if music_catalog is not None:
-                    music_catalog.close()
+            if owns_music_catalog and music_catalog is not None:
+                music_catalog.close()
             if owns_store:
                 store.close()
 
@@ -1193,7 +1199,7 @@ def create_app(
                     "id": "audius",
                     "capabilities": ["cards", "native_playback"],
                 })
-            netease_capabilities = ["cards", "external_open", "resolve_shared"]
+            netease_capabilities = ["cards", "external_open", "resolve_shared", "search"]
             if room_enabled:
                 netease_capabilities.append("listen_together")
             providers.append({
@@ -1258,6 +1264,66 @@ def create_app(
         if track is None:
             raise APIError(422, "music_link_absent", "这段文字里没有网易云歌曲链接。")
         return {"track": track}
+
+    @app.post("/v1/music/search")
+    async def search_music(request: Request):
+        """Search the NetEase catalog for songs the person can then send.
+
+        POST rather than GET, and all three reasons carry weight: App Attest
+        signs the exact body bytes, so a query string would sit outside the
+        assertion; the query is text somebody typed and does not belong in a
+        URL or an access log; and `limited_json_body` is the body gate every
+        other music write already goes through.
+
+        Gated on the catalog, not on the room: searching is a catalog
+        capability, and the composer's own picker wants it too.
+        """
+        raw = await limited_json_body(request)
+        auth = await authenticate(request, raw)
+        if music_catalog is None or not netease_catalog_enabled_for(settings, auth.user_id):
+            raise APIError(403, "music_unavailable", "音乐功能未开启。")
+        data = _json(raw)
+        query = data.get("query")
+        if not isinstance(query, str):
+            raise APIError(400, "validation_error", "搜索词无效。")
+        if len(query.encode("utf-8")) > MAX_SHARED_TEXT_BYTES:
+            raise APIError(413, "body_too_large", "搜索词过大。")
+        # Bounded here as well as in the adapter.  `_bounded_text` raises
+        # `MusicTrackInvalid`, which is not in the ladder below and would fall
+        # through to a 502 — and "your query was 300 characters" is not a
+        # bad-gateway.
+        clean = " ".join(query.split())
+        if not 1 <= len(clean) <= 120:
+            raise APIError(400, "validation_error", "搜索词无效。")
+        limit = data.get("limit", MAX_MUSIC_SEARCH_RESULTS)
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            raise APIError(400, "validation_error", "limit 无效。")
+        # Rejected rather than silently clamped.  The catalog caps at five; a
+        # client that asks for twenty, is handed five and is told nothing
+        # builds a pager that never terminates.
+        if not 1 <= limit <= MAX_MUSIC_SEARCH_RESULTS:
+            raise APIError(400, "validation_error", "limit 无效。")
+        try:
+            tracks = await asyncio.to_thread(
+                music_catalog.search,
+                clean,
+                limit,
+                provider="netease",
+                complete=True,
+            )
+        except MusicTrackInvalid as exc:
+            raise APIError(400, "validation_error", "搜索词无效。") from exc
+        except MusicCatalogUnavailable as exc:
+            raise APIError(
+                503, "music_catalog_unavailable", "音乐服务暂时不可用，稍后再试。",
+                retryable=True,
+            ) from exc
+        except MusicError as exc:
+            raise APIError(
+                502, "music_catalog_unavailable", "音乐服务返回了看不懂的内容。"
+            ) from exc
+        # Finding nothing is an answer, not a failure.
+        return {"tracks": tracks}
 
     @app.put("/v1/music/playback-state")
     async def update_playback_state(request: Request):

@@ -345,7 +345,13 @@ class EngineMomentProcessor:
     def _apply_music_to_room(
         self, job: Job, moment: Moment, chosen: dict | None
     ) -> ProcessedMoment | None:
-        """Create a room on an explicit request, or change an active room."""
+        """Create a room for a resolved request, or change an active room.
+
+        Always try the create idempotency key first.  If the worker completed
+        the external create and crashed before persisting its reply, replaying
+        this moment then returns that same create result instead of mistaking
+        the existing room for a reason to send one extra ``play_track``.
+        """
         if (
             self.rooms is None
             or job.user_id not in self.room_user_allowlist
@@ -355,22 +361,27 @@ class EngineMomentProcessor:
             return None
         from .app_listen_together import (
             ListenTogetherError,
-            explicitly_requests_listen_together,
+            RoomConflict,
+            RoomIdempotencyConflict,
         )
 
-        explicit = explicitly_requests_listen_together(job.note)
         try:
-            current = self.rooms.current(user_id=job.user_id, refresh=False)
-            if current is None and not explicit:
-                return None
-            if current is None:
+            try:
                 self.rooms.create(
                     user_id=job.user_id,
                     initial_track=chosen,
                     idempotency_key=f"chat:{job.moment_id}:create",
                 )
                 line = "房间准备好了。点歌曲卡片里的邀请，去网易云加入。"
-            else:
+            except RoomIdempotencyConflict:
+                # The same moment resolving to different tracks is not a new
+                # instruction.  Fail closed instead of turning the replay into
+                # an extra command inside whichever room happens to be active.
+                raise
+            except RoomConflict:
+                current = self.rooms.current(user_id=job.user_id, refresh=False)
+                if current is None:
+                    raise
                 result = self.rooms.command(
                     user_id=job.user_id,
                     room_handle=current.room_handle,

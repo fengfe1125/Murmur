@@ -1090,31 +1090,95 @@ final class ListenTogetherContractTests: XCTestCase {
         )
     }
 
-    func testResponsiveHeaderRulesMatchTheFigmaBreakpoints() {
-        let wide = ListenTogetherHeaderVisibility(availableWidth: 361, isPlaying: true)
-        XCTAssertTrue(wide.showStatusTag)
-        XCTAssertTrue(wide.showLiveBars)
+    func testSongCardRoomRelationshipsHaveUnambiguousActions() {
+        XCTAssertEqual(ListenTogetherTrackRelationship.inactive.actionLabel, "和 Murmur 一起听")
+        XCTAssertEqual(
+            ListenTogetherTrackRelationship.joinableCurrentTrack.actionLabel,
+            "进入网易云一起听"
+        )
+        XCTAssertEqual(ListenTogetherTrackRelationship.currentTrack.actionLabel, "正在一起听")
+        XCTAssertEqual(ListenTogetherTrackRelationship.otherTrack.actionLabel, "换成这首")
+        XCTAssertFalse(ListenTogetherTrackRelationship.currentTrack.actionEnabled)
+        XCTAssertTrue(ListenTogetherTrackRelationship.joinableCurrentTrack.actionEnabled)
+    }
 
-        let compact = ListenTogetherHeaderVisibility(availableWidth: 360, isPlaying: true)
-        XCTAssertFalse(compact.showStatusTag)
-        XCTAssertTrue(compact.showLiveBars)
-
-        let narrowWithBars = ListenTogetherHeaderVisibility(availableWidth: 289, isPlaying: true)
-        XCTAssertFalse(narrowWithBars.showStatusTag)
-        XCTAssertTrue(narrowWithBars.showLiveBars)
-
-        let narrow = ListenTogetherHeaderVisibility(availableWidth: 288, isPlaying: true)
-        XCTAssertFalse(narrow.showStatusTag)
-        XCTAssertFalse(narrow.showLiveBars)
-        XCTAssertFalse(
-            ListenTogetherHeaderVisibility(availableWidth: 393, isPlaying: false).showLiveBars
+    func testSongCardRelationshipUsesTheRoomTrackAndJoinState() {
+        XCTAssertEqual(
+            ListenTogetherTrackRelationship.resolve(
+                track: MusicFixtures.netease,
+                room: room(
+                    state: .waitingForUser,
+                    track: MusicFixtures.netease,
+                    invite: URL(string: "https://music.163.com/listen-together/invite/1")
+                )
+            ),
+            .joinableCurrentTrack
+        )
+        XCTAssertEqual(
+            ListenTogetherTrackRelationship.resolve(
+                track: MusicFixtures.netease,
+                room: room(
+                    state: .connected,
+                    joined: true,
+                    track: MusicFixtures.netease
+                )
+            ),
+            .currentTrack
+        )
+        XCTAssertEqual(
+            ListenTogetherTrackRelationship.resolve(
+                track: MusicFixtures.neteaseOther,
+                room: room(
+                    state: .connected,
+                    joined: true,
+                    track: MusicFixtures.netease
+                )
+            ),
+            .otherTrack
+        )
+        XCTAssertEqual(
+            ListenTogetherTrackRelationship.resolve(
+                track: MusicFixtures.track,
+                room: room(
+                    state: .connected,
+                    joined: true,
+                    track: MusicFixtures.netease
+                )
+            ),
+            .inactive
         )
     }
 
-    func testSongCardRoomRelationshipsHaveUnambiguousActions() {
-        XCTAssertEqual(ListenTogetherTrackRelationship.inactive.actionLabel, "和 Murmur 一起听")
-        XCTAssertEqual(ListenTogetherTrackRelationship.currentTrack.actionLabel, "正在一起听")
-        XCTAssertEqual(ListenTogetherTrackRelationship.otherTrack.actionLabel, "换成这首")
+    func testOnlyANewIncomingNeteaseCardRequestsAnImmediateRoomRefresh() {
+        let incoming = MurmurMessage(
+            author: .murmur, text: "", musicTrack: MusicFixtures.netease
+        )
+        XCTAssertTrue(
+            NeteaseIncomingCardRefresh.shouldRefresh(
+                phase: .responding, message: incoming
+            )
+        )
+        XCTAssertFalse(
+            NeteaseIncomingCardRefresh.shouldRefresh(
+                phase: .complete, message: incoming
+            )
+        )
+        XCTAssertFalse(
+            NeteaseIncomingCardRefresh.shouldRefresh(
+                phase: .responding,
+                message: MurmurMessage(
+                    author: .you, text: "", musicTrack: MusicFixtures.netease
+                )
+            )
+        )
+        XCTAssertFalse(
+            NeteaseIncomingCardRefresh.shouldRefresh(
+                phase: .responding,
+                message: MurmurMessage(
+                    author: .murmur, text: "", musicTrack: MusicFixtures.track
+                )
+            )
+        )
     }
 
     private func decodeRoom(playbackState: String?) throws -> ListenTogetherRoomSnapshotV1 {
@@ -1134,13 +1198,17 @@ final class ListenTogetherContractTests: XCTestCase {
     private func room(
         state: ListenTogetherRoomState,
         joined: Bool = false,
+        track: MusicTrackAttachmentV1? = nil,
+        invite: URL? = nil,
         playback: ListenTogetherPlaybackState = .unknown,
         error: String? = nil
     ) -> ListenTogetherRoomSnapshotV1 {
         .init(
             roomHandle: "room-1",
             state: state,
+            currentTrack: track,
             userJoined: joined,
+            inviteURL: invite,
             updatedAt: "2026-09-01T00:00:00Z",
             errorCode: error,
             playbackState: playback
@@ -1244,9 +1312,29 @@ final class NeteaseMusicModelTests: XCTestCase {
         let model = model(api)
         _ = await model.createRoom(for: MusicFixtures.netease)
         XCTAssertEqual(model.room?.state, .waitingForUser)
-        _ = await model.createRoom(for: MusicFixtures.neteaseOther)
+        let invite = await model.createRoom(for: MusicFixtures.neteaseOther)
         let calls = await api.calls
         XCTAssertEqual(calls, ["create", "command:play_track"], "已经有房间就换歌，不再开一个")
+        XCTAssertNotNil(invite, "还没加入时，换歌后仍应打开同一个邀请")
+    }
+
+    func testAServerCreatedWaitingRoomOpensItsInviteWithoutAnotherCommand() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let waiting = ListenTogetherRoomSnapshotV1(
+            roomHandle: "server-room", state: .waitingForUser,
+            currentTrack: MusicFixtures.netease,
+            inviteURL: URL(string: "https://music.163.com/listen-together/invite/server"),
+            updatedAt: "2026-09-04T00:00:00Z"
+        )
+        await api.setRoom(waiting)
+        let model = model(api)
+        await model.refreshRoom()
+
+        let invite = await model.createRoom(for: MusicFixtures.netease)
+
+        XCTAssertEqual(invite, waiting.inviteURL)
+        let calls = await api.calls
+        XCTAssertEqual(calls, ["current"], "已有同曲房间只开邀请，不重复建房或切歌")
     }
 
     func testACommandThatFailedIsNeverShownAsSynchronised() async throws {
@@ -1379,6 +1467,68 @@ final class NeteasePlayerGuardTests: XCTestCase {
     }
 }
 
+@MainActor
+final class NeteaseSearchModelTests: XCTestCase {
+    func testAnEmptyQueryAsksForNothing() async {
+        let api = ScriptedMurmurAPIClient()
+        let model = NeteaseSearchModel(api: api)
+        model.query = "   "
+        model.search()
+        await settle()
+        XCTAssertEqual(model.phase, .idle)
+        let queries = await api.searchQueries
+        XCTAssertTrue(queries.isEmpty, "空查询不该打到服务端")
+    }
+
+    func testASearchTrimsTheQueryAndKeepsWhatCameBack() async {
+        let api = ScriptedMurmurAPIClient()
+        await api.setSearch(results: [MusicFixtures.netease])
+        let model = NeteaseSearchModel(api: api)
+        model.query = "  夜曲  "
+        model.search()
+        await settle()
+        XCTAssertEqual(model.phase, .results([MusicFixtures.netease]))
+        let queries = await api.searchQueries
+        XCTAssertEqual(queries, ["夜曲"])
+    }
+
+    func testNoResultsIsAnAnswerNotAFailure() async {
+        let api = ScriptedMurmurAPIClient()
+        await api.setSearch(results: [])
+        let model = NeteaseSearchModel(api: api)
+        model.query = "没有这首"
+        model.search()
+        await settle()
+        XCTAssertEqual(model.phase, .results([]))
+    }
+
+    func testAFailureSaysSomethingAndCanBeAskedAgain() async {
+        let api = ScriptedMurmurAPIClient()
+        await api.setSearch(results: [], fails: true)
+        let model = NeteaseSearchModel(api: api)
+        model.query = "夜曲"
+        model.search()
+        await settle()
+        guard case .failed(let message) = model.phase else {
+            return XCTFail("expected a failure, got \(model.phase)")
+        }
+        XCTAssertFalse(message.isEmpty)
+
+        await api.setSearch(results: [MusicFixtures.netease])
+        model.search()
+        await settle()
+        XCTAssertEqual(model.phase, .results([MusicFixtures.netease]))
+        let calls = await api.calls
+        XCTAssertEqual(calls.filter { $0 == "search" }.count, 2, "重试要真的再问一次")
+    }
+
+    private func settle() async {
+        for _ in 0..<10 { await Task.yield() }
+        try? await Task.sleep(for: .milliseconds(50))
+        for _ in 0..<10 { await Task.yield() }
+    }
+}
+
 private actor ScriptedMurmurAPIClient: MurmurAPIClient {
     private(set) var calls: [String] = []
     private var sharedTrack: MusicTrackAttachmentV1?
@@ -1391,9 +1541,25 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
     struct Unused: Error {}
     struct Refused: Error {}
 
+    private var searchResults: [MusicTrackAttachmentV1] = []
+    private var searchFails = false
+    private(set) var searchQueries: [String] = []
+
     func setSharedTrack(_ track: MusicTrackAttachmentV1?) { sharedTrack = track }
+    func setSearch(results: [MusicTrackAttachmentV1], fails: Bool = false) {
+        searchResults = results
+        searchFails = fails
+    }
+
+    func searchMusic(query: String, limit: Int) async throws -> [MusicTrackAttachmentV1] {
+        calls.append("search")
+        searchQueries.append(query)
+        guard !searchFails else { throw Refused() }
+        return searchResults
+    }
     func setFailing(_ value: Bool) { failing = value }
     func setCurrentDelay(_ delay: Duration) { currentDelay = delay }
+    func setRoom(_ value: ListenTogetherRoomSnapshotV1?) { room = value }
     func setNextCommand(
         status: ListenTogetherCommandStatus,
         playback: ListenTogetherPlaybackState
@@ -1441,10 +1607,13 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
         let status = nextCommandStatus
         let playback = nextPlaybackState
         let state: ListenTogetherRoomState = status == .accepted ? .syncing : .connected
+        let prior = room
         let snapshot = ListenTogetherRoomSnapshotV1(
             roomHandle: handle, state: state,
-            currentTrack: track ?? room?.currentTrack, userJoined: true,
+            currentTrack: track ?? prior?.currentTrack,
+            userJoined: command == .playTrack ? (prior?.userJoined ?? false) : true,
             pendingCommand: status == .accepted ? command.rawValue : nil,
+            inviteURL: prior?.inviteURL,
             updatedAt: "2026-08-31T00:00:01Z",
             errorCode: status == .failed ? "command_rejected" : nil,
             playbackState: playback

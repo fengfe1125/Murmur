@@ -621,5 +621,230 @@ class MusicAttachmentGateTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403, response.text)
 
 
+class NeteaseCompleteTests(unittest.TestCase):
+    """`complete()`：给搜索结果补封面，且不动 `search()` 的那条不变量。
+
+    这一组和 `test_search_results_never_become_the_answer_to_a_later_resolve`
+    是一对读的：那条说「搜索结果不能冒充完整的歌」，这里说「要封面就显式地
+    再走一趟详情」。两件事不矛盾，缺一条就会有人把补全塞回 search 里。
+    """
+
+    SEARCH_SONG = {
+        "id": 186016, "name": "夜曲", "duration": 226000,
+        "artists": [{"name": "周杰伦"}], "album": {"name": "十一月的萧邦"},
+    }
+
+    def test_completion_fills_covers_with_one_batched_detail_call(self):
+        detail_urls = []
+
+        def handler(request):
+            if "/api/search/get" in str(request.url):
+                return httpx.Response(200, json={"result": {"songs": [
+                    self.SEARCH_SONG,
+                    {**self.SEARCH_SONG, "id": 186017, "name": "晴天"},
+                ]}})
+            detail_urls.append(str(request.url))
+            return httpx.Response(200, json={"songs": [
+                # 顺序刻意和请求相反：回填必须按 id，不能按位置。
+                {**self.SEARCH_SONG, "id": 186017, "name": "晴天",
+                 "album": {"name": "叶惠美", "picUrl": "https://p1.music.126.net/b.jpg"}},
+                {**self.SEARCH_SONG,
+                 "album": {"name": "十一月的萧邦", "picUrl": "https://p1.music.126.net/a.jpg"}},
+            ]})
+
+        adapter = NeteaseCatalogAdapter(transport=httpx.MockTransport(handler))
+        try:
+            found = adapter.search("夜曲", limit=2)
+            self.assertNotIn("artwork_url", found[0])
+            completed = adapter.complete(found)
+            self.assertEqual(len(detail_urls), 1, "一页结果只该多花一个请求")
+            self.assertIn("186016", detail_urls[0])
+            self.assertIn("186017", detail_urls[0])
+            covers = {t["track_id"]: t.get("artwork_url") for t in completed}
+            self.assertEqual(covers["186016"], "https://p1.music.126.net/a.jpg")
+            self.assertEqual(covers["186017"], "https://p1.music.126.net/b.jpg")
+            # 标题不被详情悄悄改写：补的是缺的东西，不是重新解析一首歌。
+            self.assertEqual([t["title"] for t in completed], ["夜曲", "晴天"])
+        finally:
+            adapter.close()
+
+    def test_completion_writes_the_resolve_cache_so_a_later_resolve_is_free(self):
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            if "/api/search/get" in str(request.url):
+                return httpx.Response(200, json={"result": {"songs": [self.SEARCH_SONG]}})
+            return httpx.Response(200, json={"songs": [{
+                **self.SEARCH_SONG,
+                "album": {"name": "十一月的萧邦", "picUrl": "https://p1.music.126.net/a.jpg"},
+            }]})
+
+        adapter = NeteaseCatalogAdapter(transport=httpx.MockTransport(handler))
+        try:
+            adapter.complete(adapter.search("夜曲", limit=1))
+            self.assertEqual(len(calls), 2)
+            # 补全拿到的就是 detail 那一份，所以写缓存在这里是对的——
+            # 这正是 search 自己不写缓存所保护的东西。
+            resolved = adapter.resolve("186016")
+            self.assertEqual(resolved["artwork_url"], "https://p1.music.126.net/a.jpg")
+            self.assertEqual(len(calls), 2, "resolve 应当命中补全写下的缓存")
+        finally:
+            adapter.close()
+
+    def test_a_catalog_failure_costs_the_cover_not_the_search(self):
+        def handler(request):
+            if "/api/search/get" in str(request.url):
+                return httpx.Response(200, json={"result": {"songs": [self.SEARCH_SONG]}})
+            return httpx.Response(503)
+
+        adapter = NeteaseCatalogAdapter(transport=httpx.MockTransport(handler))
+        try:
+            found = adapter.search("夜曲", limit=1)
+            completed = adapter.complete(found)
+            self.assertEqual(completed, found)
+            self.assertNotIn("artwork_url", completed[0])
+        finally:
+            adapter.close()
+
+    def test_a_non_numeric_id_never_reaches_the_ids_array(self):
+        """ids 是拼进查询参数的，所以只有数字 id 能进去。"""
+        detail_urls = []
+
+        def handler(request):
+            detail_urls.append(str(request.url))
+            return httpx.Response(200, json={"songs": []})
+
+        adapter = NeteaseCatalogAdapter(transport=httpx.MockTransport(handler))
+        try:
+            hostile = {**NETEASE_TRACK, "track_id": "1,2]&x=["}
+            del hostile["artwork_url"]
+            self.assertEqual(adapter.complete([hostile]), [hostile])
+            self.assertEqual(detail_urls, [], "没有可用 id 时不该发请求")
+        finally:
+            adapter.close()
+
+
+class SearchingCatalog:
+    """A catalog double with the search seam the route actually calls."""
+
+    def __init__(self, tracks=None, error=None):
+        self.calls = []
+        self.tracks = [NETEASE_TRACK] if tracks is None else tracks
+        self.error = error
+
+    def resolve(self, provider: str, track_id: str) -> dict:
+        return {**NETEASE_TRACK, "track_id": track_id}
+
+    def search(self, query, limit=5, *, provider=None, complete=False):
+        self.calls.append((query, limit, provider, complete))
+        if self.error is not None:
+            raise self.error
+        return [dict(track) for track in self.tracks[:limit]]
+
+
+class MusicSearchAPITests(unittest.TestCase):
+    """/v1/music/search：选歌器要的那一页。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.store = AppStore(self.root / "murmur.db")
+        self.clients = []
+        self.device = EnrolledClient(
+            self._client(app_settings(self.root)), self.store,
+            app_settings(self.root).development_token,
+        )
+
+    def tearDown(self):
+        for client in self.clients:
+            client.close()
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _client(self, settings, **kwargs) -> TestClient:
+        client = TestClient(create_app(
+            settings, cfg=make_config(settings.memory_db_path), store=self.store,
+            **kwargs,
+        ))
+        self.clients.append(client)
+        return client
+
+    def use(self, *, catalog=None, enabled: bool = True) -> TestClient:
+        settings = app_settings(self.root, netease_catalog_enabled=enabled)
+        self.catalog = catalog or SearchingCatalog()
+        self.device.client = self._client(settings, music_catalog=self.catalog)
+        return self.device.client
+
+    def post(self, client, body):
+        return client.post(
+            "/v1/music/search", headers=self.device.headers(), json=body,
+        )
+
+    def test_the_route_is_closed_until_the_catalog_switch_is_on(self):
+        response = self.post(self.use(enabled=False), {"query": "夜曲"})
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "music_unavailable")
+
+    def test_a_query_comes_back_as_normalised_tracks(self):
+        response = self.post(self.use(), {"query": "  夜曲   周杰伦 "})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["tracks"], [NETEASE_TRACK])
+        # 空白折叠后才交给曲库，且补全是开着的——这一页每行都要给人看。
+        self.assertEqual(self.catalog.calls, [("夜曲 周杰伦", 5, "netease", True)])
+
+    def test_finding_nothing_is_an_answer_not_an_error(self):
+        response = self.post(self.use(catalog=SearchingCatalog(tracks=[])), {"query": "没有这首"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["tracks"], [])
+
+    def test_an_over_long_query_is_a_validation_error_not_a_bad_gateway(self):
+        response = self.post(self.use(), {"query": "夜" * 121})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["error"]["code"], "validation_error")
+        self.assertEqual(self.catalog.calls, [], "越界的查询不该打到曲库")
+
+    def test_an_empty_query_is_refused(self):
+        for body in ({"query": "   "}, {"query": ""}, {"query": 7}, {}):
+            with self.subTest(body=body):
+                response = self.post(self.use(), body)
+                self.assertEqual(response.status_code, 400, response.text)
+
+    def test_asking_for_more_than_the_catalog_gives_is_refused_not_clamped(self):
+        """悄悄钳到 5 会让客户端写出永远停不下来的分页。"""
+        response = self.post(self.use(), {"query": "夜曲", "limit": 20})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["error"]["code"], "validation_error")
+        for bad in (0, -1, True, "5", 2.5):
+            with self.subTest(limit=bad):
+                self.assertEqual(
+                    self.post(self.use(), {"query": "夜曲", "limit": bad}).status_code, 400,
+                )
+
+    def test_a_catalog_outage_is_retryable_and_a_bad_shape_is_not(self):
+        outage = self.post(
+            self.use(catalog=SearchingCatalog(error=MusicCatalogUnavailable("down"))),
+            {"query": "夜曲"},
+        )
+        self.assertEqual(outage.status_code, 503, outage.text)
+        self.assertTrue(outage.json()["error"]["retryable"])
+
+        broken = self.post(
+            self.use(catalog=SearchingCatalog(error=MusicTrackUnavailable("weird"))),
+            {"query": "夜曲"},
+        )
+        self.assertEqual(broken.status_code, 502, broken.text)
+
+    def test_the_config_route_advertises_search_so_the_client_can_offer_it(self):
+        client = self.use()
+        config = client.get("/v1/music/config", headers=self.device.headers())
+        self.assertEqual(config.status_code, 200, config.text)
+        netease = [
+            item for item in config.json()["providers"] if item["id"] == "netease"
+        ]
+        self.assertEqual(len(netease), 1)
+        self.assertIn("search", netease[0]["capabilities"])
+
+
 if __name__ == "__main__":
     unittest.main()

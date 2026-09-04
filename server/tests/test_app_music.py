@@ -28,6 +28,11 @@ from murmur.app_api import (  # noqa: E402
     erase_account,
     music_enabled_for,
 )
+from murmur.app_listen_together import (  # noqa: E402
+    InMemoryRoomAdapter,
+    ListenTogetherRoomManager,
+    RoomTransportUnavailable,
+)
 from murmur.app_music import (  # noqa: E402
     MUSIC_NOT_FOUND_LINE,
     AppMusic,
@@ -68,6 +73,14 @@ TRACK = {
     "canonical_url": "https://audius.co/nova/rainy-night",
     "duration_seconds": 183,
     "explicit": False,
+}
+NETEASE_TRACK = {
+    **TRACK,
+    "provider": "netease",
+    "track_id": "186016",
+    "title": "夜曲",
+    "artists": ["周杰伦"],
+    "canonical_url": "https://music.163.com/song?id=186016",
 }
 
 
@@ -1267,12 +1280,167 @@ class MusicProcessorTests(unittest.TestCase):
         return Job("j1", "m1", "u1", note, None, None, (), None, music_track)
 
     def process(self, job, music, on_bubble=None, playback=None,
-                allowlist=frozenset()):
+                allowlist=frozenset(), rooms=None,
+                room_allowlist=frozenset()):
         processor = EngineMomentProcessor(
             self.cfg, self.root, music=music, playback_state=playback,
             music_user_allowlist=allowlist,
+            rooms=rooms, room_user_allowlist=room_allowlist,
         )
         return processor(job, self.memory, on_bubble or (lambda text: None))
+
+    @staticmethod
+    def room_manager(adapter):
+        return ListenTogetherRoomManager(adapter)
+
+    def test_exact_and_discovery_requests_create_a_room_without_together_words(self):
+        cases = (
+            ("我想听夜曲", MusicPlan(True, "exact", "夜曲 周杰伦", "夜曲", "周杰伦")),
+            ("来首适合下雨天的歌", MusicPlan(True, "discover", "雨天")),
+        )
+        for note, plan in cases:
+            with self.subTest(note=note):
+                adapter = InMemoryRoomAdapter()
+                rooms = self.room_manager(adapter)
+                music = AppMusic(
+                    StubCatalog(results=[NETEASE_TRACK], track=NETEASE_TRACK),
+                    StubPlanner(plan),
+                )
+                result = self.process(
+                    self.job(note), music, rooms=rooms,
+                    room_allowlist=frozenset({"u1"}),
+                )
+                self.assertEqual(result.music_card, NETEASE_TRACK)
+                self.assertEqual(result.reply.say, [
+                    "房间准备好了。点歌曲卡片里的邀请，去网易云加入。"
+                ])
+                self.assertEqual(
+                    rooms.current(user_id="u1", refresh=False).current_track,
+                    NETEASE_TRACK,
+                )
+                self.assertEqual(
+                    [call[0] for call in adapter.calls].count("create"), 1
+                )
+
+    def test_a_request_inside_an_existing_room_switches_that_room(self):
+        adapter = InMemoryRoomAdapter()
+        rooms = self.room_manager(adapter)
+        rooms.create(
+            user_id="u1", initial_track={**NETEASE_TRACK, "track_id": "1"},
+            idempotency_key="existing-room",
+        )
+        music = AppMusic(
+            StubCatalog(results=[NETEASE_TRACK], track=NETEASE_TRACK),
+            StubPlanner(MusicPlan(True, "exact", "夜曲", "夜曲", "周杰伦")),
+        )
+        result = self.process(
+            self.job("我想听夜曲"), music, rooms=rooms,
+            room_allowlist=frozenset({"u1"}),
+        )
+        self.assertEqual(result.reply.say, ["已经换好了。"])
+        self.assertEqual(
+            rooms.current(user_id="u1", refresh=False).current_track,
+            NETEASE_TRACK,
+        )
+        self.assertEqual(
+            [call[:2] for call in adapter.calls],
+            [("create", "existing-room"),
+             ("command", "play_track")],
+        )
+
+    def test_replaying_the_room_creation_moment_has_no_second_side_effect(self):
+        adapter = InMemoryRoomAdapter()
+        rooms = self.room_manager(adapter)
+        music = AppMusic(
+            StubCatalog(results=[NETEASE_TRACK], track=NETEASE_TRACK),
+            StubPlanner(MusicPlan(True, "discover", "雨天")),
+        )
+        job = self.job("来首适合下雨天的歌")
+        for _ in range(2):
+            result = self.process(
+                job, music, rooms=rooms, room_allowlist=frozenset({"u1"})
+            )
+            self.assertEqual(result.reply.say, [
+                "房间准备好了。点歌曲卡片里的邀请，去网易云加入。"
+            ])
+        self.assertEqual(
+            [call[0] for call in adapter.calls], ["create"],
+            "同一 moment 重放不能把已建房间再切一次歌",
+        )
+
+    def test_replaying_a_moment_with_a_different_result_fails_closed(self):
+        adapter = InMemoryRoomAdapter()
+        rooms = self.room_manager(adapter)
+        job = self.job("来首适合下雨天的歌")
+        first_music = AppMusic(
+            StubCatalog(results=[NETEASE_TRACK], track=NETEASE_TRACK),
+            StubPlanner(MusicPlan(True, "discover", "雨天")),
+        )
+        other_track = {**NETEASE_TRACK, "track_id": "2", "title": "晴天"}
+        second_music = AppMusic(
+            StubCatalog(results=[other_track], track=other_track),
+            StubPlanner(MusicPlan(True, "discover", "雨天")),
+        )
+
+        self.process(
+            job, first_music, rooms=rooms, room_allowlist=frozenset({"u1"})
+        )
+        result = self.process(
+            job, second_music, rooms=rooms, room_allowlist=frozenset({"u1"})
+        )
+
+        self.assertEqual(
+            result.reply.say, ["一起听现在没有连上；这首歌我先发给你。"]
+        )
+        self.assertEqual([call[0] for call in adapter.calls], ["create"])
+        self.assertEqual(
+            rooms.current(user_id="u1", refresh=False).current_track,
+            NETEASE_TRACK,
+        )
+
+    def test_room_creation_failure_keeps_the_card_and_tells_the_truth(self):
+        class FailingRooms:
+            def create(self, **_kwargs):
+                raise RoomTransportUnavailable("offline")
+
+        music = AppMusic(
+            StubCatalog(results=[NETEASE_TRACK], track=NETEASE_TRACK),
+            StubPlanner(MusicPlan(True, "exact", "夜曲", "夜曲", "周杰伦")),
+        )
+
+        result = self.process(
+            self.job("我想听夜曲"), music, rooms=FailingRooms(),
+            room_allowlist=frozenset({"u1"}),
+        )
+
+        self.assertEqual(result.music_card, NETEASE_TRACK)
+        self.assertEqual(
+            result.reply.say, ["一起听现在没有连上；这首歌我先发给你。"]
+        )
+
+    def test_room_side_effects_stay_behind_provider_and_user_gates(self):
+        cases = (
+            ("audius", TRACK, frozenset({"u1"})),
+            ("not-allowlisted", NETEASE_TRACK, frozenset({"u2"})),
+        )
+        for label, track, room_allowlist in cases:
+            with self.subTest(case=label):
+                adapter = InMemoryRoomAdapter()
+                rooms = self.room_manager(adapter)
+                music = AppMusic(
+                    StubCatalog(results=[track], track=track),
+                    StubPlanner(MusicPlan(True, "discover", "rainy")),
+                )
+                with patch("murmur.app_worker.respond") as respond:
+                    respond.return_value = Reply(
+                        scene="", move="speak", say=["给你这首。"]
+                    )
+                    result = self.process(
+                        self.job(), music, rooms=rooms,
+                        room_allowlist=room_allowlist,
+                    )
+                self.assertEqual(result.music_card, track)
+                self.assertEqual(adapter.calls, [])
 
     def test_a_requested_song_closes_the_bubble_stream(self):
         """点歌那一轮不流式：崩溃重来不能换歌，也不能重复发卡。"""

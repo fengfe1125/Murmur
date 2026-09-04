@@ -31,6 +31,13 @@ enum MurmurConnectionState: Equatable, Sendable {
         case .offline: "连接异常"
         }
     }
+
+    /// `offline` 带着一句原因，所以 `== .offline` 不成立。用得上它的地方是
+    /// 「这个按钮现在按了也没用」这类判断，那里不关心原因是什么。
+    var isOffline: Bool {
+        if case .offline = self { return true }
+        return false
+    }
 }
 
 struct MurmurFailure: Error, Equatable, Sendable {
@@ -322,6 +329,7 @@ protocol MurmurAPIClient: Sendable {
     func musicAvailability() async throws -> MusicFeatureAvailability
     func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws
     func resolveSharedMusic(text: String, idempotencyKey: String) async throws -> MusicTrackAttachmentV1
+    func searchMusic(query: String, limit: Int) async throws -> [MusicTrackAttachmentV1]
     func createListenTogetherRoom(
         initialTrack: MusicTrackAttachmentV1,
         idempotencyKey: String
@@ -351,6 +359,10 @@ extension MurmurAPIClient {
     func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws {}
 
     func resolveSharedMusic(text: String, idempotencyKey: String) async throws -> MusicTrackAttachmentV1 {
+        throw MurmurFailure(code: "netease_unavailable", message: "网易云音乐功能尚未开启。", retryable: false)
+    }
+
+    func searchMusic(query: String, limit: Int) async throws -> [MusicTrackAttachmentV1] {
         throw MurmurFailure(code: "netease_unavailable", message: "网易云音乐功能尚未开启。", retryable: false)
     }
 

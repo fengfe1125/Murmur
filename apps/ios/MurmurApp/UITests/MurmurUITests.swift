@@ -3,26 +3,47 @@ import UIKit
 
 @MainActor
 final class MurmurUITests: XCTestCase {
-    func testListenTogetherPlayingHeaderAndMenu() throws {
+    /// 聊天页只留一张小卡片：暂停和下一首在手边，其余的在那一整屏里。
+    func testTheChatCardPausesAndSkipsWithoutLeavingTheConversation() throws {
         continueAfterFailure = false
         let app = launchApp(arguments: ["--murmur-stub-netease-playing"])
         let status = app.staticTexts["已连接，正在一起听"]
         XCTAssertTrue(status.waitForExistence(timeout: 5))
 
         let pause = app.buttons["暂停一起听"]
-        let more = app.buttons["更多一起听操作"]
+        let next = app.buttons["下一首"]
         XCTAssertTrue(pause.exists)
-        XCTAssertTrue(more.exists)
-        assertMinimumHitArea(pause)
-        assertMinimumHitArea(more)
-        more.tap()
-        for item in ["上一首", "下一首", "在网易云打开", "结束一起听"] {
-            XCTAssertTrue(app.buttons[item].waitForExistence(timeout: 2), item)
-        }
+        XCTAssertTrue(next.exists)
+        assertMinimumHitArea(settled(pause))
+        assertMinimumHitArea(settled(next))
+        // 那个省略号弹层没有了，它的四行都搬进了 tab。
+        XCTAssertFalse(app.buttons["更多一起听操作"].exists)
+        // 卡片是小的：它不该霸占整条顶栏。
+        XCTAssertLessThan(pause.frame.maxX, app.windows.firstMatch.frame.width - 40)
+        // 聊天还在下面，没有被顶掉。
+        XCTAssertTrue(app.textFields["moment-composer"].exists)
+
         let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = "Listen Together · Playing Menu"
+        attachment.name = "Listen Together · Chat card"
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    /// 点卡片本体就是进「一起听」，两边说的是同一首歌。
+    func testTappingTheCardOpensTheListenTogetherTab() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-netease-playing"])
+        XCTAssertTrue(app.staticTexts["已连接，正在一起听"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-chat"].isSelected)
+
+        app.buttons["打开一起听"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-listenTogether"].isSelected)
+        // 那四个搬过来的动作，现在都在一屏之内够得着。
+        for item in ["上一首", "下一首", "在网易云打开", "结束一起听"] {
+            XCTAssertTrue(app.buttons[item].waitForExistence(timeout: 3), item)
+        }
+        XCTAssertTrue(app.staticTexts["花海 · 周杰伦"].exists)
     }
 
     func testListenTogetherWaitingPausedAndSyncingStatesAreDeterministic() throws {
@@ -32,6 +53,8 @@ final class MurmurUITests: XCTestCase {
             ("--murmur-stub-netease-syncing", "暂停同步中…", "正在同步一起听操作"),
         ] {
             let app = launchApp(arguments: [argument])
+            XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
+            app.buttons["tab-listenTogether"].tap()
             XCTAssertTrue(app.staticTexts[text].waitForExistence(timeout: 5), argument)
             let control = app.buttons[action]
             XCTAssertTrue(control.exists, argument)
@@ -40,9 +63,11 @@ final class MurmurUITests: XCTestCase {
         }
     }
 
-    func testListenTogetherCommandFailureStaysInTheHeaderAndCanRetry() throws {
+    func testListenTogetherCommandFailureStaysOnTheScreenAndCanRetry() throws {
         continueAfterFailure = false
         let app = launchApp(arguments: ["--murmur-stub-netease-command-fails"])
+        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].tap()
         let pause = app.buttons["暂停一起听"]
         XCTAssertTrue(pause.waitForExistence(timeout: 5))
         pause.tap()
@@ -53,11 +78,18 @@ final class MurmurUITests: XCTestCase {
 
     func testListenTogetherTerminalAndOfflineStatesStayDistinct() throws {
         var app = launchApp(arguments: ["--murmur-stub-netease-room-failed"])
+        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].tap()
         XCTAssertTrue(app.staticTexts["邀请已过期，点此重试"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["重新创建一起听邀请"].exists)
+        // 邀请过期时切歌切给谁听？这两颗键不该在。
+        XCTAssertFalse(app.buttons["上一首"].exists)
+        XCTAssertFalse(app.buttons["下一首"].exists)
         app.terminate()
 
         app = launchApp(arguments: ["--murmur-stub-netease-offline"])
+        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].tap()
         XCTAssertTrue(app.staticTexts["Murmur 连接异常"].waitForExistence(timeout: 5))
         let disabled = app.buttons["Murmur 连接异常，控制暂不可用"]
         XCTAssertTrue(disabled.exists)
@@ -187,21 +219,47 @@ final class MurmurUITests: XCTestCase {
             "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge"
         app.launch()
 
+        // 聊天页那半：这是最容易破的几何——两行字加两个 44pt 的目标，在 XXXL
+        // 下必须仍然完整地待在窗口里。
         let pause = app.buttons["暂停一起听"]
-        let more = app.buttons["更多一起听操作"]
+        let next = app.buttons["下一首"]
         XCTAssertTrue(pause.waitForExistence(timeout: 5))
-        XCTAssertTrue(more.exists)
+        XCTAssertTrue(next.exists)
         XCTAssertTrue(pause.isHittable)
-        XCTAssertTrue(more.isHittable)
-        assertMinimumHitArea(pause)
-        assertMinimumHitArea(more)
+        XCTAssertTrue(next.isHittable)
+        assertMinimumHitArea(settled(pause))
+        assertMinimumHitArea(settled(next))
         XCTAssertTrue(app.windows.firstMatch.frame.contains(pause.frame))
-        XCTAssertTrue(app.windows.firstMatch.frame.contains(more.frame))
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(next.frame))
 
-        let attachment = XCTAttachment(screenshot: app.screenshot())
-        attachment.name = "Listen Together · Dark Accessibility XXXL"
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        add({
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "Listen Together · Chat card · Dark AX XXXL"
+            shot.lifetime = .keepAlways
+            return shot
+        }())
+
+        // tab 那半：四格之后每格更窄，标签在 XXXL 下不许把整条 bar 撑破。
+        let stop = app.buttons["tab-listenTogether"]
+        XCTAssertTrue(stop.exists)
+        assertMinimumHitArea(stop)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(stop.frame))
+        stop.tap()
+
+        let primary = app.buttons["暂停一起听"]
+        XCTAssertTrue(primary.waitForExistence(timeout: 5))
+        assertMinimumHitArea(primary)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(primary.frame))
+        let end = app.buttons["结束一起听"]
+        XCTAssertTrue(end.exists)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(end.frame))
+
+        add({
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "Listen Together · Tab · Dark AX XXXL"
+            shot.lifetime = .keepAlways
+            return shot
+        }())
     }
 
     func testAMomentSurvivesAColdLaunch() throws {
@@ -219,6 +277,35 @@ final class MurmurUITests: XCTestCase {
         app.launchArguments = ["--murmur-ui-testing", "--murmur-stub-keyboard-overlap"]
         app.launch()
         XCTAssertTrue(line("今天的风", in: app).waitForExistence(timeout: 10))
+    }
+
+    func testReturningToChatRepeatedlyShowsTheLatestLongTranscriptWithoutScrolling() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-seed-long-transcript"])
+        let newest = line("回到聊天应该立刻看见我", in: app)
+        let composer = app.textFields["moment-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        assertLatestTranscriptRowIsVisible(newest, above: composer, in: app, cycle: 0)
+
+        for cycle in 1...30 {
+            if cycle.isMultiple(of: 2) {
+                app.buttons["tab-me"].tap()
+                XCTAssertTrue(
+                    app.descendants(matching: .any)["build-stamp"].firstMatch.waitForExistence(timeout: 3),
+                    "cycle \(cycle): 我的 did not appear"
+                )
+            } else {
+                app.buttons["tab-onThisDay"].tap()
+                XCTAssertTrue(
+                    app.buttons["onthisday-entry"].waitForExistence(timeout: 3),
+                    "cycle \(cycle): 当年今日 did not appear"
+                )
+            }
+
+            app.buttons["tab-chat"].tap()
+            XCTAssertTrue(composer.waitForExistence(timeout: 3), "cycle \(cycle): chat did not appear")
+            assertLatestTranscriptRowIsVisible(newest, above: composer, in: app, cycle: cycle)
+        }
     }
 
     func testLandscapeComposerRemainsHittableAndCanSend() throws {
@@ -290,11 +377,17 @@ final class MurmurUITests: XCTestCase {
         XCTAssertEqual(composer.label, "这一刻的文字")
         XCTAssertEqual(app.buttons["send-moment"].label, "发送这一刻")
         XCTAssertTrue(app.buttons["添加照片"].exists)
-        // The three stops are named, and the one you are on says so.
+        // The four stops are named, and the one you are on says so.
         XCTAssertEqual(app.buttons["tab-chat"].label, "聊天")
+        XCTAssertEqual(app.buttons["tab-listenTogether"].label, "一起听")
         XCTAssertEqual(app.buttons["tab-onThisDay"].label, "当年今日")
         XCTAssertEqual(app.buttons["tab-me"].label, "我的")
         XCTAssertTrue(app.buttons["tab-chat"].isSelected)
+        // The order is a design decision, and nothing else would catch a
+        // reshuffle: 聊天 · 一起听 · 当年今日 · 我的, left to right.
+        let stops = ["tab-chat", "tab-listenTogether", "tab-onThisDay", "tab-me"]
+        let xs = stops.map { app.buttons[$0].frame.minX }
+        XCTAssertEqual(xs, xs.sorted(), "tab 栏的顺序变了")
         XCTAssertTrue(
             app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "发来眼前的一刻")).firstMatch.exists
         )
@@ -786,6 +879,34 @@ final class MurmurUITests: XCTestCase {
         ) == .completed
     }
 
+    private func assertLatestTranscriptRowIsVisible(
+        _ row: XCUIElement,
+        above composer: XCUIElement,
+        in app: XCUIApplication,
+        cycle: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let deadline = Date().addingTimeInterval(2)
+        var visible = false
+        repeat {
+            let frame = row.frame
+            let window = app.windows.firstMatch.frame
+            visible = row.exists
+                && !frame.isEmpty
+                && frame.intersection(window).height > 1
+                && frame.maxY <= composer.frame.minY + 1
+            if visible { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        } while Date() < deadline
+        XCTAssertTrue(
+            visible,
+            "cycle \(cycle): latest row was not visible before any transcript gesture; row=\(row.frame) composer=\(composer.frame) window=\(app.windows.firstMatch.frame)",
+            file: file,
+            line: line
+        )
+    }
+
     private func waitForSoftwareKeyboard(
         in app: XCUIApplication,
         visible: Bool,
@@ -820,6 +941,25 @@ final class MurmurUITests: XCTestCase {
         ] + (stubKeyboard ? ["--murmur-stub-keyboard-overlap"] : []) + arguments
         app.launch()
         return app
+    }
+
+    /// 量之前先等它不再动。
+    ///
+    /// 小卡片是从那颗 44pt 圆盘弹开成一张卡的（`ListenTogetherCard`），而
+    /// `waitForExistence` 在弹簧还在走的时候就返回了。这不是尺寸本身的问题，
+    /// 只是把动画时机从这条断言里排除掉，免得下次量到一个半路上的数字还得
+    /// 重新查一遍。
+    @discardableResult
+    private func settled(_ element: XCUIElement, timeout: TimeInterval = 3) -> XCUIElement {
+        var last = element.frame
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+            let now = element.frame
+            if now == last { return element }
+            last = now
+        }
+        return element
     }
 
     private func assertMinimumHitArea(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
@@ -1134,6 +1274,11 @@ final class MurmurUITests: XCTestCase {
         // rather than about a Form row that has not been scrolled to yet.
         XCTAssertFalse(app.descendants(matching: .any)["build-stamp"].firstMatch.exists)
         XCTAssertFalse(app.buttons["onthisday-entry"].exists)
+        // 一起听 is the fourth screen and obeys the same rule.  Asserted on
+        // the words it actually draws: an identifier on a container may not
+        // surface as a queryable element, and "the identifier is absent" would
+        // then pass whether or not the screen is there.
+        XCTAssertFalse(app.staticTexts["一起听还没有对你开放"].exists)
 
         app.buttons["tab-me"].tap()
         XCTAssertTrue(
@@ -1151,12 +1296,34 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(app.buttons["tab-chat"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["tab-chat"].isSelected)
         XCTAssertFalse(app.buttons["tab-onThisDay"].isSelected)
+        XCTAssertFalse(app.buttons["tab-listenTogether"].isSelected)
 
         app.buttons["tab-onThisDay"].tap()
         XCTAssertTrue(app.buttons["onthisday-entry"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["tab-onThisDay"].isSelected)
         XCTAssertFalse(app.buttons["tab-chat"].isSelected)
         XCTAssertFalse(app.buttons["tab-me"].isSelected)
+        XCTAssertFalse(app.buttons["tab-listenTogether"].isSelected)
+
+        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(app.staticTexts["一起听"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-listenTogether"].isSelected)
+        XCTAssertFalse(app.buttons["tab-onThisDay"].isSelected)
+    }
+
+    func testTheListenTogetherTabSaysSoWhenTheServerHasNotOpenedIt() throws {
+        // No `--murmur-stub-netease-*` argument, so the stub leaves the room
+        // experiment off.  The stop is still there — it does not appear and
+        // disappear under people — and it explains itself instead of showing
+        // controls that cannot work.
+        let app = launchApp()
+        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(
+            app.staticTexts["一起听还没有对你开放"].waitForExistence(timeout: 5)
+        )
+        XCTAssertFalse(app.buttons["暂停一起听"].exists)
+        XCTAssertFalse(app.buttons["结束一起听"].exists)
     }
 
     /// The photo card surfaces as an image element once its picture is in;

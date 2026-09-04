@@ -75,6 +75,14 @@ final class MusicModule: ObservableObject {
     @Published private(set) var nowPlaying = MusicNowPlaying.none
     @Published private(set) var isNeteaseCatalogAvailable = false
     @Published private(set) var isListenTogetherAvailable = false
+    /// Whether the server has answered about this account at all yet.
+    ///
+    /// `musicAvailability` starts hard-coded to off and is only replaced once
+    /// `bootstrap()` lands, so "off" and "not asked yet" are the same value.
+    /// That window used to be invisible; a permanently visible 一起听 tab can
+    /// be tapped inside it, and telling somebody the feature is not open to
+    /// them and then flipping is worse than a moment of nothing.
+    @Published private(set) var hasAppliedAvailability = false
 
     let netease: NeteaseMusicModel
 
@@ -123,6 +131,7 @@ final class MusicModule: ObservableObject {
         }
         isListenTogetherAvailable = availability.listenTogether?.enabled == true
             && availability.listenTogether?.provider == MusicProvider.netease.rawValue
+        hasAppliedAvailability = true
         let reporting = allowed && availability.playbackReporting
         // Ordered inside one task: whatever the player has been holding since
         // launch is only now allowed to go — or to be dropped.

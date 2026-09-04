@@ -231,8 +231,7 @@ private struct MessageRow: View {
     /// Absent whenever the room experiment is off for this account, which is
     /// how the card knows not to offer a button that cannot work.
     var onListenTogether: ((MusicTrackAttachmentV1) -> Void)?
-    var activeListenTogetherTrackID: String?
-    var hasActiveListenTogetherRoom = false
+    var listenTogetherRoom: ListenTogetherRoomSnapshotV1?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openURL) private var openURL
 
@@ -241,8 +240,7 @@ private struct MessageRow: View {
     private func relationship(
         for track: MusicTrackAttachmentV1
     ) -> ListenTogetherTrackRelationship {
-        guard track.isNetease, hasActiveListenTogetherRoom else { return .inactive }
-        return track.trackID == activeListenTogetherTrackID ? .currentTrack : .otherTrack
+        ListenTogetherTrackRelationship.resolve(track: track, room: listenTogetherRoom)
     }
 
     var body: some View {
@@ -435,8 +433,7 @@ struct MurmurTranscriptView: View {
     var nowPlaying: MusicNowPlaying = .none
     var onPlayMusic: (MusicTrackAttachmentV1) -> Void = { _ in }
     var onListenTogether: ((MusicTrackAttachmentV1) -> Void)?
-    var activeListenTogetherTrackID: String?
-    var hasActiveListenTogetherRoom = false
+    var listenTogetherRoom: ListenTogetherRoomSnapshotV1?
 
     /// Whether the reader is resting on the newest line.  Kept from the
     /// scroll geometry stream; only then may a resize carry the transcript
@@ -474,10 +471,13 @@ struct MurmurTranscriptView: View {
     /// viewport rather than the scrolled content, so a rectangle taken from it
     /// is where the mark is on screen right now.
     fileprivate static let anchorSpace = "murmur-transcript-anchor"
+    /// Retains the destination while a newly rebuilt chat tab lays out its lazy
+    /// rows. A one-shot proxy scroll can arrive before the bottom exists and be
+    /// lost; an edge position remains pending until the scroll view can honor it.
+    @State private var scrollPosition = ScrollPosition(edge: .bottom)
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
+        ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     // Not until the scrollback has been read back: that read
                     // is asynchronous, and shown before it lands the opening
@@ -511,8 +511,7 @@ struct MurmurTranscriptView: View {
                             musicPlayback: message.musicTrack.map(nowPlaying.playback) ?? .stopped,
                             onPlayMusic: onPlayMusic,
                             onListenTogether: onListenTogether,
-                            activeListenTogetherTrackID: activeListenTogetherTrackID,
-                            hasActiveListenTogetherRoom: hasActiveListenTogetherRoom
+                            listenTogetherRoom: listenTogetherRoom
                         )
                         .id(message.id)
                     }
@@ -542,6 +541,7 @@ struct MurmurTranscriptView: View {
                 .padding(.bottom, 12)
                 .frame(maxWidth: .infinity)
             }
+            .scrollPosition($scrollPosition)
             // A chat grows downwards: pinning the anchor keeps the newest line
             // against the composer when the keyboard changes the room's height,
             // instead of leaving it hidden behind the keyboard.
@@ -584,19 +584,19 @@ struct MurmurTranscriptView: View {
                 // put a second clock on the pixels the insertion was already
                 // moving, and those two fighting is what jerked.
                 guard !isRestoring else {
-                    proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                    pinToBottom()
                     return
                 }
-                scrollToBottom(proxy)
+                scrollToBottom()
             }
-            .onChange(of: showsTyping) { _, _ in scrollToBottom(proxy) }
+            .onChange(of: showsTyping) { _, _ in scrollToBottom() }
             // One signal, one animation.  The re-pin below already carries
             // the conversation along as the keyboard changes the room, in
             // step with the keyboard's own clock; the only thing it cannot
             // do is come back from history, which is what this is for.
             // Chasing the keyboard with extra timed scrolls on top of that
             // is what made the motion stutter.
-            .onChange(of: focusPulse) { _, _ in scrollToBottom(proxy, settling: true) }
+            .onChange(of: focusPulse) { _, _ in scrollToBottom(settling: true) }
             // The bottom anchor pins the newest line while the keyboard
             // changes the room's height — when it works.  On a phone the
             // resize reaches the scroll view late, piecemeal, or not at all,
@@ -616,7 +616,7 @@ struct MurmurTranscriptView: View {
 #if DEBUG
                 MurmurDiagnostics.record("scroll dist=\(String(format: "%.1f", distanceFromBottom)) phase=\(scrollPhase) atBottom=\(isAtBottom)")
 #endif
-                repin(distanceFromBottom: distanceFromBottom, proxy: proxy)
+                repin(distanceFromBottom: distanceFromBottom)
             }
             .onScrollPhaseChange { _, phase in
                 scrollPhase = phase
@@ -627,10 +627,13 @@ struct MurmurTranscriptView: View {
             // silent and the very next thing to arrive is not.
             .onChange(of: model.transcriptRestored, initial: true) { _, restored in
                 guard restored, isRestoring else { return }
+                // On a tab return restoration already finished before this view
+                // existed. Reassert the retained edge before ending the silent
+                // restore pass so later inset measurements cannot strand it.
+                pinToBottom()
                 Task { @MainActor in isRestoring = false }
             }
             .onAppear {
-                proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
 #if DEBUG
                 MurmurDiagnostics.startRecordingKeyboard()
 #endif
@@ -640,7 +643,6 @@ struct MurmurTranscriptView: View {
                 MurmurDiagnostics.record("tapped field")
 #endif
             }
-        }
         // Measured against this, not against the scrolled content: a rectangle
         // taken here is where the mark sits in the window right now, which is
         // what the question is placed against.
@@ -736,7 +738,7 @@ struct MurmurTranscriptView: View {
     /// the history is never yanked back down.  Programmatic scrolls are no
     /// obstacle either: every one of them is heading for the newest line
     /// already, so a re-pin only hurries them along.
-    private func repin(distanceFromBottom: CGFloat, proxy: ScrollViewProxy) {
+    private func repin(distanceFromBottom: CGFloat) {
         let fingerOwnsIt = scrollPhase == .tracking
             || scrollPhase == .interacting
             || scrollPhase == .decelerating
@@ -759,17 +761,21 @@ struct MurmurTranscriptView: View {
 #if DEBUG
         MurmurDiagnostics.record("repin dist=\(String(format: "%.1f", distanceFromBottom))")
 #endif
-        proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+        pinToBottom()
+    }
+
+    private func pinToBottom() {
+        scrollPosition.scrollTo(edge: .bottom)
     }
 
     /// Matched to the keyboard's own timing so the two move together rather
     /// than racing.  UIKit raises the keyboard over 0.25s with an ease-out.
-    private func scrollToBottom(_ proxy: ScrollViewProxy, settling: Bool = false) {
+    private func scrollToBottom(settling: Bool = false) {
 #if DEBUG
         MurmurDiagnostics.record("scrollToBottom settling=\(settling)")
 #endif
         withAnimation(.easeOut(duration: 0.25)) {
-            proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+            pinToBottom()
         }
         // Reaching for the field from up in the history is the one case a
         // single pass does not finish: the anchor is far outside what the lazy
@@ -781,7 +787,7 @@ struct MurmurTranscriptView: View {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(300))
             withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+                pinToBottom()
             }
         }
     }

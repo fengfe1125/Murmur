@@ -7,6 +7,7 @@ import SwiftUI
 /// the whole app and everything else a detour off it.  They are siblings now.
 enum MurmurTab: String, CaseIterable, Identifiable {
     case chat
+    case listenTogether
     case onThisDay
     case me
 
@@ -15,6 +16,7 @@ enum MurmurTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .chat: "聊天"
+        case .listenTogether: "一起听"
         case .onThisDay: "当年今日"
         case .me: "我的"
         }
@@ -23,6 +25,7 @@ enum MurmurTab: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .chat: "bubble.left.fill"
+        case .listenTogether: "headphones"
         case .onThisDay: "calendar"
         case .me: "person.fill"
         }
@@ -33,10 +36,25 @@ private struct MurmurTabBarClearanceKey: EnvironmentKey {
     static let defaultValue: CGFloat = 0
 }
 
+/// The way a screen asks the shell to show a different tab.
+///
+/// Mirrors the clearance key above rather than inventing a second idiom: the
+/// selection stays `@State` inside the shell, and what travels down is one
+/// closure.  The spring lives inside that closure, so a caller cannot forget
+/// it and cannot get Reduce Motion wrong — see `MurmurShell.tabs`.
+private struct MurmurTabSelectionKey: EnvironmentKey {
+    static let defaultValue: @MainActor @Sendable (MurmurTab) -> Void = { _ in }
+}
+
 extension EnvironmentValues {
     var murmurTabBarClearance: CGFloat {
         get { self[MurmurTabBarClearanceKey.self] }
         set { self[MurmurTabBarClearanceKey.self] = newValue }
+    }
+
+    var murmurSelectTab: @MainActor @Sendable (MurmurTab) -> Void {
+        get { self[MurmurTabSelectionKey.self] }
+        set { self[MurmurTabSelectionKey.self] = newValue }
     }
 }
 
@@ -48,7 +66,12 @@ extension EnvironmentValues {
 struct MurmurShell: View {
     @ObservedObject var model: MurmurSessionModel
     @ObservedObject var music: MusicModule
+    /// Observed here, not only inside the chat, because the shell owns the room
+    /// poll now: the task's restart key reads the room, and `music` does not
+    /// republish when its `netease` changes.
+    @ObservedObject private var netease: NeteaseMusicModel
     @EnvironmentObject private var notifications: MurmurNotificationBridge
+    @Environment(\.scenePhase) private var scenePhase
     @State private var tab: MurmurTab = .chat
     @State private var showPlayer = false
     /// Window-local keyboard geometry. A second scene owns a second state, so
@@ -62,6 +85,12 @@ struct MurmurShell: View {
     /// when you leave it, and rebuilding this would re-read the library every
     /// time you came back.
     @StateObject private var onThisDay = OnThisDayModel()
+
+    init(model: MurmurSessionModel, music: MusicModule) {
+        self.model = model
+        self.music = music
+        self._netease = ObservedObject(wrappedValue: music.netease)
+    }
 
     var body: some View {
         Group {
@@ -109,6 +138,8 @@ struct MurmurShell: View {
             case .chat:
                 MurmurChatView(model: model, music: music)
                     .environmentObject(notifications)
+            case .listenTogether:
+                ListenTogetherTabView(model: model, music: music)
             case .onThisDay:
                 OnThisDayTabView(model: model, onThisDay: onThisDay)
             case .me:
@@ -117,6 +148,10 @@ struct MurmurShell: View {
             }
         }
         .environment(\.murmurTabBarClearance, barHeight)
+        .environment(\.murmurSelectTab) { next in
+            guard tab != next else { return }
+            withAnimation(reduceMotion ? nil : MurmurTabBar.travel) { tab = next }
+        }
         // The tap that moves the pill runs inside `withAnimation`, and a
         // conditional swap caught by one of those gets SwiftUI's default
         // opacity transition for free — the whole screen would cross-fade
@@ -159,6 +194,42 @@ struct MurmurShell: View {
         .sheet(isPresented: $showPlayer) {
             MusicPlayerSheet(player: music.player)
         }
+        // 一起听的房间轮询住在这里，不在聊天里。
+        //
+        // 一次只有一个 tab 在树上（见上面那段注释），所以挂在聊天上的轮询会
+        // 随着离开聊天一起被取消——站到「一起听」那一格看到的就是一个冻住的
+        // 房间，而聊天里的歌曲卡也会在别的 tab 上停止更新。挂在这里，它跟着
+        // 「已入组、正在用 App」这件事活着，与你正在看哪一格无关。
+        //
+        // 挂在链子末端而不是那个 switch 的 `Group` 上：`Group` 的分支一换，
+        // 挂在它身上的 task 有被当成新节点重建的风险，那就又变回了「切一次
+        // tab 重启一次轮询」。
+        //
+        // 这里是唯一的轮询点。新 tab 和聊天页的小卡片都只观察 `netease`，
+        // 不得再各起一个。
+        .task(id: NeteaseRoomPollingKey(
+            roomHandle: netease.room?.roomHandle,
+            isActive: netease.room?.isActive == true,
+            mayPoll: music.isListenTogetherAvailable && scenePhase == .active
+        )) {
+            guard music.isListenTogetherAvailable, scenePhase == .active else { return }
+            // 没有房间也要问：房间可能是聊天那条路在服务端建起来的，手机这边
+            // 只有问了才知道。原来这里直接退出，于是「和 Murmur 一起听」之后
+            // 顶部什么都不出现。
+            let interval = netease.room?.isActive == true
+                ? NeteaseRoomPolling.active
+                : NeteaseRoomPolling.idle
+            // 先取一次再进循环。原来是先睡后取，第一份状态要等满一个间隔。
+            await netease.refreshRoom()
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+                await netease.refreshRoom()
+            }
+        }
     }
 }
 
@@ -190,6 +261,12 @@ struct MurmurShell: View {
 /// On iOS 26 that one travelling shape is real glass, so it refracts and
 /// wobbles as it goes; before that it is a plain tinted capsule that slides.
 struct MurmurTabBar: View {
+    /// The pill's travel.  Named once because two things write the selection
+    /// now — the stop under the finger, and `murmurSelectTab` from another
+    /// screen — and a pill that springs one way and slides the other reads as
+    /// two different bars.
+    static let travel: Animation = .spring(response: 0.42, dampingFraction: 0.72)
+
     @Binding var selection: MurmurTab
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// One stop's width, measured from the row rather than assumed: the bar is
@@ -241,9 +318,7 @@ struct MurmurTabBar: View {
                     // pill arrives, overshoots a hair and settles, which is what
                     // reads as liquid rather than as a slide.  Reduce Motion
                     // takes the travel away and leaves the colours to change.
-                    withAnimation(
-                        reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.72)
-                    ) {
+                    withAnimation(reduceMotion ? nil : MurmurTabBar.travel) {
                         selection = tab
                     }
                 }
@@ -277,6 +352,12 @@ private struct MurmurTabButton: View {
                     .frame(height: 22)
                 Text(tab.title)
                     .font(MurmurTheme.body(.caption2, weight: isSelected ? .semibold : .regular))
+                    // 四格之后每格从 115pt 掉到 86pt（320pt 屏上是 68pt），
+                    // 而「当年今日」在 XXXL 下要一百多。不给它收，标签会折行
+                    // 把整条 bar 撑高，而每一屏的底部内边距都是从这条 bar 的
+                    // 高度算出来的。
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
             // The glyph and the label stay put and only change colour: the
             // motion belongs to the pill, and two things moving at once reads

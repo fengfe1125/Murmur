@@ -339,8 +339,14 @@ struct MusicPickerView: View {
     }
 }
 
-private struct PickerTrackRow: View {
+/// One song in a list of candidates.
+///
+/// Not file-private: 一起听 shows the same row when you are picking a song for
+/// the room, and the only thing that differs is the word on the button.
+struct PickerTrackRow: View {
     let track: MusicTrackAttachmentV1
+    var actionLabel: String = "发送"
+    var actionName: String = "发送给 Murmur"
     let onSend: () -> Void
     @ScaledMetric(relativeTo: .body) private var artworkSide: CGFloat = 44
 
@@ -361,7 +367,7 @@ private struct PickerTrackRow: View {
             // An explicit button, not a tap on the row: picking a song and
             // sending it to somebody are different decisions, and only one of
             // them can be taken back.
-            Button("发送", action: onSend)
+            Button(actionLabel, action: onSend)
                 .font(MurmurTheme.body(.footnote, weight: .semibold))
                 .foregroundStyle(MurmurTheme.accentInk)
                 .padding(.horizontal, 12)
@@ -372,7 +378,7 @@ private struct PickerTrackRow: View {
         .padding(.vertical, 8)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(track.title)，\(track.artists.joined(separator: "、"))")
-        .accessibilityAction(named: "发送给 Murmur", onSend)
+        .accessibilityAction(named: actionName, onSend)
     }
 
     @ViewBuilder

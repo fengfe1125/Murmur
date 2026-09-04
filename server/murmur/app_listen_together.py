@@ -78,17 +78,6 @@ def parse_room_chat_intent(text: str | None) -> RoomChatIntent | None:
     return None
 
 
-def explicitly_requests_listen_together(text: str | None) -> bool:
-    """Return true only for an affirmative request containing `一起听`."""
-
-    if not isinstance(text, str):
-        return False
-    clean = " ".join(text.strip().split())
-    if not 1 <= len(clean) <= 200 or "一起听" not in clean:
-        return False
-    return not any(word in clean for word in ("结束一起听", "关闭一起听", "退出一起听"))
-
-
 class ListenTogetherError(RuntimeError):
     code = "listen_together_error"
     retryable = False
