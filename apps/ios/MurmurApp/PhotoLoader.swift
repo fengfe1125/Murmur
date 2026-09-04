@@ -132,8 +132,6 @@ actor PhotoLoader {
         return destination
     }
 
-    /// Shared with the transcript, which reads the same files back at whatever
-    /// size the screen actually needs rather than decoding originals whole.
     /// Downsample bytes already in memory.
     ///
     /// The URL form below hands CoreGraphics a path to read.  A cover fetched
@@ -147,6 +145,8 @@ actor PhotoLoader {
         return try thumbnail(from: source, maximumPixels: maximumPixels)
     }
 
+    /// Shared with the transcript, which reads the same files back at whatever
+    /// size the screen actually needs rather than decoding originals whole.
     nonisolated static func downsample(url: URL, maximumPixels: CGFloat) throws -> UIImage {
         let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
         guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {

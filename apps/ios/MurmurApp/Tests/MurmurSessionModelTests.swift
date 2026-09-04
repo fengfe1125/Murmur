@@ -808,13 +808,18 @@ final class MurmurSessionModelTests: XCTestCase {
         let api = FakeMurmurAPIClient()
         let model = MurmurSessionModel(api: api, bubblePacing: .instant)
         await model.bootstrap()
+        // 这一条做的是别的测试三十倍的工作：三十轮写图、编码、上传、等回执。
+        // 用同一个两秒默认预算，在空闲的开发机上够，在跑满的 CI runner 上会
+        // 有某一轮撞满超时——报出来的是「等状态超时」，看着像功能坏了，其实
+        // 只是预算按单轮给的。按轮次给。
+        let perStep: Duration = .seconds(8)
         for index in 1...30 {
             let source = try writeTestJPEG(size: CGSize(width: 64, height: 64), name: "moment-\(index)")
             model.preparePhoto(at: source)
-            try await waitUntil { model.phase == .ready }
+            try await waitUntil(timeout: perStep) { model.phase == .ready }
             model.draftText = "第\(index)刻"
             model.submit()
-            try await waitUntil { model.phase == .complete }
+            try await waitUntil(timeout: perStep) { model.phase == .complete }
         }
         XCTAssertEqual(model.bubbles.count, 1)
         XCTAssertEqual(model.currentNote, "第30刻")
