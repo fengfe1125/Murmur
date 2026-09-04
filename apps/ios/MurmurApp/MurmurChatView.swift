@@ -928,8 +928,8 @@ private struct MomentWorkbench: View {
     @Environment(\.murmurTabBarClearance) private var tabBarClearance
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.openURL) private var openURL
+    @ScaledMetric(relativeTo: .body) private var neteaseShareHeightLimit: CGFloat = 360
 
     init(model: MurmurSessionModel, showCamera: Binding<Bool>, music: MusicModule) {
         self.model = model
@@ -1080,7 +1080,12 @@ private struct MomentWorkbench: View {
                     },
                     onCancel: { netease.discardPreview() }
                 )
-                .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.height(377)])
+                .padding(.top, 20)
+                // A root ScrollView reports its viewport as the fitted ideal
+                // height on compact iPhone. Scale the compact detent with type
+                // and let that ScrollView handle accessibility-size overflow.
+                .presentationDetents([.height(neteaseShareHeightLimit)])
+                .presentationContentInteraction(.scrolls)
                 .presentationDragIndicator(.visible)
                 .presentationBackground(MurmurTheme.paper)
             }
