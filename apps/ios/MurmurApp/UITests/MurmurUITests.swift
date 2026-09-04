@@ -67,15 +67,107 @@ final class MurmurUITests: XCTestCase {
     func testNeteaseShareConfirmationUsesTrustedPreviewAndDoesNotStartARoom() throws {
         continueAfterFailure = false
         let app = launchApp(arguments: ["--murmur-stub-netease-share"])
-        XCTAssertTrue(app.staticTexts["把这首歌发给 Murmur？"].waitForExistence(timeout: 5))
+        let title = app.staticTexts["把这首歌发给 Murmur？"]
+        let review = app.buttons["在网易云里核对"]
+        let cancel = app.buttons["取消"]
+        let confirm = app.buttons["confirm-netease-share"]
+        let window = app.windows.firstMatch
+
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["花海"].exists)
         XCTAssertTrue(app.staticTexts["周杰伦"].exists)
-        XCTAssertTrue(app.buttons["在网易云里核对"].exists)
-        XCTAssertTrue(app.buttons["取消"].exists)
-        XCTAssertTrue(app.buttons["confirm-netease-share"].exists)
+        XCTAssertTrue(review.exists)
+        XCTAssertTrue(cancel.exists)
+        XCTAssertTrue(confirm.exists)
         XCTAssertFalse(app.staticTexts["等待加入 / 点此打开网易云邀请"].exists)
+
+        let screen = window.frame
+        XCTAssertTrue(
+            waitForElementFrame(title, timeout: 5) {
+                $0.minY >= screen.height * 0.57 && $0.minY <= screen.height * 0.75
+            },
+            "the confirmation sheet did not settle into its compact detent"
+        )
+        XCTAssertGreaterThanOrEqual(
+            title.frame.minY,
+            screen.height * 0.57,
+            "the compact confirmation sheet started too high"
+        )
+        XCTAssertLessThanOrEqual(
+            screen.maxY - confirm.frame.maxY,
+            64,
+            "the confirmation sheet left a large empty tail below its actions"
+        )
+        XCTAssertTrue(review.isHittable)
+        XCTAssertTrue(screen.contains(review.frame))
+        for control in [cancel, confirm] {
+            XCTAssertTrue(control.isHittable)
+            XCTAssertTrue(screen.contains(control.frame))
+        }
+
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = "NetEase · Share Confirmation"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        confirm.tap()
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+        let sentCard = app.descendants(matching: .any)["murmur-message-0"].firstMatch
+        XCTAssertTrue(sentCard.waitForExistence(timeout: 5))
+        XCTAssertTrue(sentCard.label.contains("花海"))
+        XCTAssertTrue(sentCard.label.contains("周杰伦"))
+        XCTAssertFalse(app.staticTexts["等待加入 / 点此打开网易云邀请"].exists)
+
+        let sentAttachment = XCTAttachment(screenshot: app.screenshot())
+        sentAttachment.name = "NetEase · Sent Vinyl Card"
+        sentAttachment.lifetime = .keepAlways
+        add(sentAttachment)
+    }
+
+    func testNeteaseShareConfirmationDarkAccessibilityXXXLKeepsActionsReachable() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--murmur-ui-testing",
+            "--murmur-reset-transcript",
+            "--murmur-stub-keyboard-overlap",
+            "--murmur-stub-netease-share",
+            "--murmur-ui-test-dark",
+        ]
+        app.launchEnvironment["AppleInterfaceStyle"] = "Dark"
+        app.launchEnvironment["UIPreferredContentSizeCategoryName"] =
+            "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge"
+        app.launch()
+
+        let title = app.staticTexts["把这首歌发给 Murmur？"]
+        let track = app.staticTexts["花海"]
+        let artist = app.staticTexts["周杰伦"]
+        let cancel = app.buttons["取消"]
+        let confirm = app.buttons["confirm-netease-share"]
+        let screen = app.windows.firstMatch.frame
+
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertTrue(track.exists)
+        XCTAssertTrue(artist.exists)
+        for element in [title, track, artist] {
+            XCTAssertGreaterThanOrEqual(element.frame.minX, screen.minX)
+            XCTAssertLessThanOrEqual(element.frame.maxX, screen.maxX)
+        }
+
+        // Exercise the sheet's own ScrollView even when XCTest reports an
+        // offscreen descendant as hittable.
+        app.swipeUp()
+        for _ in 0..<4 where !confirm.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(cancel.isHittable)
+        XCTAssertTrue(confirm.isHittable)
+        for control in [cancel, confirm] {
+            XCTAssertTrue(screen.contains(control.frame))
+        }
+
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "NetEase · Share Confirmation · Dark Accessibility XXXL"
         attachment.lifetime = .keepAlways
         add(attachment)
     }
@@ -678,6 +770,20 @@ final class MurmurUITests: XCTestCase {
             timeout: timeout
         )
         return result == .completed
+    }
+
+    private func waitForElementFrame(
+        _ element: XCUIElement,
+        timeout: TimeInterval,
+        frameMatches: @escaping (CGRect) -> Bool
+    ) -> Bool {
+        let predicate = NSPredicate { _, _ in
+            element.exists && frameMatches(element.frame)
+        }
+        return XCTWaiter.wait(
+            for: [XCTNSPredicateExpectation(predicate: predicate, object: nil)],
+            timeout: timeout
+        ) == .completed
     }
 
     private func waitForSoftwareKeyboard(
