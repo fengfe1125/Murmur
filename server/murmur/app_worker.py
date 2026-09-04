@@ -1039,10 +1039,13 @@ def run() -> None:
             ), lock_root=settings.data_root,
             delivery_budget_seconds=settings.push_delivery_budget_seconds,
         )
-        rooms, room_ipc = _start_listen_together(settings)
+        # 一份曲库，两个用处：worker 用它选歌，房间用它把上游只给的 songId
+        # 查回一首完整的歌。建两份就是两份缓存、两倍上游请求。
+        catalog = build_catalog(settings)
+        rooms, room_ipc = _start_listen_together(settings, catalog=catalog)
         worker = AppWorker(
             store, cfg, settings,
-            processor=build_processor(cfg, settings, store, rooms=rooms),
+            processor=build_processor(cfg, settings, store, rooms=rooms, catalog=catalog),
             scheduler=scheduler, rooms=rooms,
         )
         try:
@@ -1083,7 +1086,7 @@ def build_catalog(settings: AppSettings):
 
 
 def build_processor(
-    cfg: Config, settings: AppSettings, store: AppStore, *, rooms=None
+    cfg: Config, settings: AppSettings, store: AppStore, *, rooms=None, catalog=None
 ) -> EngineMomentProcessor:
     """The processor this deployment actually runs, music included or not.
 
@@ -1091,7 +1094,8 @@ def build_processor(
     worker on a machine without one behaves exactly as it did before.
     """
     music = None
-    catalog = build_catalog(settings)
+    if catalog is None:
+        catalog = build_catalog(settings)
     if catalog is not None:
         from .app_music import AppMusicPlanner
 
@@ -1112,7 +1116,7 @@ def build_processor(
     )
 
 
-def _start_listen_together(settings: AppSettings):
+def _start_listen_together(settings: AppSettings, *, catalog=None):
     """Start the room manager and its private socket, or return ``(None, None)``.
 
     Rooms are held by this process and nowhere else: no database table, no
@@ -1138,7 +1142,9 @@ def _start_listen_together(settings: AppSettings):
     if settings.netease_room_protocol_base_url:
         from .app_netease_room import NeteaseHTTPRoomTransport
 
-        transport = NeteaseHTTPRoomTransport(settings.netease_room_protocol_base_url)
+        transport = NeteaseHTTPRoomTransport(
+            settings.netease_room_protocol_base_url, catalog=catalog
+        )
         log.info("listen-together transport configured")
     manager = ListenTogetherRoomManager(
         ExperimentalNeteaseRoomAdapter(

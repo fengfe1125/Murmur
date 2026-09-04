@@ -48,8 +48,34 @@ final class MurmurImageCache {
         return image
     }
 
+    /// Fetch and cache a remote image — song covers, not photos.
+    ///
+    /// `AsyncImage` looks like the obvious answer and is the wrong one here:
+    /// the transcript is a LazyVStack, so a row that scrolls out of sight is
+    /// destroyed and its image request starts over from nothing when it comes
+    /// back.  That is why a cover shows up sometimes and not others.
+    func remoteImage(for url: URL, maximumPixels: CGFloat) async -> UIImage? {
+        let key = Self.key(url, maximumPixels)
+        if let hit = cache.object(forKey: key as NSString) { return hit }
+        if let running = inFlight[key] { return await running.value }
+        let task = Task<UIImage?, Never>.detached(priority: .userInitiated) {
+            guard let (data, response) = try? await URLSession.shared.data(from: url),
+                  (response as? HTTPURLResponse)?.statusCode ?? 200 < 400
+            else { return nil }
+            return try? PhotoLoader.downsample(data: data, maximumPixels: maximumPixels)
+        }
+        inFlight[key] = task
+        let image = await task.value
+        inFlight[key] = nil
+        if let image { cache.setObject(image, forKey: key as NSString) }
+        return image
+    }
+
     private static func key(_ url: URL, _ maximumPixels: CGFloat) -> String {
-        "\(url.lastPathComponent)@\(Int(maximumPixels))"
+        // The whole URL, not just the last component.  Local photos are named
+        // by UUID so the tail alone was unique; CDN covers are not — two songs
+        // can easily end in the same filename and swap artwork.
+        "\(url.absoluteString)@\(Int(maximumPixels))"
     }
 }
 

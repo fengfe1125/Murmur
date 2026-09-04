@@ -873,8 +873,24 @@ struct EnrollmentView: View {
     }
 }
 
+/// 房间轮询的节奏。
+///
+/// 每一次轮询在服务端都会变成三个网易云请求，而那是非官方接口、用的是一个
+/// 可丢弃的小号。所以「跟得紧」和「别把账号打进风控」是一对取舍，不能只顾
+/// 前者——这两个数字是取舍的结果，不是随手填的。
+private enum NeteaseRoomPolling {
+    /// 正在一起听：三秒一次，切歌和暂停能在一次呼吸之内跟上。
+    static let active: Duration = .seconds(3)
+    /// 手上没有房间：只是看看别处有没有建起来（聊天那条路会自己建房），
+    /// 服务端这一路不碰网易云，很便宜。
+    static let idle: Duration = .seconds(20)
+}
+
 private struct NeteaseRoomPollingKey: Equatable {
     let roomHandle: String?
+    /// 必须进 key。它本来只在循环条件里，于是房间一变成 failed/ended，循环
+    /// 退出而 key 没变——任务永不重启，界面就永远停在那一刻。
+    let isActive: Bool
     let mayPoll: Bool
 }
 
@@ -1103,15 +1119,21 @@ private struct MomentWorkbench: View {
         }
         .task(id: NeteaseRoomPollingKey(
             roomHandle: netease.room?.roomHandle,
+            isActive: netease.room?.isActive == true,
             mayPoll: music.isListenTogetherAvailable && scenePhase == .active
         )) {
-            while !Task.isCancelled,
-                  music.isListenTogetherAvailable,
-                  scenePhase == .active,
-                  netease.room?.isActive == true
-            {
+            guard music.isListenTogetherAvailable, scenePhase == .active else { return }
+            // 没有房间也要问：房间可能是聊天那条路在服务端建起来的，手机这边
+            // 只有问了才知道。原来这里直接退出，于是「和 Murmur 一起听」之后
+            // 顶部什么都不出现。
+            let interval = netease.room?.isActive == true
+                ? NeteaseRoomPolling.active
+                : NeteaseRoomPolling.idle
+            // 先取一次再进循环。原来是先睡后取，第一份状态要等满一个间隔。
+            await netease.refreshRoom()
+            while !Task.isCancelled {
                 do {
-                    try await Task.sleep(for: .seconds(2))
+                    try await Task.sleep(for: interval)
                 } catch {
                     return
                 }

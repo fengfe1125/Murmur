@@ -378,9 +378,7 @@ private struct PickerTrackRow: View {
     @ViewBuilder
     private var artwork: some View {
         let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-        AsyncImage(url: track.artworkURL) { image in
-            image.resizable().aspectRatio(contentMode: .fill)
-        } placeholder: {
+        CachedArtwork(url: track.artworkURL) {
             shape.fill(MurmurTheme.secondaryInk.opacity(0.16))
         }
         .frame(width: artworkSide, height: artworkSide)
@@ -397,9 +395,7 @@ private struct PlaylistRow: View {
         Button(action: onOpen) {
             HStack(spacing: 12) {
                 let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-                AsyncImage(url: playlist.artworkURL) { image in
-                    image.resizable().aspectRatio(contentMode: .fill)
-                } placeholder: {
+                CachedArtwork(url: playlist.artworkURL) {
                     shape.fill(MurmurTheme.secondaryInk.opacity(0.16))
                 }
                 .frame(width: artworkSide, height: artworkSide)

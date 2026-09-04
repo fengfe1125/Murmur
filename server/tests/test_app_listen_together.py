@@ -533,6 +533,18 @@ class RoomErrorMappingTests(unittest.TestCase):
         self.assertFalse(room_api_error(RoomNotFound("x")).retryable)
 
 
+class RoomIPCTimeoutTests(unittest.TestCase):
+    """这条 socket 上没有纯本地的操作，超时必须按上游的实际代价给。"""
+
+    def test_mutating_calls_get_far_longer_than_a_status_read(self):
+        client = RoomIPCClient("/tmp/does-not-matter.sock")
+        # 读一次状态就是三个并行上游请求，每个自己有十秒预算；建房还要再加上
+        # 曲库校验、建房、换歌单、下发播放、心跳。原来两者都是 2 秒，几乎必然
+        # 超时，而用户看到的是一句和真实原因无关的「一起听暂时不可用」。
+        self.assertGreaterEqual(client.timeout, 10)
+        self.assertGreater(client.create_timeout, client.timeout)
+
+
 def room_secret(root: Path) -> Path:
     """A private bot-session file, because the validator insists on one."""
     secret = root / "netease-bot.json"

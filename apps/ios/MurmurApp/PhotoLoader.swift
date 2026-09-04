@@ -132,6 +132,19 @@ actor PhotoLoader {
         return destination
     }
 
+    /// Downsample bytes already in memory.
+    ///
+    /// The URL form below hands CoreGraphics a path to read.  A cover fetched
+    /// over the network is already Data by then, and writing it to a temporary
+    /// file just to hand back a path would be a round trip for nothing.
+    nonisolated static func downsample(data: Data, maximumPixels: CGFloat) throws -> UIImage {
+        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithData(data as CFData, options as CFDictionary) else {
+            throw MurmurFailure(code: "invalid_image", message: "无法读取这张图片。", retryable: false)
+        }
+        return try thumbnail(from: source, maximumPixels: maximumPixels)
+    }
+
     /// Shared with the transcript, which reads the same files back at whatever
     /// size the screen actually needs rather than decoding originals whole.
     nonisolated static func downsample(url: URL, maximumPixels: CGFloat) throws -> UIImage {
@@ -139,6 +152,12 @@ actor PhotoLoader {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
             throw MurmurFailure(code: "invalid_image", message: "无法读取这张图片。", retryable: false)
         }
+        return try thumbnail(from: source, maximumPixels: maximumPixels)
+    }
+
+    private nonisolated static func thumbnail(
+        from source: CGImageSource, maximumPixels: CGFloat
+    ) throws -> UIImage {
         let thumbnailOptions: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,

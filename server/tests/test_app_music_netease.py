@@ -302,6 +302,42 @@ class MusicLinkTests(unittest.TestCase):
         self.assertEqual(seen, ["y.music.163.com"])
         self.assertEqual(catalog.calls, [("netease", "186016")])
 
+    def test_search_results_never_become_the_answer_to_a_later_resolve(self):
+        """搜索接口不返回 picUrl，所以它的结果不能冒充完整的歌。
+
+        以前 search 会把这份缺封面的版本写进 resolve 缓存，于是同一首歌有没有
+        封面，取决于它是先被搜到还是先被解析——这就是卡片封面「有时候有有时候
+        没有」的服务端那一半。
+        """
+        detail_calls = []
+
+        def handler(request):
+            if "/api/search/get" in str(request.url):
+                # 真实搜索响应里 album 没有 picUrl。
+                return httpx.Response(200, json={"result": {"songs": [{
+                    "id": 186016, "name": "晴天", "duration": 269000,
+                    "artists": [{"name": "周杰伦"}], "album": {"name": "叶惠美"},
+                }]}})
+            detail_calls.append(str(request.url))
+            return httpx.Response(200, json={"songs": [{
+                "id": 186016, "name": "晴天", "duration": 269000,
+                "artists": [{"name": "周杰伦"}],
+                "album": {"name": "叶惠美", "picUrl": "https://p1.music.126.net/cover.jpg"},
+            }]})
+
+        adapter = NeteaseCatalogAdapter(transport=httpx.MockTransport(handler))
+        try:
+            found = adapter.search("晴天", limit=1)
+            self.assertNotIn("artwork_url", found[0])
+            # 关键：这一次必须真的去查详情，而不是拿搜索那份顶。
+            resolved = adapter.resolve("186016")
+            self.assertEqual(
+                resolved["artwork_url"], "https://p1.music.126.net/cover.jpg"
+            )
+            self.assertEqual(len(detail_calls), 1)
+        finally:
+            adapter.close()
+
     def test_the_real_mobile_share_ends_on_y_music_without_redirecting_again(self):
         """手机端分享的真实形状：163cn.tv 跳一次就落在 y.music 的歌曲页。
 
