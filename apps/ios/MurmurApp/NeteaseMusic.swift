@@ -335,6 +335,8 @@ final class NeteaseMusicModel: ObservableObject {
     private var resolvingDraftID: UUID?
     private var roomGeneration = 0
     private var isRefreshingRoom = false
+    /// 有人在单飞期间又要了一次刷新。见 `refreshRoom`。
+    private var refreshAgainRequested = false
 
     init(api: any MurmurAPIClient, draftStore: SharedMusicDraftStore = SharedMusicDraftStore()) {
         self.api = api
@@ -449,11 +451,31 @@ final class NeteaseMusicModel: ObservableObject {
         }
     }
 
+    /// 汇流，不是丢弃。
+    ///
+    /// 空闲轮询二十秒一次，聊天里收到歌曲卡时会再问一次——问的正是刚刚在服务端
+    /// 建好的那个房间。这两次撞上的时候，原来是把后来那次直接扔掉；而在飞的那次
+    /// 是**建房之前**发出的，答案必然是「没有房间」，`roomGeneration` 没变所以照样
+    /// 落地。于是卡片停在「和 Murmur 一起听」，最多要等满一个空闲间隔。
+    ///
+    /// 单飞照旧（同一时刻只有一个请求在外面），但撞上的那次记一笔，等在飞的落地
+    /// 之后补问一遍。补问那次沿用第一个调用方的 `reportFailure`：轮询不报错，
+    /// 而这里唯一的差别只是失败要不要写进 `failureMessage`。
     func refreshRoom(reportFailure: Bool = false) async {
-        guard !isRefreshingRoom else { return }
+        guard !isRefreshingRoom else {
+            refreshAgainRequested = true
+            return
+        }
         isRefreshingRoom = true
-        let generation = roomGeneration
         defer { isRefreshingRoom = false }
+        repeat {
+            refreshAgainRequested = false
+            await performRefresh(reportFailure: reportFailure)
+        } while refreshAgainRequested
+    }
+
+    private func performRefresh(reportFailure: Bool) async {
+        let generation = roomGeneration
         do {
             let snapshot = try await api.currentListenTogetherRoom()
             guard generation == roomGeneration else { return }

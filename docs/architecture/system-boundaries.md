@@ -38,6 +38,10 @@ OAuth 不在服务端：用户的 Audius 令牌只存在手机 Keychain，服务
 一条链接换成服务端重新查回的歌曲，分享文案里的歌名、艺人和封面一律不采信；解析结果
 不进模型、不进 transcript，要由人自己确认后再发。
 
+房间不再只由按钮开出来：白名单账号在聊天里点歌，只要拆解出一首网易云歌曲，
+这一轮就顺带建房或换歌，并在它自己的话后面追加一句固定说明。歌照发，边界不变——
+下面这些约束一条都没松。
+
 一起听是隔离 PoC，四个接口 `POST /v1/listen-together/rooms`、
 `GET /v1/listen-together/rooms/current`、`POST …/{handle}/commands`、
 `DELETE …/{handle}` 都只有在房间开关加非空白名单之后才可用，关闭时统一拒绝。房间只活在

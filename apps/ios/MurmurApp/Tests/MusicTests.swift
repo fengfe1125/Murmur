@@ -1398,8 +1398,34 @@ final class NeteaseMusicModelTests: XCTestCase {
         await model.refreshRoom()
         await first.value
 
+        let overlap = await api.maxCurrentInFlight
+        XCTAssertEqual(overlap, 1, "同一时刻只许有一个 current 在外面")
+    }
+
+    func testARefreshAskedForDuringAPollIsDeferredRatherThanDropped() async throws {
+        // 空闲轮询正在路上时，聊天里到了一张歌曲卡。那次轮询是建房之前发出的，
+        // 答案必然是「没有房间」；卡片这次要是被丢掉，界面就得等满一个空闲
+        // 间隔才知道房间已经开好了。
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        await api.setCurrentDelay(.milliseconds(120))
+
+        let idlePoll = Task { await model.refreshRoom() }
+        try await Task.sleep(for: .milliseconds(20))
+        await api.setRoom(ListenTogetherRoomSnapshotV1(
+            roomHandle: "server-room", state: .waitingForUser,
+            currentTrack: MusicFixtures.netease,
+            inviteURL: URL(string: "https://music.163.com/listen-together/invite/server"),
+            updatedAt: "2026-09-04T00:00:00Z"
+        ))
+        await model.refreshRoom()
+        await idlePoll.value
+
         let currentCalls = await api.calls.filter { $0 == "current" }
-        XCTAssertEqual(currentCalls.count, 1)
+        XCTAssertEqual(currentCalls.count, 2, "第二次刷新不能被丢掉")
+        XCTAssertEqual(model.room?.roomHandle, "server-room")
+        let overlap = await api.maxCurrentInFlight
+        XCTAssertEqual(overlap, 1, "补问要等在飞的那次落地，不是并排再发一个")
     }
 
     func testAnOldRefreshCannotRestoreARoomThatWasClosedWhileItWasInFlight() async throws {
@@ -1537,6 +1563,9 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
     private var nextCommandStatus: ListenTogetherCommandStatus = .synchronized
     private var nextPlaybackState: ListenTogetherPlaybackState = .playing
     private var currentDelay: Duration = .zero
+    private var currentInFlight = 0
+    /// 单飞的证据：这个数字大于 1 就说明两个请求同时在外面。
+    private(set) var maxCurrentInFlight = 0
 
     struct Unused: Error {}
     struct Refused: Error {}
@@ -1594,6 +1623,9 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
         calls.append("current")
         if failing { throw Refused() }
         let snapshot = room
+        currentInFlight += 1
+        maxCurrentInFlight = max(maxCurrentInFlight, currentInFlight)
+        defer { currentInFlight -= 1 }
         if currentDelay > .zero { try await Task.sleep(for: currentDelay) }
         return snapshot
     }
