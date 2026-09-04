@@ -40,7 +40,9 @@ function fakeApi(calls, remote) {
           return { body: { data: { code: 200, profile: { userId: 42 } } } };
         }
         if (name === "song_detail") {
-          return ok({ songs: query.ids.split(",").map((id) => ({ id })) });
+          // dt 是毫秒时长。真实接口一直有，之前被丢掉了——没有它就不知道
+          // 歌什么时候放完。
+          return ok({ songs: query.ids.split(",").map((id) => ({ id, dt: 230_000 })) });
         }
         if (name === "listentogether_room_create") {
           remote.inRoom = true;
@@ -381,4 +383,51 @@ test("a capability file with anything unexpected in it is refused", () => {
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("progress never runs past the end of the song", async () => {
+  const { phase0, advance } = fixture();
+  await phase0.loginStart();
+  await phase0.loginStatus();
+  await phase0.createRoom({ songIds: ["186016"], initialSongId: "186016" });
+
+  // 一首 230 秒的歌，放了 10 分钟。之前这里会如实报第 600 秒——对面的真实
+  // 客户端早就播完了，看到房主停在一个不存在的位置，只能判定同步失败。
+  advance(600_000);
+  const room = phase0.publicRoom();
+  assert.ok(room.progressMs <= 230_000,
+    `进度 ${room.progressMs} 不该超过时长 230000`);
+});
+
+test("a finished track moves on instead of sitting at the end", async () => {
+  const { phase0, calls, advance } = fixture();
+  await phase0.loginStart();
+  await phase0.loginStatus();
+  await phase0.createRoom({ songIds: ["186016", "208948"], initialSongId: "186016" });
+
+  assert.equal(phase0.publicRoom().currentSongId, "186016");
+  // 先消化建房时那条远端命令：远端是权威的，它会把进度重置成命令里的值。
+  await phase0.heartbeatTick();
+  advance(231_000);
+  await phase0.heartbeatTick();
+
+  // 停在结尾不是真实播放器会有的状态：对面放完就进下一首了。
+  assert.equal(phase0.publicRoom().currentSongId, "208948");
+  assert.ok(calls.some(([name, query]) =>
+    name === "listentogether_play_command" && String(query.targetSongId) === "208948"));
+});
+
+test("a single-track room loops rather than freezing at the end", async () => {
+  const { phase0, advance } = fixture();
+  await phase0.loginStart();
+  await phase0.loginStatus();
+  await phase0.createRoom({ songIds: ["186016"], initialSongId: "186016" });
+
+  await phase0.heartbeatTick();
+  advance(231_000);
+  await phase0.heartbeatTick();
+
+  // 只有一首就重放这一首。循环至少是真实客户端能跟上的行为。
+  assert.equal(phase0.publicRoom().currentSongId, "186016");
+  assert.ok(phase0.publicRoom().progressMs < 10_000, "重放之后进度该回到开头");
 });
