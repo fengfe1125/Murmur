@@ -132,14 +132,18 @@ class RoomLifecycleTests(unittest.TestCase):
     def test_the_public_snapshot_carries_no_protocol_identifiers(self):
         adapter = InMemoryRoomAdapter()
         rooms = manager(adapter)
+        # 这个 user_id 必须长到不可能被随机撞上。room_handle 是 24 位
+        # base64url，拿「u1」这种两字符的 id 去做子串匹配，早晚会在某次随机
+        # token 里撞出一个假阳性——CI 上真的撞到过一次。
+        user_id = "user-a1b2c3d4-e5f6-4789-a0b1-c2d3e4f5a6b7"
         snapshot = rooms.create(
-            user_id="u1", initial_track=dict(TRACK), idempotency_key="key-00000001"
+            user_id=user_id, initial_track=dict(TRACK), idempotency_key="key-00000001"
         )
         wire = json.dumps(snapshot.to_wire(), ensure_ascii=False)
         external = next(iter(adapter.rooms))
         self.assertNotIn(external, wire)
         self.assertNotIn("room_ref", wire)
-        self.assertNotIn("u1", wire)
+        self.assertNotIn(user_id, wire)
         self.assertEqual(snapshot.to_wire()["playback_state"], "playing")
 
     def test_old_worker_snapshots_default_to_an_unknown_playback_state(self):

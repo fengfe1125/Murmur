@@ -242,7 +242,7 @@ class NeteasePhase0 {
 
   async createRoom({ songIds, initialSongId }) {
     if (this.room) throw new Phase0Error("room_already_active");
-    const { playlist, initial } = await this.validatePlaylist(songIds, initialSongId);
+    const { playlist, initial, durations } = await this.validatePlaylist(songIds, initialSongId);
     const accountId = await this.accountId();
     const created = await this.api.listentogether_room_create({
       cookie: this.cookieHeader(), timeout: 10_000,
@@ -252,7 +252,7 @@ class NeteasePhase0 {
       throw new Phase0Error("room_create_failed");
     }
     this.room = {
-      roomId: String(roomId), accountId, playlist,
+      roomId: String(roomId), accountId, playlist, durations,
       currentIndex: playlist.indexOf(initial), clientSeq: 1,
       lastServerSeq: 0,
       playStatus: "PLAY", progress: 0, playStartedAt: this.monotonicNow(),
@@ -282,7 +282,14 @@ class NeteasePhase0 {
     const detailBody = requireCode(details, "song_detail");
     const available = new Set((detailBody.songs || []).map((song) => String(song.id)));
     if (!playlist.every((id) => available.has(id))) throw new Phase0Error("song_unavailable");
-    return { playlist, initial };
+    // 时长本来被丢掉了，但没有它就不知道歌什么时候放完——进度会一直往上爬，
+    // 对面看到「3:50 的歌播到第 6 分钟」就判定同步失败。
+    const durations = new Map();
+    for (const song of detailBody.songs || []) {
+      const ms = Number(song?.dt);
+      if (Number.isFinite(ms) && ms > 0) durations.set(String(song.id), Math.floor(ms));
+    }
+    return { playlist, initial, durations };
   }
 
   publicRoom(extra = {}) {
@@ -398,15 +405,33 @@ class NeteasePhase0 {
     return false;
   }
 
+  /// 当前这首歌的时长，拿不到就是 null（不知道就别装作知道）。
+  currentDuration() {
+    if (!this.room) return null;
+    const id = this.room.playlist[this.room.currentIndex];
+    const value = this.room.durations?.get(id);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
   currentProgress() {
     if (!this.room) return 0;
     const room = this.room;
-    if (room.playStatus !== "PLAY" || !Number.isFinite(room.playStartedAt)) {
-      return Math.max(0, Math.floor(room.progress));
+    let value = room.progress;
+    if (room.playStatus === "PLAY" && Number.isFinite(room.playStartedAt)) {
+      value += this.monotonicNow() - room.playStartedAt;
     }
-    return Math.max(0, Math.floor(
-      room.progress + this.monotonicNow() - room.playStartedAt,
-    ));
+    // 上界是歌本身的长度。没有它，进度会一直爬过结尾，对面的真实客户端
+    // 放完这首之后就和房主对不上，显示同步失败。
+    const duration = this.currentDuration();
+    if (duration !== null) value = Math.min(value, duration);
+    return Math.max(0, Math.floor(value));
+  }
+
+  /// 这首放完了没有。时长未知就永远当成没放完——宁可不切，也不要瞎切。
+  currentTrackFinished() {
+    const duration = this.currentDuration();
+    if (duration === null || !this.room || this.room.playStatus !== "PLAY") return false;
+    return this.currentProgress() >= duration;
   }
 
   async sendPlayCommand(commandType, targetSongId, formerSongId = null) {
@@ -429,6 +454,19 @@ class NeteasePhase0 {
     room.progress = nextProgress;
     room.playStatus = nextStatus;
     room.playStartedAt = nextStatus === "PLAY" ? this.monotonicNow() : null;
+  }
+
+  /// 放完一首之后往下走：多首就切下一首，单首就重放这一首。
+  ///
+  /// 「停在结尾」不是一个真实播放器会有的状态——对面放完就走了，房主不动
+  /// 就是同步失败。单首循环至少是一个真实客户端能跟上的行为。
+  async advanceAfterTrackEnd() {
+    const room = this.requireRoom();
+    const former = room.playlist[room.currentIndex];
+    const nextIndex = (room.currentIndex + 1) % room.playlist.length;
+    const target = room.playlist[nextIndex];
+    await this.sendPlayCommand("GOTO", target, former);
+    room.currentIndex = nextIndex;
   }
 
   async sendHeartbeat() {
@@ -458,6 +496,9 @@ class NeteasePhase0 {
       });
       if (!this.room || this.room.roomId !== roomId) return;
       this.applyRemotePlaylist(requireCode(playlist, "playlist_status"));
+      // 一首放完之后要真的往下走。不然进度停在结尾、房主永远卡在同一首，
+      // 对面的真实客户端早就播完进下一首了，两边立刻对不上。
+      if (this.currentTrackFinished()) await this.advanceAfterTrackEnd();
       await this.sendHeartbeat();
       this.heartbeatFailureSince = null;
       return true;
