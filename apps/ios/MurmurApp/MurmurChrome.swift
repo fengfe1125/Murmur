@@ -213,17 +213,17 @@ struct ListenTogetherCard: View {
             ZStack {
                 if let artwork = room?.currentTrack?.artworkURL, isActive {
                     CachedArtwork(url: artwork) {
-                        Circle().fill(MurmurTheme.accent.opacity(0.18))
+                        Circle().fill(MurmurTheme.secondaryInk.opacity(0.14))
                     }
                     .frame(width: 44, height: 44)
                     .clipShape(Circle())
                 } else if isActive {
-                    Circle().fill(MurmurTheme.accent.opacity(0.18))
+                    Circle().fill(MurmurTheme.secondaryInk.opacity(0.14))
                         .frame(width: 44, height: 44)
                         .overlay {
                             Image(systemName: "music.note")
                                 .font(MurmurTheme.body(.subheadline, weight: .medium))
-                                .foregroundStyle(MurmurTheme.accentInk)
+                                .foregroundStyle(MurmurTheme.secondaryInk)
                         }
                 } else {
                     MurmurMark(size: 38).frame(width: 44, height: 44)

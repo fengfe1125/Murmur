@@ -141,7 +141,9 @@ struct ListenTogetherTabView: View {
             Spacer(minLength: 8)
             cover
             VStack(spacing: 4) {
-                Text(netease.room?.trackLine ?? ListenTogetherRoomSnapshotV1.noTrackLine)
+                // 只放歌名。`trackLine` 是给聊天页那张一行卡片用的，它自带
+                // 歌手；在这里用会和下面那行的歌手撞一次。
+                Text(netease.room?.currentTrack?.title ?? ListenTogetherRoomSnapshotV1.noTrackLine)
                     .font(MurmurTheme.display(.title3))
                     .foregroundStyle(MurmurTheme.ink)
                     .multilineTextAlignment(.center)
@@ -180,11 +182,13 @@ struct ListenTogetherTabView: View {
     private var cover: some View {
         let shape = RoundedRectangle(cornerRadius: MurmurTheme.corner, style: .continuous)
         CachedArtwork(url: netease.room?.currentTrack?.artworkURL) {
-            shape.fill(MurmurTheme.accent.opacity(0.18))
+            // 中性灰，不是 accent。这块有 240pt，铺成青色远超 murmur-ui 的
+            // accent 预算，而且和已上线的 `MusicCardView` 占位不是一个样子。
+            shape.fill(MurmurTheme.secondaryInk.opacity(0.14))
                 .overlay {
                     Image(systemName: "music.note")
                         .font(.system(size: 42, weight: .light))
-                        .foregroundStyle(MurmurTheme.accentInk)
+                        .foregroundStyle(MurmurTheme.secondaryInk)
                 }
         }
         .frame(maxWidth: 240, maxHeight: 240)

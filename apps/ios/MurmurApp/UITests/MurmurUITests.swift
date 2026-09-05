@@ -43,7 +43,7 @@ final class MurmurUITests: XCTestCase {
         for item in ["上一首", "下一首", "在网易云打开", "结束一起听"] {
             XCTAssertTrue(app.buttons[item].waitForExistence(timeout: 3), item)
         }
-        XCTAssertTrue(app.staticTexts["花海 · 周杰伦"].exists)
+        XCTAssertTrue(app.staticTexts["花海"].exists)
     }
 
     func testListenTogetherWaitingPausedAndSyncingStatesAreDeterministic() throws {
