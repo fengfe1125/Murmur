@@ -413,9 +413,17 @@ struct ListenTogetherTabView: View {
     }
 
     private func start(_ track: MusicTrackAttachmentV1) {
+        if let current = netease.room, current.isActive,
+           current.currentTrack?.trackID == track.trackID {
+            if !current.userJoined, let invite = current.inviteURL {
+                openURL(invite)
+            }
+            return
+        }
+        guard let action = netease.prepareRoomAction(for: track) else { return }
         Task {
             // nil 表示「你已经在房间里了」，不必再被甩去网易云一次。
-            if let invite = await netease.createRoom(for: track) {
+            if let invite = await netease.performPreparedRoomAction(action) {
                 openURL(invite)
             }
         }

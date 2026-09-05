@@ -1441,6 +1441,27 @@ final class NeteaseMusicModelTests: XCTestCase {
         XCTAssertNotNil(model.room)
     }
 
+    func testPreparedCreateKeepsTheSongBeforeTheRequestStarts() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+
+        guard let action = model.prepareRoomAction(for: MusicFixtures.netease) else {
+            return XCTFail("网易云歌曲应生成建房动作")
+        }
+
+        XCTAssertEqual(
+            model.presentationState(connection: .connected),
+            .creating(MusicFixtures.netease)
+        )
+        XCTAssertEqual(model.displayTrack, MusicFixtures.netease)
+        let requestsBeforeExecution = await api.createRequests
+        XCTAssertEqual(requestsBeforeExecution.count, 0)
+
+        _ = await model.performPreparedRoomAction(action)
+        let requestsAfterExecution = await api.createRequests
+        XCTAssertEqual(requestsAfterExecution.count, 1)
+    }
+
     func testFailedTrackChangeRetriesTheSameTrackRoomAndKey() async throws {
         let api = ScriptedMurmurAPIClient()
         let model = model(api)

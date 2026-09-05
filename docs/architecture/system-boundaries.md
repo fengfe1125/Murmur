@@ -44,9 +44,11 @@ OAuth 不在服务端：用户的 Audius 令牌只存在手机 Keychain，服务
 
 一起听是隔离 PoC，四个接口 `POST /v1/listen-together/rooms`、
 `GET /v1/listen-together/rooms/current`、`POST …/{handle}/commands`、
-`DELETE …/{handle}` 都只有在房间开关加非空白名单之后才可用，关闭时统一拒绝。房间只活在
+`DELETE …/{handle}` 都只有在房间开关加非空白名单之后才可用，关闭时统一拒绝。房间实体只活在
 `murmur-app-worker` 进程内存里，App API 经数据目录下 `0600` 的 Unix socket 调用它，
-不落库、不加 systemd unit、重启不恢复。对外只有 `RoomSnapshotV1`：网易账号、外部
+不落库、不加 systemd unit、重启不恢复。聊天点歌只会在 `app_moments.music_effect`
+保存歌曲、动作、目标 handle、幂等键和结果说明，用于任务重试时重放同一个逻辑动作；
+它不是房间状态，也不能恢复房间。对外只有 `RoomSnapshotV1`：网易账号、外部
 房间 ID、Cookie 和协议序号都不过这条边界，确认不了的命令只会是 `accepted` 或
 `failed`，绝不写成 `synchronized`。详见
 [一起听运行手册](../operations/netease-listen-together-poc-runbook.md)。

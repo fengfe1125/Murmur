@@ -458,19 +458,20 @@ final class NeteaseMusicModel: ObservableObject {
         roomMutation?.track ?? room?.currentTrack
     }
 
-    func createRoom(for track: MusicTrackAttachmentV1) async -> URL? {
+    /// Record the recoverable room action before a picker disappears.
+    ///
+    /// SwiftUI may not start a newly-created `Task` until after the sheet has
+    /// been removed. Keeping this preparation synchronous means the selected
+    /// song and retry key are already visible to the underlying screen.
+    func prepareRoomAction(
+        for track: MusicTrackAttachmentV1
+    ) -> ListenTogetherRetryAction? {
         guard track.isNetease else { return nil }
         if let current = room, current.isActive,
            current.currentTrack?.trackID == track.trackID {
-            // The chat turn may have created this room before its card arrived.
-            // Opening that invitation is a local action; sending play_track
-            // again would mutate a room already playing the requested song.
             failureMessage = nil
-            return current.userJoined ? nil : current.inviteURL
+            return nil
         }
-        // 建房和换歌都会改房间，所以此刻已经在路上的那次轮询讲的都是旧事。
-        // 递增放在两条分支之前：换歌那条以前漏了，回来的旧快照会把刚确认
-        // 的结果盖掉。
         let key = UUID().uuidString.lowercased()
         let action: ListenTogetherRetryAction
         if let current = room, current.isActive {
@@ -481,7 +482,29 @@ final class NeteaseMusicModel: ObservableObject {
         } else {
             action = .create(track: track, idempotencyKey: key)
         }
-        return await perform(action)
+        begin(action)
+        return action
+    }
+
+    func performPreparedRoomAction(
+        _ action: ListenTogetherRetryAction
+    ) async -> URL? {
+        guard roomMutation == action, isChangingRoom else { return nil }
+        return await perform(action, alreadyPrepared: true)
+    }
+
+    func createRoom(for track: MusicTrackAttachmentV1) async -> URL? {
+        guard track.isNetease else { return nil }
+        if let current = room, current.isActive,
+           current.currentTrack?.trackID == track.trackID {
+            // The chat turn may have created this room before its card arrived.
+            // Opening that invitation is a local action; sending play_track
+            // again would mutate a room already playing the requested song.
+            failureMessage = nil
+            return current.userJoined ? nil : current.inviteURL
+        }
+        guard let action = prepareRoomAction(for: track) else { return nil }
+        return await performPreparedRoomAction(action)
     }
 
     /// 汇流，不是丢弃。
@@ -551,12 +574,11 @@ final class NeteaseMusicModel: ObservableObject {
     }
 
     @discardableResult
-    private func perform(_ action: ListenTogetherRetryAction) async -> URL? {
-        roomGeneration += 1
-        isChangingRoom = true
-        roomMutation = action
-        commandStatus = action.command == nil ? nil : .accepted
-        failureMessage = nil
+    private func perform(
+        _ action: ListenTogetherRetryAction,
+        alreadyPrepared: Bool = false
+    ) async -> URL? {
+        if !alreadyPrepared { begin(action) }
         defer { isChangingRoom = false }
         do {
             let snapshot: ListenTogetherRoomSnapshotV1
@@ -588,6 +610,17 @@ final class NeteaseMusicModel: ObservableObject {
             }
             return nil
         }
+    }
+
+    private func begin(_ action: ListenTogetherRetryAction) {
+        // 建房和换歌都会改房间，所以此刻已经在路上的那次轮询讲的都是旧事。
+        // 递增放在两条分支之前：换歌那条以前漏了，回来的旧快照会把刚确认
+        // 的结果盖掉。
+        roomGeneration += 1
+        isChangingRoom = true
+        roomMutation = action
+        commandStatus = action.command == nil ? nil : .accepted
+        failureMessage = nil
     }
 
     @discardableResult

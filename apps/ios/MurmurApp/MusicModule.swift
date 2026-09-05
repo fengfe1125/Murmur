@@ -65,10 +65,9 @@ struct MusicNowPlaying: Equatable, Sendable {
 /// arrives through `apply(_:)` rather than being decided in `init`.
 @MainActor
 final class MusicModule: ObservableObject {
-    /// Whether Murmur's server currently allows this account any music at all.
-    /// Everything on screen hangs off this: with it false there is no entry
-    /// point, no search and no new playback — only the cards already in the
-    /// transcript, which keep their metadata and their Audius link.
+    /// Whether Audius is configured in this build and enabled for the account.
+    /// NetEase link resolution, search and listen-together each use their own
+    /// capability below and must not be inferred from this value.
     @Published private(set) var isAvailable = false
     /// Mirrored off the player so one observer covers both: a screen that holds
     /// the module sees playback change without also subscribing to the player.
