@@ -363,6 +363,8 @@ struct PickerTrackRow: View {
                     .foregroundStyle(MurmurTheme.secondaryInk)
                     .lineLimit(1)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(track.title)，\(track.artists.joined(separator: "、"))")
             Spacer(minLength: 8)
             // An explicit button, not a tap on the row: picking a song and
             // sending it to somebody are different decisions, and only one of
@@ -374,11 +376,10 @@ struct PickerTrackRow: View {
                 .frame(minHeight: MurmurTheme.floatingDisc)
                 .background(MurmurTheme.accent.opacity(0.16), in: Capsule())
                 .buttonStyle(.plain)
+                .accessibilityLabel(actionName)
         }
         .padding(.vertical, 8)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(track.title)，\(track.artists.joined(separator: "、"))")
-        .accessibilityAction(named: actionName, onSend)
+        .accessibilityElement(children: .contain)
     }
 
     @ViewBuilder

@@ -618,6 +618,7 @@ class MomentIntentMigrationTests(unittest.TestCase):
         conn = sqlite3.connect(self.path)
         conn.execute("ALTER TABLE app_moments DROP COLUMN intent")
         conn.execute("ALTER TABLE app_moments DROP COLUMN context_moment_ids")
+        conn.execute("ALTER TABLE app_moments DROP COLUMN music_effect")
         conn.commit()
         conn.close()
 
@@ -631,9 +632,11 @@ class MomentIntentMigrationTests(unittest.TestCase):
             }
             self.assertIn("intent", columns)
             self.assertIn("context_moment_ids", columns)
+            self.assertIn("music_effect", columns)
             row = store.moment_for_user("m1", "u1")
             self.assertIsNone(row["intent"])
             self.assertIsNone(row["context_moment_ids"])
+            self.assertIsNone(row["music_effect"])
 
     def test_a_reading_can_be_queued_against_the_migrated_database(self):
         with AppStore(self.path) as store:

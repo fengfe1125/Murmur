@@ -144,6 +144,7 @@ struct NeteaseRoomPollingKey: Equatable {
 /// 44 长到内容需要的宽度——44 宽的胶囊就是一个圆。
 struct ListenTogetherCard: View {
     let room: ListenTogetherRoomSnapshotV1?
+    let track: MusicTrackAttachmentV1?
     let presentation: ListenTogetherPresentationState
     let onPrimary: () -> Void
     let onNext: () -> Void
@@ -211,7 +212,7 @@ struct ListenTogetherCard: View {
     private var disc: some View {
         Button(action: onOpen) {
             ZStack {
-                if let artwork = room?.currentTrack?.artworkURL, isActive {
+                if let artwork = track?.artworkURL, isActive {
                     CachedArtwork(url: artwork) {
                         Circle().fill(MurmurTheme.secondaryInk.opacity(0.14))
                     }
@@ -246,7 +247,7 @@ struct ListenTogetherCard: View {
     private var lines: some View {
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(room?.currentTrack?.title ?? ListenTogetherRoomSnapshotV1.noTrackLine)
+                Text(track?.title ?? ListenTogetherRoomSnapshotV1.noTrackLine)
                     .font(MurmurTheme.body(.subheadline, weight: .medium))
                     .foregroundStyle(MurmurTheme.ink)
                     .lineLimit(1)
@@ -261,8 +262,14 @@ struct ListenTogetherCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(MurmurPressStyle())
-        .accessibilityLabel("正在一起听 \(room?.trackLine ?? ListenTogetherRoomSnapshotV1.noTrackLine)")
+        .accessibilityLabel("正在一起听 \(trackLine)")
         .accessibilityHint("轻点打开一起听")
+    }
+
+    private var trackLine: String {
+        guard let track else { return ListenTogetherRoomSnapshotV1.noTrackLine }
+        guard let artist = track.artists.first, !artist.isEmpty else { return track.title }
+        return "\(track.title) · \(artist)"
     }
 }
 

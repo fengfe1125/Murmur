@@ -76,6 +76,37 @@ final class MurmurUITests: XCTestCase {
         XCTAssertFalse(app.alerts["网易云音乐"].exists)
     }
 
+    func testListenTogetherCreateFailureKeepsTheSongAndOffersRetry() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-netease-create-fails"])
+        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].tap()
+        let choose = app.buttons["选一首歌"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 5))
+        choose.tap()
+
+        let field = app.textFields["netease-search-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("花海\n")
+        let start = app.buttons["和 Murmur 一起听"].firstMatch
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        start.tap()
+
+        XCTAssertTrue(app.staticTexts["花海"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["没有建好一起听，请再试一次。"].exists)
+        let retry = app.buttons["重新建房"]
+        XCTAssertTrue(retry.exists)
+        assertMinimumHitArea(retry)
+    }
+
+    func testListenTogetherSearchCTARequiresTheSearchCapability() throws {
+        let app = launchApp(arguments: ["--murmur-stub-netease-no-search"])
+        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(app.staticTexts["选歌暂不可用"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["选一首歌"].exists)
+    }
+
     func testListenTogetherTerminalAndOfflineStatesStayDistinct() throws {
         var app = launchApp(arguments: ["--murmur-stub-netease-room-failed"])
         XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
