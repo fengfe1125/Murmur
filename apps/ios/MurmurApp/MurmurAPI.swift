@@ -221,6 +221,18 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         return response.track
     }
 
+    func searchMusic(query: String, limit: Int) async throws -> [MusicTrackAttachmentV1] {
+        let body = try encoder.encode(SearchMusicRequest(query: query, limit: limit))
+        let response: SearchMusicResponseV1 = try await send(
+            path: "/v1/music/search",
+            method: "POST",
+            body: body,
+            contentType: "application/json",
+            authenticated: true
+        )
+        return response.tracks
+    }
+
     func createListenTogetherRoom(
         initialTrack: MusicTrackAttachmentV1,
         idempotencyKey: String
@@ -757,6 +769,11 @@ private struct ChallengeRequest: Encodable {
     let purpose: String
     let keyID: String?
     enum CodingKeys: String, CodingKey { case purpose; case keyID = "key_id" }
+}
+
+private struct SearchMusicRequest: Encodable {
+    let query: String
+    let limit: Int
 }
 
 private struct ResolveSharedMusicRequest: Encodable {

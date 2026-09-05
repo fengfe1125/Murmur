@@ -44,7 +44,6 @@ from murmur.app_listen_together import (  # noqa: E402
     RoomSnapshotV1,
     RoomTransportUnavailable,
     _room_from_wire,
-    explicitly_requests_listen_together,
     parse_room_chat_intent,
 )
 from murmur.app_settings import AppSettings  # noqa: E402
@@ -83,10 +82,6 @@ class RoomChatIntentTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(parse_room_chat_intent(text))
 
-    def test_room_creation_requires_affirmative_together_language(self):
-        self.assertTrue(explicitly_requests_listen_together("和我一起听一首夜曲"))
-        self.assertFalse(explicitly_requests_listen_together("结束一起听"))
-        self.assertFalse(explicitly_requests_listen_together("给我放首歌"))
 OTHER_TRACK = {**TRACK, "track_id": "186017", "title": "反方向的钟"}
 
 

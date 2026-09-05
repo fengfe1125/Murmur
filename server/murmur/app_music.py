@@ -31,6 +31,9 @@ TRACK_REQUIRED = frozenset({
 })
 MAX_MUSIC_TRACK_BYTES = 8 * 1024
 MUSIC_PROVIDERS = frozenset({"audius", "netease"})
+# 一页搜索结果的上限。适配器和 App API 共用这一个数：两边各写一个 5，改一处
+# 就会变成「客户端要 10、服务端悄悄给 5」。
+MAX_MUSIC_SEARCH_RESULTS = 5
 
 
 class MusicError(RuntimeError):
@@ -261,9 +264,21 @@ class MusicCatalog:
         limit: int = 5,
         *,
         provider: str | None = None,
+        complete: bool = False,
     ) -> list[dict]:
+        """`complete=True` 让适配器有机会补齐搜索结果缺的字段。
+
+        默认关着：聊天那条点歌路只需要挑一首，挑中之后 `AppMusic._complete`
+        会单独解析那一首，为一整页结果补封面是白花请求。开着它的是 App 的
+        选歌器——那一页每一行都要给人看。
+        """
         selected = provider or self.default_provider
-        tracks = self._adapter(selected).search(query, limit=limit)
+        adapter = self._adapter(selected)
+        tracks = adapter.search(query, limit=limit)
+        if complete:
+            completer = getattr(adapter, "complete", None)
+            if callable(completer):
+                tracks = completer(tracks)
         return [self._checked(selected, track) for track in tracks]
 
     def get_track(self, track_id: str) -> dict:
@@ -430,7 +445,7 @@ class AudiusCatalogAdapter:
 
     def search_tracks(self, query: str, limit: int = 5) -> list[dict]:
         query = _bounded_text(query, "query", 120)
-        limit = max(1, min(int(limit), 5))
+        limit = max(1, min(int(limit), MAX_MUSIC_SEARCH_RESULTS))
         cache_key = " ".join(query.casefold().split())
         now = time.monotonic()
         with self._lock:
@@ -634,7 +649,7 @@ class NeteaseCatalogAdapter:
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
         query = _bounded_text(query, "query", 120)
-        limit = max(1, min(int(limit), 5))
+        limit = max(1, min(int(limit), MAX_MUSIC_SEARCH_RESULTS))
         cache_key = " ".join(query.casefold().split())
         now = time.monotonic()
         with self._lock:
@@ -679,6 +694,71 @@ class NeteaseCatalogAdapter:
 
     def search_tracks(self, query: str, limit: int = 5) -> list[dict]:
         return self.search(query, limit=limit)
+
+    def complete(self, tracks: list[dict]) -> list[dict]:
+        """给搜索结果补上封面。
+
+        搜索接口不返回 picUrl，只有 song/detail 有——`search` 因此刻意不写
+        resolve 缓存（见它里面那段注释）。补全是一道独立的、显式的工序：它
+        拿到的正是 detail 那一份，所以在这里写缓存是对的，两件事不矛盾。
+        把补全塞进 `search` 里则会让那条不变量无处可守。
+
+        批量取：detail 收的是一个 id 数组，所以一页搜索结果最多只多花一个
+        请求。按 id 回填而不是按位置——接口既不保证顺序也不保证每个 id 都有
+        回应，缺的那几首保持没有封面即可。
+
+        尽力而为：补不上就原样返回。少一张封面是小事，为此让整轮搜索失败
+        才是大事。
+        """
+        fill: dict[str, dict] = {}
+        pending: list[str] = []
+        for track in tracks:
+            if track.get("artwork_url"):
+                continue
+            track_id = track.get("track_id")
+            # 只放数字 id 进 ids 数组。网易云的 id 本来就是数字，而这串东西
+            # 是要拼进查询参数的——把「像 id 的任意文本」拼进去就是一个注入口。
+            if not isinstance(track_id, str) or not track_id.isdigit():
+                continue
+            found, cached = self._cached(track_id)
+            if found and isinstance(cached, dict) and cached.get("artwork_url"):
+                fill[track_id] = cached
+            else:
+                pending.append(track_id)
+
+        if pending:
+            try:
+                payload = self._get(
+                    "/api/song/detail", {"ids": "[" + ",".join(pending) + "]"}
+                )
+            except MusicError:
+                payload = None
+            songs = payload.get("songs") if isinstance(payload, dict) else None
+            for song in songs if isinstance(songs, list) else []:
+                if not self._api_track_available(song):
+                    continue
+                try:
+                    detail = self._normalise_api_track(song)
+                except MusicCatalogUnavailable:
+                    continue
+                self._remember(detail["track_id"], detail)
+                if detail.get("artwork_url"):
+                    fill[detail["track_id"]] = detail
+
+        if not fill:
+            return tracks
+        completed: list[dict] = []
+        for track in tracks:
+            detail = fill.get(track.get("track_id"))
+            if detail is None or track.get("artwork_url"):
+                completed.append(track)
+                continue
+            # 只取封面。detail 的标题和作者不该悄悄盖掉搜索那一份——这里补的
+            # 是缺的东西，不是重新解析一首歌。
+            merged = dict(track)
+            merged["artwork_url"] = detail["artwork_url"]
+            completed.append(merged)
+        return completed
 
 
 MUSIC_REQUEST_SCHEMA = {

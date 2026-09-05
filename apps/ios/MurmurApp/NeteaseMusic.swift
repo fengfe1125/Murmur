@@ -49,6 +49,10 @@ struct ResolveSharedMusicResponseV1: Codable, Equatable, Sendable {
     let track: MusicTrackAttachmentV1
 }
 
+struct SearchMusicResponseV1: Codable, Equatable, Sendable {
+    let tracks: [MusicTrackAttachmentV1]
+}
+
 enum ListenTogetherRoomState: String, Codable, Sendable {
     case creating
     case waitingForUser = "waiting_for_user"
@@ -187,6 +191,120 @@ enum ListenTogetherPresentationState: Equatable, Sendable {
     }
 }
 
+/// 一起听的一整套说法，挂在状态本身上而不是某一个界面里。
+///
+/// 聊天页那张小卡片和「一起听」那一整屏说的是同一件事，只是地方大小不同。
+/// 文案留在某个 view 的 private 属性里，第二个界面就只能抄一份——抄完的那天
+/// 起，两处就开始各自漂移。
+extension ListenTogetherPresentationState {
+    var statusTag: String {
+        switch self {
+        case .waiting: "等待加入"
+        case .playing: "已连接"
+        case .paused: "已暂停"
+        case .syncing: "同步中"
+        case .commandFailed: "同步失败"
+        case .roomFailed: "邀请过期"
+        case .offline: "连接异常"
+        case .inactive: ""
+        }
+    }
+
+    var statusLine: String {
+        switch self {
+        case .waiting: "等待加入 / 点此打开网易云邀请"
+        case .playing: "已连接，正在一起听"
+        case .paused: "房间仍保持连接"
+        case .syncing(let command): Self.syncingLine(for: command)
+        case .commandFailed: "这次没有同步成功"
+        case .roomFailed: "邀请已过期，点此重试"
+        case .offline: "Murmur 连接异常"
+        case .inactive: ""
+        }
+    }
+
+    var primarySymbol: String {
+        switch self {
+        case .waiting: "arrow.up.forward.app.fill"
+        case .playing: "pause.fill"
+        case .paused: "play.fill"
+        case .commandFailed, .roomFailed: "arrow.clockwise"
+        case .inactive, .syncing, .offline: "circle"
+        }
+    }
+
+    var primaryAccessibilityLabel: String {
+        switch self {
+        case .waiting: "打开网易云一起听邀请"
+        case .playing: "暂停一起听"
+        case .paused: "继续一起听"
+        case .commandFailed: "重试上一次一起听操作"
+        case .roomFailed: "重新创建一起听邀请"
+        case .syncing: "正在同步一起听操作"
+        case .offline: "Murmur 连接异常，控制暂不可用"
+        case .inactive: "Murmur"
+        }
+    }
+
+    static func syncingLine(for command: ListenTogetherCommand?) -> String {
+        switch command {
+        case .pause: "暂停同步中…"
+        case .resume: "继续同步中…"
+        case .previous: "上一首同步中…"
+        case .next: "下一首同步中…"
+        case .playTrack: "切歌同步中…"
+        case nil: "正在确认播放状态…"
+        }
+    }
+
+    var isSyncing: Bool {
+        if case .syncing = self { return true }
+        return false
+    }
+
+    var isFailure: Bool {
+        switch self {
+        case .commandFailed, .roomFailed, .offline: true
+        default: false
+        }
+    }
+
+    var isRoomFailure: Bool {
+        if case .roomFailed = self { return true }
+        return false
+    }
+
+    /// 现在切歌切给谁听？没人加入、或者邀请已经过期的时候，上一首/下一首按下去
+    /// 什么都不会发生——一个必然无效的键比没有这个键更糟。聊天页的小卡片和
+    /// 「一起听」整屏共用这一条，否则两处迟早各判各的。
+    var allowsTrackSkipping: Bool {
+        switch self {
+        case .playing, .paused, .syncing, .commandFailed, .offline: true
+        case .waiting, .roomFailed, .inactive: false
+        }
+    }
+
+    /// 失败一律珊瑚色，其余走次要墨色——两个界面共用同一条规则。
+    ///
+    /// `@MainActor` 是因为 `MurmurTheme` 是：这个枚举本身是 `Sendable` 的、
+    /// 非隔离的，而颜色是视图层的值，只在主线程上取。
+    @MainActor
+    var statusColor: Color { isFailure ? MurmurTheme.coral : MurmurTheme.secondaryInk }
+    @MainActor
+    var primaryColor: Color { isFailure ? MurmurTheme.coral : MurmurTheme.ink }
+}
+
+extension ListenTogetherRoomSnapshotV1 {
+    /// 还没有歌可说的时候说什么。
+    static let noTrackLine = "和 Murmur 一起听"
+
+    var trackLine: String {
+        guard let track = currentTrack else { return Self.noTrackLine }
+        guard let artist = track.artists.first, !artist.isEmpty else { return track.title }
+        return "\(track.title) · \(artist)"
+    }
+}
+
 struct ListenTogetherCommandResultV1: Codable, Equatable, Sendable {
     let status: ListenTogetherCommandStatus
     let room: ListenTogetherRoomSnapshotV1
@@ -209,11 +327,16 @@ final class NeteaseMusicModel: ObservableObject {
     @Published private(set) var lastFailedCommand: ListenTogetherCommand?
     @Published private(set) var lastConfirmedPlaybackState: ListenTogetherPlaybackState = .unknown
 
-    private let api: any MurmurAPIClient
+    /// Not private: 一起听 的选歌面板要用同一个已认证的客户端搜歌，而它是一个
+    /// 独立的小 model（见 `NeteaseSearchModel`），不该为了拿这一个依赖把整个
+    /// 房间 model 传进去。
+    let api: any MurmurAPIClient
     private let draftStore: SharedMusicDraftStore
     private var resolvingDraftID: UUID?
     private var roomGeneration = 0
     private var isRefreshingRoom = false
+    /// 有人在单飞期间又要了一次刷新。见 `refreshRoom`。
+    private var refreshAgainRequested = false
 
     init(api: any MurmurAPIClient, draftStore: SharedMusicDraftStore = SharedMusicDraftStore()) {
         self.api = api
@@ -280,6 +403,14 @@ final class NeteaseMusicModel: ObservableObject {
 
     func createRoom(for track: MusicTrackAttachmentV1) async -> URL? {
         guard track.isNetease else { return nil }
+        if let current = room, current.isActive,
+           current.currentTrack?.trackID == track.trackID {
+            // The chat turn may have created this room before its card arrived.
+            // Opening that invitation is a local action; sending play_track
+            // again would mutate a room already playing the requested song.
+            failureMessage = nil
+            return current.userJoined ? nil : current.inviteURL
+        }
         // 建房和换歌都会改房间，所以此刻已经在路上的那次轮询讲的都是旧事。
         // 递增放在两条分支之前：换歌那条以前漏了，回来的旧快照会把刚确认
         // 的结果盖掉。
@@ -309,7 +440,9 @@ final class NeteaseMusicModel: ObservableObject {
             }
             apply(snapshot)
             failureMessage = nil
-            return snapshot.inviteURL
+            // Someone already connected to the room does not need to be sent
+            // out of Murmur again. A waiting room still returns its invitation.
+            return snapshot.userJoined ? nil : snapshot.inviteURL
         } catch {
             failureMessage = MurmurFailure.from(error).message
             commandStatus = .failed
@@ -318,11 +451,31 @@ final class NeteaseMusicModel: ObservableObject {
         }
     }
 
+    /// 汇流，不是丢弃。
+    ///
+    /// 空闲轮询二十秒一次，聊天里收到歌曲卡时会再问一次——问的正是刚刚在服务端
+    /// 建好的那个房间。这两次撞上的时候，原来是把后来那次直接扔掉；而在飞的那次
+    /// 是**建房之前**发出的，答案必然是「没有房间」，`roomGeneration` 没变所以照样
+    /// 落地。于是卡片停在「和 Murmur 一起听」，最多要等满一个空闲间隔。
+    ///
+    /// 单飞照旧（同一时刻只有一个请求在外面），但撞上的那次记一笔，等在飞的落地
+    /// 之后补问一遍。补问那次沿用第一个调用方的 `reportFailure`：轮询不报错，
+    /// 而这里唯一的差别只是失败要不要写进 `failureMessage`。
     func refreshRoom(reportFailure: Bool = false) async {
-        guard !isRefreshingRoom else { return }
+        guard !isRefreshingRoom else {
+            refreshAgainRequested = true
+            return
+        }
         isRefreshingRoom = true
-        let generation = roomGeneration
         defer { isRefreshingRoom = false }
+        repeat {
+            refreshAgainRequested = false
+            await performRefresh(reportFailure: reportFailure)
+        } while refreshAgainRequested
+    }
+
+    private func performRefresh(reportFailure: Bool) async {
+        let generation = roomGeneration
         do {
             let snapshot = try await api.currentListenTogetherRoom()
             guard generation == roomGeneration else { return }

@@ -26,15 +26,28 @@ enum MusicCardPlayback: Equatable, Sendable {
 
 enum ListenTogetherTrackRelationship: Equatable, Sendable {
     case inactive
+    case joinableCurrentTrack
     case currentTrack
     case otherTrack
 
     var actionLabel: String {
         switch self {
         case .inactive: "和 Murmur 一起听"
+        case .joinableCurrentTrack: "进入网易云一起听"
         case .currentTrack: "正在一起听"
         case .otherTrack: "换成这首"
         }
+    }
+
+    var actionEnabled: Bool { self != .currentTrack }
+
+    static func resolve(
+        track: MusicTrackAttachmentV1,
+        room: ListenTogetherRoomSnapshotV1?
+    ) -> Self {
+        guard track.isNetease, let room, room.isActive else { return .inactive }
+        guard room.currentTrack?.trackID == track.trackID else { return .otherTrack }
+        return room.userJoined ? .currentTrack : .joinableCurrentTrack
     }
 }
 
@@ -138,7 +151,7 @@ struct MusicCardView: View {
                     }
                     .buttonStyle(.plain)
                     .frame(minHeight: 44, alignment: .leading)
-                    .disabled(listenTogetherRelationship == .currentTrack)
+                    .disabled(!listenTogetherRelationship.actionEnabled)
                 }
             }
         }
@@ -166,7 +179,7 @@ struct MusicCardView: View {
             onOpenProvider
         )
         .accessibilityAction(named: listenTogetherRelationship.actionLabel) {
-            if track.isNetease, listenTogetherRelationship != .currentTrack {
+            if track.isNetease, listenTogetherRelationship.actionEnabled {
                 onListenTogether?()
             }
         }

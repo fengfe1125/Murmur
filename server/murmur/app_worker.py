@@ -229,8 +229,10 @@ class EngineMomentProcessor:
         shared = music.verify_shared(job.music_track) if music else None
         choice = music.choose_for(job.note) if music and shared is None else None
         chosen = choice.track if choice else None
-        if room_turn := self._apply_music_to_room(job, moment, chosen):
-            return room_turn
+        # 房间是外部副作用，必须先于模型和落库发生；但它只往这一轮多加一句，
+        # 不替这一轮说话。点歌是把一个模糊或确定的需求拆成一首歌，开不开房、
+        # 换不换歌是拿到歌之后另一件事。
+        room_line = self._apply_music_to_room(job, chosen)
         context_extra: list[str] = []
         if shared is not None:
             context_extra.append(music_prompt_line(shared, actor="他"))
@@ -240,6 +242,11 @@ class EngineMomentProcessor:
                 + "（这首歌会作为卡片和你的话一起发出去，"
                 "所以说一句把它递过去的话，不要复述标题和艺人。）"
             )
+            if room_line is not None:
+                context_extra.append(
+                    "（一起听房间的事另有一句固定说明跟在你后面发。"
+                    "你只管把歌递过去，别提房间、邀请或者链接。）"
+                )
         elif choice is not None and choice.not_found:
             context_extra.append(
                 "（他点了歌，但一首都没找到。别编一首出来，"
@@ -248,7 +255,9 @@ class EngineMomentProcessor:
         if self.playback_state is not None:
             if line := playback_prompt_line(self.playback_state(job.user_id)):
                 context_extra.append(line)
-        if job.intent == "photo_reading" and photo is not None:
+        # 点歌赢过读图：读图那条路不带卡片，房间已经动过了却不发卡，他就只
+        # 看见一句话和一个不知道从哪来的房间。
+        if job.intent == "photo_reading" and photo is not None and room_line is None:
             reading = self._read(
                 job, moment, photo, prompt_dossier,
                 # 没有坐标就没有「来过几次」可数，也就不必去问库——
@@ -269,14 +278,23 @@ class EngineMomentProcessor:
             history_entries=self._archive_context(memory, job),
             context_extra=context_extra or None,
         )
-        if choice is not None and choice.not_found:
-            # 他点了歌却一首都没找到。那句说明是固定的，而且要跟它自己的话
-            # 一起进 `say`：这样它会被落库、被崩溃后的重放原样带回来，不必在
-            # 发事件那一层再单独记一件事。这一轮也不许沉默。
+        # 两句固定说明：一首都没找到，和房间那边发生了什么。都要跟它自己的话
+        # 一起进 `say`，这样它们会被落库、被崩溃后的重放原样带回来，不必在发
+        # 事件那一层再单独记一件事。两句互斥——没找到就没有歌可以进房间——
+        # 收在一处只是为了少一个分叉。这一轮也不许沉默：模型说 quiet 的时候，
+        # 「房间开好了」这件事仍然必须说出口。
+        trailing = [
+            line for line in (
+                MUSIC_NOT_FOUND_LINE
+                if choice is not None and choice.not_found else None,
+                room_line,
+            ) if line is not None
+        ]
+        if trailing:
             reply = Reply(
                 scene=reply.scene,
                 move="speak",
-                say=[*reply.say, MUSIC_NOT_FOUND_LINE],
+                say=[*reply.say, *trailing],
             )
         track = chosen if chosen is not None else shared
         return ProcessedMoment(
@@ -315,7 +333,7 @@ class EngineMomentProcessor:
         try:
             current = self.rooms.current(user_id=job.user_id, refresh=False)
             if current is None:
-                line = "现在还没有一起听房间。先选一首网易云歌曲，再点「和 Murmur 一起听」。"
+                line = "现在还没有一起听房间。说一首想听的歌，我就开一个。"
             elif intent.action == "close":
                 self.rooms.close(
                     user_id=job.user_id,
@@ -342,10 +360,21 @@ class EngineMomentProcessor:
             None,
         )
 
-    def _apply_music_to_room(
-        self, job: Job, moment: Moment, chosen: dict | None
-    ) -> ProcessedMoment | None:
-        """Create a room on an explicit request, or change an active room."""
+    def _apply_music_to_room(self, job: Job, chosen: dict | None) -> str | None:
+        """Create a room for a resolved request, or change an active room.
+
+        Returns the one line to append to this turn's reply, or ``None`` when
+        the room was never touched — the experiment is off for this account,
+        nothing was chosen, or the song is not a 网易云 one.  It deliberately
+        does not compose the reply: 点歌 resolves a vague or exact request into
+        a song, and what that does to a room is a separate decision that adds a
+        sentence rather than replacing 它自己的话.
+
+        Always try the create idempotency key first.  If the worker completed
+        the external create and crashed before persisting its reply, replaying
+        this moment then returns that same create result instead of mistaking
+        the existing room for a reason to send one extra ``play_track``.
+        """
         if (
             self.rooms is None
             or job.user_id not in self.room_user_allowlist
@@ -355,22 +384,34 @@ class EngineMomentProcessor:
             return None
         from .app_listen_together import (
             ListenTogetherError,
-            explicitly_requests_listen_together,
+            RoomConflict,
+            RoomIdempotencyConflict,
         )
 
-        explicit = explicitly_requests_listen_together(job.note)
         try:
-            current = self.rooms.current(user_id=job.user_id, refresh=False)
-            if current is None and not explicit:
-                return None
-            if current is None:
+            try:
                 self.rooms.create(
                     user_id=job.user_id,
                     initial_track=chosen,
                     idempotency_key=f"chat:{job.moment_id}:create",
                 )
                 line = "房间准备好了。点歌曲卡片里的邀请，去网易云加入。"
-            else:
+            except RoomIdempotencyConflict:
+                # The same moment resolving to different tracks is not a new
+                # instruction.  Fail closed instead of turning the replay into
+                # an extra command inside whichever room happens to be active.
+                #
+                # 只有「建房成功、Memory 提交之前崩了、重放又选中了另一首」
+                # 才走到这里；提交落地的重放走 `_complete_linked`，读回原歌
+                # 不重选。房间是连着的，所以不能说「没连上」。
+                line = (
+                    "刚才那次已经建过房间了，里面放的不是这首。"
+                    "想换的话点卡片上的按钮。"
+                )
+            except RoomConflict:
+                current = self.rooms.current(user_id=job.user_id, refresh=False)
+                if current is None:
+                    raise
                 result = self.rooms.command(
                     user_id=job.user_id,
                     room_handle=current.room_handle,
@@ -380,14 +421,9 @@ class EngineMomentProcessor:
                 )
                 line = self._room_command_line(result.status, changing_track=True)
         except ListenTogetherError:
-            line = "一起听现在没有连上；这首歌我先发给你。"
-        return ProcessedMoment(
-            Reply(scene="（一起听点歌）", move="speak", say=[line]),
-            moment,
-            None,
-            music_track=chosen,
-            music_track_role="out",
-        )
+            # 歌已经由它自己递过去了，这里只说房间那一半。
+            line = "一起听那边这次没连上。"
+        return line
 
     @staticmethod
     def _room_command_line(status: str, *, changing_track: bool = False) -> str:

@@ -87,11 +87,46 @@ enum MurmurEnvironment {
             if arguments.contains("--murmur-reset-transcript") {
                 try? FileManager.default.removeItem(at: directory)
             }
+            if arguments.contains("--murmur-seed-long-transcript") {
+                seedLongUITestTranscript(in: directory)
+            }
             return MurmurTranscriptStore(directory: directory)
         }
 #endif
         return MurmurTranscriptStore()
     }
+
+#if DEBUG
+    /// A deterministic scrollback longer than an iPhone viewport. UI tests use
+    /// it to exercise tab teardown/recreation without spending a minute sending
+    /// enough moments through the stub server first.
+    private static func seedLongUITestTranscript(in directory: URL) {
+        let rows = (0..<40).map { index in
+            MurmurMessage(
+                id: "ui-long-transcript-\(index)",
+                author: index.isMultiple(of: 2) ? .you : .murmur,
+                text: index == 39
+                    ? "回到聊天应该立刻看见我"
+                    : "预置聊天记录第 \(index + 1) 条",
+                sentAt: Date(timeIntervalSinceReferenceDate: 780_000_000 + Double(index)),
+                delivery: index.isMultiple(of: 2) ? .answered : .sent,
+                momentID: "ui-long-moment-\(index / 2)"
+            )
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(rows) else { return }
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.complete]
+        )
+        try? data.write(
+            to: directory.appendingPathComponent("transcript.json"),
+            options: [.atomic, .completeFileProtection]
+        )
+    }
+#endif
 
     /// 当年今日's archive, redirected the same way and under the same flags —
     /// a UI test that opened a room yesterday must not leave a mark on today's
@@ -277,6 +312,34 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
         idempotencyKey: String
     ) async throws -> MusicTrackAttachmentV1 {
         uiNeteaseTrack
+    }
+    func searchMusic(query: String, limit: Int) async throws -> [MusicTrackAttachmentV1] {
+        // 一页固定三首，够一个列表看出行与行之间的差别；空查询走空结果那条路。
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        if arguments.contains("--murmur-stub-netease-search-empty") { return [] }
+        return [
+            uiNeteaseTrack,
+            MusicTrackAttachmentV1(
+                provider: MusicProvider.netease.rawValue,
+                trackID: "186017",
+                title: "晴天",
+                artists: ["周杰伦"],
+                artworkURL: nil,
+                canonicalURL: URL(string: "https://music.163.com/song?id=186017")!,
+                durationSeconds: 269,
+                explicit: false
+            ),
+            MusicTrackAttachmentV1(
+                provider: MusicProvider.netease.rawValue,
+                trackID: "186018",
+                title: "夜曲",
+                artists: ["周杰伦"],
+                artworkURL: nil,
+                canonicalURL: URL(string: "https://music.163.com/song?id=186018")!,
+                durationSeconds: 226,
+                explicit: false
+            ),
+        ]
     }
     func createListenTogetherRoom(
         initialTrack: MusicTrackAttachmentV1,

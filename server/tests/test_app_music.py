@@ -28,6 +28,12 @@ from murmur.app_api import (  # noqa: E402
     erase_account,
     music_enabled_for,
 )
+from murmur.app_listen_together import (  # noqa: E402
+    AdapterCommandResult,
+    InMemoryRoomAdapter,
+    ListenTogetherRoomManager,
+    RoomTransportUnavailable,
+)
 from murmur.app_music import (  # noqa: E402
     MUSIC_NOT_FOUND_LINE,
     AppMusic,
@@ -69,6 +75,16 @@ TRACK = {
     "duration_seconds": 183,
     "explicit": False,
 }
+NETEASE_TRACK = {
+    **TRACK,
+    "provider": "netease",
+    "track_id": "186016",
+    "title": "夜曲",
+    "artists": ["周杰伦"],
+    "canonical_url": "https://music.163.com/song?id=186016",
+}
+# 站在模型位置上的那一句。点歌那一轮它必须开口，房间的说明只跟在后面。
+MODEL_LINE = "外面在下雨，这首给你。"
 
 
 def settings(root: Path, **overrides) -> AppSettings:
@@ -1267,12 +1283,277 @@ class MusicProcessorTests(unittest.TestCase):
         return Job("j1", "m1", "u1", note, None, None, (), None, music_track)
 
     def process(self, job, music, on_bubble=None, playback=None,
-                allowlist=frozenset()):
+                allowlist=frozenset(), rooms=None,
+                room_allowlist=frozenset()):
         processor = EngineMomentProcessor(
             self.cfg, self.root, music=music, playback_state=playback,
             music_user_allowlist=allowlist,
+            rooms=rooms, room_user_allowlist=room_allowlist,
         )
         return processor(job, self.memory, on_bubble or (lambda text: None))
+
+    @staticmethod
+    def room_manager(adapter):
+        return ListenTogetherRoomManager(adapter)
+
+    def speaking(self, line=MODEL_LINE, *, move="speak"):
+        """把模型那一句钉死。
+
+        房间那句是**追加**在它后面的，不是替它说的——断言必须分得清哪句是
+        它自己的话、哪句是固定说明，否则第一条回归（点歌那一轮不说话了）
+        再犯一次也测不出来。
+        """
+        patcher = patch("murmur.app_worker.respond")
+        respond = patcher.start()
+        self.addCleanup(patcher.stop)
+        respond.return_value = Reply(
+            scene="雨夜", move=move, say=[] if move == "quiet" else [line],
+        )
+        return respond
+
+    def netease_music(self, track=NETEASE_TRACK, plan=None, results=None):
+        return AppMusic(
+            StubCatalog(
+                results=[track] if results is None else results, track=track
+            ),
+            StubPlanner(plan or MusicPlan(True, "discover", "雨天")),
+        )
+
+    def test_exact_and_discovery_requests_create_a_room_without_together_words(self):
+        """模糊和确定两种需求都拆得出歌，拆出来就建房——但话还是它自己说。"""
+        cases = (
+            ("我想听夜曲", MusicPlan(True, "exact", "夜曲 周杰伦", "夜曲", "周杰伦")),
+            ("来首适合下雨天的歌", MusicPlan(True, "discover", "雨天")),
+        )
+        for note, plan in cases:
+            with self.subTest(note=note):
+                adapter = InMemoryRoomAdapter()
+                rooms = self.room_manager(adapter)
+                respond = self.speaking()
+                result = self.process(
+                    self.job(note), self.netease_music(plan=plan), rooms=rooms,
+                    room_allowlist=frozenset({"u1"}),
+                )
+                self.assertEqual(result.music_card, NETEASE_TRACK)
+                self.assertEqual(result.reply.say, [
+                    MODEL_LINE,
+                    "房间准备好了。点歌曲卡片里的邀请，去网易云加入。",
+                ])
+                # 这首歌进了这一轮的 prompt。少了它，模型答的就是一句和卡片
+                # 无关的话——那正是把整轮回复换成罐头文案之后发生的事。
+                context_extra = respond.call_args.kwargs["context_extra"]
+                self.assertTrue(any("夜曲" in line for line in context_extra))
+                self.assertTrue(any("别提房间" in line for line in context_extra))
+                self.assertEqual(
+                    rooms.current(user_id="u1", refresh=False).current_track,
+                    NETEASE_TRACK,
+                )
+                self.assertEqual(
+                    [call[0] for call in adapter.calls].count("create"), 1
+                )
+
+    def test_a_photo_sent_with_the_request_survives_the_room_turn(self):
+        """照片和点歌在同一轮：房间动过了，照片不能因此从存档里消失。"""
+        from murmur.photo import Photo
+
+        adapter = InMemoryRoomAdapter()
+        rooms = self.room_manager(adapter)
+        self.speaking()
+        photo = Photo(None, None, None, None, None, "ZmFrZQ==")
+        job = replace(self.job("来首适合下雨天的歌"), image_path="/tmp/whatever.jpg")
+        with patch("murmur.app_worker.load_app_photo", return_value=photo):
+            result = self.process(
+                job, self.netease_music(), rooms=rooms,
+                room_allowlist=frozenset({"u1"}),
+            )
+
+        # 走过 `_apply_provenance` 之后是另一个实例，但必须还是那张照片——
+        # 以前这里是 None，于是 has_photo=0、shot_at 空、预览根本不存。
+        self.assertEqual(result.photo, photo)
+        self.assertEqual(result.music_card, NETEASE_TRACK)
+        self.assertEqual(result.reply.say[-1],
+                         "房间准备好了。点歌曲卡片里的邀请，去网易云加入。")
+
+    def test_a_quiet_turn_still_says_the_room_is_ready(self):
+        """它可以什么都不说，但不能让人对着一个不知从哪来的房间发愣。"""
+        adapter = InMemoryRoomAdapter()
+        rooms = self.room_manager(adapter)
+        self.speaking(move="quiet")
+
+        result = self.process(
+            self.job("来首适合下雨天的歌"), self.netease_music(), rooms=rooms,
+            room_allowlist=frozenset({"u1"}),
+        )
+
+        self.assertEqual(result.reply.move, "speak")
+        self.assertEqual(result.reply.say, [
+            "房间准备好了。点歌曲卡片里的邀请，去网易云加入。"
+        ])
+
+    def test_a_request_inside_an_existing_room_switches_that_room(self):
+        adapter = InMemoryRoomAdapter()
+        rooms = self.room_manager(adapter)
+        rooms.create(
+            user_id="u1", initial_track={**NETEASE_TRACK, "track_id": "1"},
+            idempotency_key="existing-room",
+        )
+        self.speaking()
+        result = self.process(
+            self.job("我想听夜曲"),
+            self.netease_music(
+                plan=MusicPlan(True, "exact", "夜曲", "夜曲", "周杰伦")
+            ),
+            rooms=rooms, room_allowlist=frozenset({"u1"}),
+        )
+        self.assertEqual(result.reply.say, [MODEL_LINE, "已经换好了。"])
+        self.assertEqual(
+            rooms.current(user_id="u1", refresh=False).current_track,
+            NETEASE_TRACK,
+        )
+        self.assertEqual(
+            [call[:2] for call in adapter.calls],
+            [("create", "existing-room"),
+             ("command", "play_track")],
+        )
+
+    def test_the_room_line_never_reports_more_than_netease_confirmed(self):
+        """`accepted` 不是 `synchronized`，`failed` 也不许说成换好了。"""
+        class ScriptedAdapter(InMemoryRoomAdapter):
+            def __init__(self, status):
+                super().__init__()
+                self.status = status
+
+            def command(self, **kwargs):
+                super().command(**kwargs)
+                return AdapterCommandResult(
+                    self.status, self._get(kwargs["room_ref"])
+                )
+
+        cases = (
+            ("accepted", "命令已发出，还在等网易云确认。"),
+            ("failed", "这次没有同步成功，房间卡片会保留真实状态。"),
+        )
+        for status, expected in cases:
+            with self.subTest(status=status):
+                rooms = self.room_manager(ScriptedAdapter(status))
+                rooms.create(
+                    user_id="u1",
+                    initial_track={**NETEASE_TRACK, "track_id": "1"},
+                    idempotency_key=f"existing-{status}",
+                )
+                self.speaking()
+                result = self.process(
+                    self.job("我想听夜曲"), self.netease_music(), rooms=rooms,
+                    room_allowlist=frozenset({"u1"}),
+                )
+                self.assertEqual(result.reply.say, [MODEL_LINE, expected])
+
+    def test_replaying_the_room_creation_moment_has_no_second_side_effect(self):
+        adapter = InMemoryRoomAdapter()
+        rooms = self.room_manager(adapter)
+        music = self.netease_music()
+        job = self.job("来首适合下雨天的歌")
+        self.speaking()
+        for _ in range(2):
+            result = self.process(
+                job, music, rooms=rooms, room_allowlist=frozenset({"u1"})
+            )
+            self.assertEqual(result.reply.say, [
+                MODEL_LINE,
+                "房间准备好了。点歌曲卡片里的邀请，去网易云加入。",
+            ])
+        self.assertEqual(
+            [call[0] for call in adapter.calls], ["create"],
+            "同一 moment 重放不能把已建房间再切一次歌",
+        )
+
+    def test_replaying_a_moment_with_a_different_result_fails_closed(self):
+        """房间是连着的，只是放的不是这首——不能说成「没连上」。"""
+        adapter = InMemoryRoomAdapter()
+        rooms = self.room_manager(adapter)
+        job = self.job("来首适合下雨天的歌")
+        other_track = {**NETEASE_TRACK, "track_id": "2", "title": "晴天"}
+        self.speaking()
+
+        self.process(
+            job, self.netease_music(), rooms=rooms,
+            room_allowlist=frozenset({"u1"}),
+        )
+        result = self.process(
+            job, self.netease_music(track=other_track), rooms=rooms,
+            room_allowlist=frozenset({"u1"}),
+        )
+
+        self.assertEqual(result.reply.say, [
+            MODEL_LINE,
+            "刚才那次已经建过房间了，里面放的不是这首。想换的话点卡片上的按钮。",
+        ])
+        self.assertEqual([call[0] for call in adapter.calls], ["create"])
+        self.assertEqual(
+            rooms.current(user_id="u1", refresh=False).current_track,
+            NETEASE_TRACK,
+        )
+
+    def test_room_creation_failure_keeps_the_card_and_tells_the_truth(self):
+        class FailingRooms:
+            def create(self, **_kwargs):
+                raise RoomTransportUnavailable("offline")
+
+        self.speaking()
+        result = self.process(
+            self.job("我想听夜曲"), self.netease_music(), rooms=FailingRooms(),
+            room_allowlist=frozenset({"u1"}),
+        )
+
+        # 歌已经由它自己递过去了，这一句只说房间那一半。
+        self.assertEqual(result.music_card, NETEASE_TRACK)
+        self.assertEqual(
+            result.reply.say, [MODEL_LINE, "一起听那边这次没连上。"]
+        )
+
+    def test_room_side_effects_stay_behind_provider_and_user_gates(self):
+        cases = (
+            ("audius", TRACK, frozenset({"u1"})),
+            ("not-allowlisted", NETEASE_TRACK, frozenset({"u2"})),
+        )
+        for label, track, room_allowlist in cases:
+            with self.subTest(case=label):
+                adapter = InMemoryRoomAdapter()
+                rooms = self.room_manager(adapter)
+                self.speaking(line="给你这首。")
+                result = self.process(
+                    self.job(), self.netease_music(track=track), rooms=rooms,
+                    room_allowlist=room_allowlist,
+                )
+                self.assertEqual(result.music_card, track)
+                self.assertEqual(result.reply.say, ["给你这首。"])
+                self.assertEqual(adapter.calls, [])
+
+    def test_nothing_reaches_the_room_without_a_song_to_put_in_it(self):
+        """没有歌就没有房间。点歌拆解不出东西的三条路都不许有副作用。"""
+        shared = json.dumps(NETEASE_TRACK)
+        cases = (
+            # 他点了歌，一首都没找到：只补那句固定说明。
+            ("not-found", self.job("来首适合下雨天的歌"),
+             self.netease_music(results=[]), [MODEL_LINE, MUSIC_NOT_FOUND_LINE]),
+            # 他自己分享了一首：那是他递过来的，不是他要的。
+            ("shared-link", self.job("听听这个", music_track=shared),
+             self.netease_music(), [MODEL_LINE]),
+            # 只是在聊天，没点歌。
+            ("just-talking", self.job("今天累坏了"),
+             self.netease_music(plan=MusicPlan(False, "none", None)),
+             [MODEL_LINE]),
+        )
+        for label, job, music, expected in cases:
+            with self.subTest(case=label):
+                adapter = InMemoryRoomAdapter()
+                rooms = self.room_manager(adapter)
+                self.speaking()
+                result = self.process(
+                    job, music, rooms=rooms, room_allowlist=frozenset({"u1"})
+                )
+                self.assertEqual(result.reply.say, expected)
+                self.assertEqual(adapter.calls, [])
 
     def test_a_requested_song_closes_the_bubble_stream(self):
         """点歌那一轮不流式：崩溃重来不能换歌，也不能重复发卡。"""
