@@ -212,6 +212,7 @@ struct MurmurChatView: View {
             MurmurTopChrome(
                 connection: model.connection,
                 room: netease.room,
+                track: netease.displayTrack,
                 presentation: netease.presentationState(connection: model.connection),
                 onPrimary: performPrimaryRoomAction,
                 onNext: { Task { await netease.command(.next) } },
@@ -244,7 +245,13 @@ struct MurmurChatView: View {
         case .paused:
             Task { await netease.command(.resume) }
         case .commandFailed:
-            Task { await netease.retryLastCommand() }
+            Task { _ = await netease.retryLastAction() }
+        case .creationFailed:
+            Task {
+                if let inviteURL = await netease.retryLastAction() {
+                    openURL(inviteURL)
+                }
+            }
         case .roomFailed:
             guard let track = netease.room?.currentTrack else { return }
             Task {
@@ -252,7 +259,7 @@ struct MurmurChatView: View {
                     openURL(inviteURL)
                 }
             }
-        case .inactive, .syncing, .offline:
+        case .inactive, .creating, .syncing, .offline:
             break
         }
     }
@@ -274,6 +281,7 @@ struct MurmurChatView: View {
 private struct MurmurTopChrome: View {
     let connection: MurmurConnectionState
     let room: ListenTogetherRoomSnapshotV1?
+    let track: MusicTrackAttachmentV1?
     let presentation: ListenTogetherPresentationState
     let onPrimary: () -> Void
     let onNext: () -> Void
@@ -283,6 +291,7 @@ private struct MurmurTopChrome: View {
         HStack(alignment: .top, spacing: 8) {
             ListenTogetherCard(
                 room: room,
+                track: track,
                 presentation: presentation,
                 onPrimary: onPrimary,
                 onNext: onNext,
@@ -626,7 +635,7 @@ private struct MomentWorkbench: View {
                         // Two gates, and both have to be open: this build has
                         // an Audius registration, and Murmur's server says this
                         // account may use music at all.
-                        onPickMusic: (music.isAvailable || music.isNeteaseCatalogAvailable)
+                        onPickMusic: (music.isAvailable || music.isNeteaseSearchAvailable)
                             ? { showMusicPicker = true } : nil,
                         onSubmitText: music.isNeteaseCatalogAvailable ? { text in
                             guard model.draftPhoto == nil,
@@ -658,7 +667,7 @@ private struct MomentWorkbench: View {
                     account: music.account,
                     onSend: { model.submitMusic($0) }
                 )
-            } else {
+            } else if music.isNeteaseSearchAvailable {
                 NeteaseSearchSheet(api: netease.api, actionLabel: "发送") {
                     model.submitMusic($0)
                 }
@@ -765,7 +774,12 @@ private struct MomentWorkbench: View {
         .alert(
             "网易云音乐",
             isPresented: Binding(
-                get: { netease.failureMessage != nil },
+                // Room mutations render their own recoverable state in the
+                // corner card / 一起听 tab.  Presenting this generic alert
+                // would clear the retained track and retry key on dismissal.
+                get: {
+                    netease.failureMessage != nil && netease.roomMutation == nil
+                },
                 set: { if !$0 { netease.clearFailure() } }
             )
         ) {

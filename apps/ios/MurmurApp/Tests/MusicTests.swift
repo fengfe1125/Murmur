@@ -844,6 +844,27 @@ final class MusicModuleTests: XCTestCase {
         module.apply(.init(enabled: false, provider: "audius", playbackReporting: false))
         XCTAssertEqual(module.player.state, .idle)
     }
+
+    func testNeteaseResolveAndSearchCapabilitiesStayIndependent() {
+        let module = makeModule()
+        module.apply(.init(
+            enabled: true,
+            provider: "netease",
+            playbackReporting: false,
+            providers: [.init(id: "netease", capabilities: ["resolve_shared"])]
+        ))
+        XCTAssertTrue(module.isNeteaseCatalogAvailable)
+        XCTAssertFalse(module.isNeteaseSearchAvailable)
+
+        module.apply(.init(
+            enabled: true,
+            provider: "netease",
+            playbackReporting: false,
+            providers: [.init(id: "netease", capabilities: ["search"])]
+        ))
+        XCTAssertFalse(module.isNeteaseCatalogAvailable)
+        XCTAssertTrue(module.isNeteaseSearchAvailable)
+    }
 }
 
 final class PlaybackTransportGateTests: XCTestCase {
@@ -1227,7 +1248,13 @@ final class ListenTogetherContractTests: XCTestCase {
             room: room,
             commandStatus: status,
             isChanging: false,
-            failedCommand: failedCommand,
+            mutation: failedCommand.map {
+                .command(
+                    command: $0, track: nil, roomHandle: room.roomHandle,
+                    idempotencyKey: "test-key"
+                )
+            },
+            failureMessage: nil,
             lastConfirmedPlayback: confirmed
         )
     }
@@ -1344,7 +1371,7 @@ final class NeteaseMusicModelTests: XCTestCase {
         await api.setFailing(true)
         await model.command(.pause)
         XCTAssertEqual(model.commandStatus, .failed)
-        XCTAssertEqual(model.lastFailedCommand, .pause)
+        XCTAssertEqual(model.roomMutation?.command, .pause)
         XCTAssertNotNil(model.room, "单次命令失败不能清掉活动房间")
         XCTAssertNil(model.failureMessage, "命令错误应该留在 Header 内，不弹全局错误")
         XCTAssertEqual(
@@ -1373,11 +1400,99 @@ final class NeteaseMusicModelTests: XCTestCase {
             model.presentationState(connection: .connected),
             .commandFailed(.pause, .playing)
         )
+        let first = await api.commandRequests.last
+        XCTAssertNil(first?.track, "暂停等普通命令不能夹带歌曲")
 
         await api.setNextCommand(status: .synchronized, playback: .paused)
-        await model.retryLastCommand()
+        _ = await model.retryLastAction()
+        let retried = await api.commandRequests.last
+        XCTAssertNil(retried?.track)
+        XCTAssertEqual(retried?.roomHandle, first?.roomHandle)
+        XCTAssertEqual(retried?.idempotencyKey, first?.idempotencyKey)
         XCTAssertEqual(model.commandStatus, .synchronized)
+        XCTAssertNil(model.roomMutation)
         XCTAssertEqual(model.presentationState(connection: .connected), .paused)
+    }
+
+    func testFailedCreateKeepsTrackAndReusesItsIdempotencyKey() async throws {
+        let api = ScriptedMurmurAPIClient()
+        await api.setFailing(true)
+        let model = model(api)
+
+        _ = await model.createRoom(for: MusicFixtures.netease)
+
+        guard case .creationFailed(let track, let message) =
+                model.presentationState(connection: .connected) else {
+            return XCTFail("建房失败必须留在可见的恢复状态")
+        }
+        XCTAssertEqual(track, MusicFixtures.netease)
+        XCTAssertFalse(message.isEmpty)
+        XCTAssertEqual(model.displayTrack, MusicFixtures.netease)
+        let first = await api.createRequests
+
+        await api.setFailing(false)
+        let invite = await model.retryLastAction()
+        let retried = await api.createRequests
+
+        XCTAssertEqual(retried.map(\.track), [MusicFixtures.netease, MusicFixtures.netease])
+        XCTAssertEqual(retried.map(\.idempotencyKey), [first[0].idempotencyKey, first[0].idempotencyKey])
+        XCTAssertNotNil(invite, "建房重试成功后调用方仍需拿到网易云邀请")
+        XCTAssertNil(model.roomMutation)
+        XCTAssertNotNil(model.room)
+    }
+
+    func testFailedTrackChangeRetriesTheSameTrackRoomAndKey() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        _ = await model.createRoom(for: MusicFixtures.netease)
+        await api.setFailing(true)
+
+        _ = await model.createRoom(for: MusicFixtures.neteaseOther)
+        XCTAssertEqual(
+            model.presentationState(connection: .connected),
+            .commandFailed(.playTrack, .unknown)
+        )
+        XCTAssertEqual(model.presentationState(connection: .connected).primaryAccessibilityLabel, "重试换歌")
+        let first = await api.commandRequests.last
+
+        await api.setFailing(false)
+        _ = await model.retryLastAction()
+        let second = await api.commandRequests.last
+
+        XCTAssertEqual(second?.command, .playTrack)
+        XCTAssertEqual(second?.track, MusicFixtures.neteaseOther)
+        XCTAssertEqual(second?.roomHandle, first?.roomHandle)
+        XCTAssertEqual(second?.idempotencyKey, first?.idempotencyKey)
+        XCTAssertNil(model.roomMutation)
+    }
+
+    func testClearingACreationFailureAlsoClearsItsRetryAction() async throws {
+        let api = ScriptedMurmurAPIClient()
+        await api.setFailing(true)
+        let model = model(api)
+        _ = await model.createRoom(for: MusicFixtures.netease)
+
+        model.clearFailure()
+
+        XCTAssertNil(model.roomMutation)
+        XCTAssertNil(model.failureMessage)
+        XCTAssertEqual(model.presentationState(connection: .connected), .inactive)
+    }
+
+    func testClosingTheRoomClearsAPendingRetryAction() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        _ = await model.createRoom(for: MusicFixtures.netease)
+        await api.setFailing(true)
+        await model.command(.pause)
+        XCTAssertNotNil(model.roomMutation)
+
+        await api.setFailing(false)
+        await model.closeRoom()
+
+        XCTAssertNil(model.roomMutation)
+        XCTAssertNil(model.failureMessage)
+        XCTAssertEqual(model.room?.state, .ended)
     }
 
     func testWithoutARoomThereIsNothingToCommand() async throws {
@@ -1556,7 +1671,21 @@ final class NeteaseSearchModelTests: XCTestCase {
 }
 
 private actor ScriptedMurmurAPIClient: MurmurAPIClient {
+    struct CreateRequest: Equatable {
+        let track: MusicTrackAttachmentV1
+        let idempotencyKey: String
+    }
+
+    struct CommandRequest: Equatable {
+        let command: ListenTogetherCommand
+        let track: MusicTrackAttachmentV1?
+        let roomHandle: String
+        let idempotencyKey: String
+    }
+
     private(set) var calls: [String] = []
+    private(set) var createRequests: [CreateRequest] = []
+    private(set) var commandRequests: [CommandRequest] = []
     private var sharedTrack: MusicTrackAttachmentV1?
     private var failing = false
     private var room: ListenTogetherRoomSnapshotV1?
@@ -1609,6 +1738,7 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
         initialTrack: MusicTrackAttachmentV1, idempotencyKey: String
     ) async throws -> ListenTogetherRoomSnapshotV1 {
         calls.append("create")
+        createRequests.append(.init(track: initialTrack, idempotencyKey: idempotencyKey))
         if failing { throw Refused() }
         let snapshot = ListenTogetherRoomSnapshotV1(
             roomHandle: "handle-1", state: .waitingForUser, currentTrack: initialTrack,
@@ -1635,6 +1765,10 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
         track: MusicTrackAttachmentV1?, idempotencyKey: String
     ) async throws -> ListenTogetherCommandResultV1 {
         calls.append("command:\(command.rawValue)")
+        commandRequests.append(.init(
+            command: command, track: track, roomHandle: handle,
+            idempotencyKey: idempotencyKey
+        ))
         if failing { throw Refused() }
         let status = nextCommandStatus
         let playback = nextPlaybackState

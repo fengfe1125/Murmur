@@ -135,6 +135,12 @@ class Job:
     # Canonical TrackV1 JSON supplied by the App.  OAuth credentials and
     # playback URLs are never part of a job.
     music_track: str | None = None
+    # Durable outbox for the one external room effect caused by this moment.
+    # It is server-authored canonical JSON and survives completion/retry.
+    music_effect: str | None = None
+    # The lease owner that materialised this immutable job snapshot.  Store
+    # mutations which precede an external side effect must prove ownership.
+    worker_id: str | None = None
 
 
 # The non-ordinary things an inbound moment can be asking for.  NULL is the
@@ -234,6 +240,7 @@ CREATE TABLE IF NOT EXISTS app_moments (
     -- 一样是临时的，每条终结路径上一起清空。
     provenance       TEXT,
     music_track      TEXT,
+    music_effect     TEXT,
     request_digest   TEXT NOT NULL,
     idempotency_key  TEXT NOT NULL,
     status           TEXT NOT NULL,
@@ -396,6 +403,10 @@ class AppStore:
             )
         if "music_track" not in moment_columns:
             self.conn.execute("ALTER TABLE app_moments ADD COLUMN music_track TEXT")
+        if "music_effect" not in moment_columns:
+            # Old moments never planned an external room effect.  NULL is the
+            # exact backward-compatible value and needs no row rewrite.
+            self.conn.execute("ALTER TABLE app_moments ADD COLUMN music_effect TEXT")
         if "proactive_memory_finalized" not in moment_columns:
             # Rows from before the durable continuity outbox predate this
             # workflow and must not be replayed as unfinished work.
@@ -997,7 +1008,7 @@ class AppStore:
             while True:
                 row = db.execute(
                     "SELECT j.id,j.moment_id,j.attempts,m.user_id,m.note,m.image_path,m.intent,"
-                    "m.context_moment_ids,m.provenance,m.music_track "
+                    "m.context_moment_ids,m.provenance,m.music_track,m.music_effect "
                     "FROM app_jobs j JOIN app_moments m ON m.id=j.moment_id "
                     "JOIN app_users u ON u.id=m.user_id "
                     "WHERE (j.status='queued' OR (j.status='processing' AND j.lease_until<?)) "
@@ -1050,8 +1061,71 @@ class AppStore:
                 return Job(
                     row["id"], row["moment_id"], row["user_id"], row["note"],
                     row["image_path"], row["intent"], context_ids,
-                    row["provenance"], row["music_track"],
+                    row["provenance"], row["music_track"], row["music_effect"],
+                    worker_id,
                 )
+
+    @staticmethod
+    def _music_effect_json(effect: dict) -> str:
+        if not isinstance(effect, dict):
+            raise ValueError("music effect must be an object")
+        return json.dumps(
+            effect, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+
+    @staticmethod
+    def _decode_music_effect(raw: str | None) -> dict | None:
+        if raw is None:
+            return None
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise AppStoreError("stored music effect is invalid") from exc
+        if not isinstance(value, dict):
+            raise AppStoreError("stored music effect is invalid")
+        return value
+
+    def ensure_music_effect(self, job: Job, effect: dict) -> dict:
+        """Persist the first room decision for a claimed moment exactly once."""
+        if not job.worker_id:
+            raise ValueError("music effect writes require a claimed job")
+        encoded = self._music_effect_json(effect)
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT m.music_effect FROM app_jobs j "
+                "JOIN app_moments m ON m.id=j.moment_id "
+                "WHERE j.id=? AND j.status='processing' AND j.worker_id=?",
+                (job.id, job.worker_id),
+            ).fetchone()
+            if not row:
+                raise Conflict("worker no longer owns the job")
+            current = self._decode_music_effect(row["music_effect"])
+            if current is not None:
+                return current
+            db.execute(
+                "UPDATE app_moments SET music_effect=?,updated_at=? WHERE id=?",
+                (encoded, _iso(), job.moment_id),
+            )
+            return dict(effect)
+
+    def replace_music_effect(self, job: Job, effect: dict) -> dict:
+        """Advance a room decision while the same worker still owns its lease."""
+        if not job.worker_id:
+            raise ValueError("music effect writes require a claimed job")
+        encoded = self._music_effect_json(effect)
+        with self._tx() as db:
+            owned = db.execute(
+                "SELECT 1 FROM app_jobs WHERE id=? AND status='processing' "
+                "AND worker_id=?",
+                (job.id, job.worker_id),
+            ).fetchone()
+            if not owned:
+                raise Conflict("worker no longer owns the job")
+            db.execute(
+                "UPDATE app_moments SET music_effect=?,updated_at=? WHERE id=?",
+                (encoded, _iso(), job.moment_id),
+            )
+            return dict(effect)
 
     def renew_job(
         self, job: Job, worker_id: str, lease: timedelta = timedelta(minutes=3)

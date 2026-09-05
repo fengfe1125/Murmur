@@ -297,7 +297,8 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
             providers: [
                 MusicProviderCapabilityV1(
                     id: MusicProvider.netease.rawValue,
-                    capabilities: ["search", "resolve_shared"]
+                    capabilities: arguments.contains("--murmur-stub-netease-no-search")
+                        ? ["resolve_shared"] : ["search", "resolve_shared"]
                 )
             ],
             listenTogether: ListenTogetherCapabilityV1(
@@ -345,6 +346,13 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
         initialTrack: MusicTrackAttachmentV1,
         idempotencyKey: String
     ) async throws -> ListenTogetherRoomSnapshotV1 {
+        if arguments.contains("--murmur-stub-netease-create-fails") {
+            throw MurmurFailure(
+                code: "room_create_failed",
+                message: "没有建好一起听，请再试一次。",
+                retryable: true
+            )
+        }
         let room = uiRoom(state: .waitingForUser, playback: .unknown, joined: false)
         listenTogetherRoom = room
         return room

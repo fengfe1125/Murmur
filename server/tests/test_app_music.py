@@ -1168,6 +1168,270 @@ class MusicWorkerTests(unittest.TestCase):
         self.assertIsNone(row["music_track"])
 
 
+class DurableMusicEffectTests(unittest.TestCase):
+    """The App database is the outbox between a chat turn and its room."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.settings = settings(self.root)
+        self.cfg = make_config(self.settings.memory_db_path)
+        self.store = AppStore(self.settings.db_path)
+        invite = self.store.create_invite()
+        self.user = self.store.redeem_invite(
+            code=invite, key_id="durable-effect", public_key=b"k", receipt=None,
+            counter=0, environment="development",
+        ).user_id
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def queue(self, *, key="durable-music", note="来首适合下雨天的歌"):
+        return self.store.create_moment(
+            user_id=self.user, note=note, image_path=None,
+            idempotency_key=key, request_digest=key,
+        )
+
+    @staticmethod
+    def music(track=NETEASE_TRACK, *, planner=None):
+        return AppMusic(
+            StubCatalog(results=[track], track=track),
+            planner or StubPlanner(MusicPlan(True, "discover", "雨天")),
+        )
+
+    def processor(self, rooms, music=None):
+        return EngineMomentProcessor(
+            self.cfg, self.root, music=music or self.music(), rooms=rooms,
+            room_user_allowlist=frozenset({self.user}), store=self.store,
+        )
+
+    def effect(self, moment_id):
+        raw = self.store.conn.execute(
+            "SELECT music_effect FROM app_moments WHERE id=?", (moment_id,)
+        ).fetchone()["music_effect"]
+        return json.loads(raw)
+
+    def events(self, moment_id):
+        return self.store.events_after(moment_id, self.user)
+
+    def run_worker(self, rooms, music=None):
+        return AppWorker(
+            self.store, self.cfg, self.settings,
+            processor=self.processor(rooms, music), rooms=rooms,
+        ).process_one()
+
+    def test_model_failure_after_create_completes_with_fallback_and_card(self):
+        queued = self.queue()
+        adapter = InMemoryRoomAdapter()
+        rooms = ListenTogetherRoomManager(adapter)
+
+        with patch("murmur.app_worker.respond", side_effect=RuntimeError("gateway")):
+            self.assertTrue(self.run_worker(rooms))
+
+        events = self.events(queued.moment_id)
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertNotIn("error", [event["event"] for event in events])
+        bubbles = [event["data"] for event in events if event["event"] == "bubble"]
+        self.assertEqual(bubbles[0]["text"], "这首歌先放在这里，陪你听一会儿。")
+        self.assertEqual(
+            bubbles[1]["text"],
+            "房间准备好了。点歌曲卡片里的邀请，去网易云加入。",
+        )
+        self.assertEqual(bubbles[-1]["music_track"], NETEASE_TRACK)
+        self.assertEqual([call[0] for call in adapter.calls], ["create"])
+        effect = self.effect(queued.moment_id)
+        self.assertEqual((effect["action"], effect["status"]), ("create", "created"))
+
+    def test_crash_after_plan_reuses_the_song_and_create_key(self):
+        queued = self.queue(key="crash-before-create")
+
+        class CrashBeforeCreate:
+            def __init__(inner, owner):
+                inner.owner = owner
+                inner.calls = []
+
+            def current(inner, **_kwargs):
+                return None
+
+            def create(inner, **kwargs):
+                effect = inner.owner.effect(queued.moment_id)
+                inner.owner.assertEqual(effect["status"], "planned")
+                inner.owner.assertEqual(effect["track"], NETEASE_TRACK)
+                inner.calls.append(kwargs["idempotency_key"])
+                raise RuntimeError("power loss")
+
+        crashing = CrashBeforeCreate(self)
+        self.assertTrue(self.run_worker(crashing))
+        first = self.effect(queued.moment_id)
+        self.assertEqual(first["idempotency_key"],
+                         f"chat:{queued.moment_id}:create")
+
+        self.store.create_moment(
+            user_id=self.user, note="同一句重试", image_path=None,
+            idempotency_key="crash-before-create",
+            request_digest="crash-before-create",
+        )
+        other = {**NETEASE_TRACK, "track_id": "2", "title": "晴天"}
+        planner = StubPlanner(error=AssertionError("must not choose again"))
+        adapter = InMemoryRoomAdapter()
+        rooms = ListenTogetherRoomManager(adapter)
+        with patch("murmur.app_worker.respond") as respond:
+            respond.return_value = Reply("", "speak", [MODEL_LINE])
+            self.assertTrue(self.run_worker(
+                rooms, self.music(other, planner=planner)
+            ))
+
+        effect = self.effect(queued.moment_id)
+        self.assertEqual(effect["track"], NETEASE_TRACK)
+        self.assertEqual(adapter.calls[0],
+                         ("create", f"chat:{queued.moment_id}:create"))
+
+    def test_crash_after_create_replays_the_same_external_operation(self):
+        queued = self.queue(key="crash-after-create")
+        adapter = InMemoryRoomAdapter()
+        rooms = ListenTogetherRoomManager(adapter)
+        replace_effect = self.store.replace_music_effect
+
+        def crash_before_recording_result(job, effect):
+            if effect.get("status") == "created":
+                raise RuntimeError("power loss after create")
+            return replace_effect(job, effect)
+
+        with patch.object(
+            self.store, "replace_music_effect",
+            side_effect=crash_before_recording_result,
+        ):
+            self.assertTrue(self.run_worker(rooms))
+        self.assertEqual(self.effect(queued.moment_id)["status"], "planned")
+        self.assertEqual([call[0] for call in adapter.calls], ["create"])
+
+        self.store.create_moment(
+            user_id=self.user, note="同一句重试", image_path=None,
+            idempotency_key="crash-after-create",
+            request_digest="crash-after-create",
+        )
+        planner = StubPlanner(error=AssertionError("must not choose again"))
+        with patch("murmur.app_worker.respond") as respond:
+            respond.return_value = Reply("", "speak", [MODEL_LINE])
+            self.assertTrue(self.run_worker(
+                rooms, self.music(planner=planner)
+            ))
+
+        self.assertEqual(self.effect(queued.moment_id)["status"], "created")
+        self.assertEqual(
+            [call[0] for call in adapter.calls], ["create"],
+            "the manager must replay the original create idempotently",
+        )
+
+    def test_room_lookup_failure_keeps_the_song_card_without_an_outbox_plan(self):
+        queued = self.queue(key="room-lookup-failure")
+
+        class FailingCurrent:
+            def current(self, **_kwargs):
+                raise RoomTransportUnavailable("offline")
+
+        with patch("murmur.app_worker.respond") as respond:
+            respond.return_value = Reply("", "speak", [MODEL_LINE])
+            self.assertTrue(self.run_worker(FailingCurrent()))
+
+        events = self.events(queued.moment_id)
+        bubbles = [event["data"] for event in events if event["event"] == "bubble"]
+        self.assertEqual(bubbles[0]["text"], MODEL_LINE)
+        self.assertEqual(bubbles[1]["text"], "一起听那边这次没连上。")
+        self.assertEqual(bubbles[-1]["music_track"], NETEASE_TRACK)
+        self.assertIsNone(self.store.conn.execute(
+            "SELECT music_effect FROM app_moments WHERE id=?",
+            (queued.moment_id,),
+        ).fetchone()["music_effect"])
+
+    def test_closed_switched_room_is_not_recreated_after_crash(self):
+        queued = self.queue(key="crash-after-switch")
+        adapter = InMemoryRoomAdapter()
+        rooms = ListenTogetherRoomManager(adapter)
+        original = rooms.create(
+            user_id=self.user,
+            initial_track={**NETEASE_TRACK, "track_id": "old", "title": "旧歌"},
+            idempotency_key="existing",
+        )
+        replace_effect = self.store.replace_music_effect
+
+        def crash_after_command(job, effect):
+            if effect.get("status") == "synchronized":
+                raise RuntimeError("power loss after command")
+            return replace_effect(job, effect)
+
+        with patch.object(
+            self.store, "replace_music_effect", side_effect=crash_after_command
+        ):
+            self.assertTrue(self.run_worker(rooms))
+        self.assertEqual(
+            [call[0] for call in adapter.calls].count("command"), 1
+        )
+        rooms.close(user_id=self.user, room_handle=original.room_handle)
+
+        self.store.create_moment(
+            user_id=self.user, note="同一句重试", image_path=None,
+            idempotency_key="crash-after-switch",
+            request_digest="crash-after-switch",
+        )
+        other = {**NETEASE_TRACK, "track_id": "2", "title": "晴天"}
+        planner = StubPlanner(error=AssertionError("must not choose again"))
+        with patch("murmur.app_worker.respond") as respond:
+            respond.return_value = Reply("", "speak", [MODEL_LINE])
+            self.assertTrue(self.run_worker(
+                rooms, self.music(other, planner=planner)
+            ))
+
+        effect = self.effect(queued.moment_id)
+        self.assertEqual(effect["track"], NETEASE_TRACK)
+        self.assertEqual(effect["action"], "play_track")
+        self.assertEqual(effect["room_handle"], original.room_handle)
+        self.assertEqual(effect["status"], "room_ended")
+        self.assertEqual([call[0] for call in adapter.calls].count("create"), 1)
+        texts = [event["data"].get("text") for event in self.events(queued.moment_id)]
+        self.assertIn("刚才的一起听房间已经结束了，这次没有重新开房。", texts)
+
+    def test_create_conflict_is_persisted_as_switch_before_command(self):
+        queued = self.queue(key="create-race")
+        adapter = InMemoryRoomAdapter()
+        manager = ListenTogetherRoomManager(adapter)
+
+        class RacingRooms:
+            def __init__(inner):
+                inner.raced = False
+
+            def current(inner, **kwargs):
+                return manager.current(**kwargs)
+
+            def create(inner, **kwargs):
+                if not inner.raced:
+                    inner.raced = True
+                    manager.create(
+                        user_id=self.user,
+                        initial_track={**NETEASE_TRACK, "track_id": "old"},
+                        idempotency_key="racing-room",
+                    )
+                return manager.create(**kwargs)
+
+            def command(inner, **kwargs):
+                effect = self.effect(queued.moment_id)
+                self.assertEqual(effect["action"], "play_track")
+                self.assertEqual(effect["status"], "planned")
+                self.assertEqual(effect["room_handle"], kwargs["room_handle"])
+                return manager.command(**kwargs)
+
+        with patch("murmur.app_worker.respond") as respond:
+            respond.return_value = Reply("", "speak", [MODEL_LINE])
+            self.assertTrue(self.run_worker(RacingRooms()))
+
+        effect = self.effect(queued.moment_id)
+        self.assertEqual((effect["action"], effect["status"]),
+                         ("play_track", "synchronized"))
+        self.assertEqual(effect["idempotency_key"],
+                         f"chat:{queued.moment_id}:play-track")
+
+
 class _StubCompletion:
     """最小的 chat.completions.create 替身，只回一段 JSON。"""
 

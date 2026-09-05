@@ -152,8 +152,32 @@ enum ListenTogetherCommandStatus: String, Codable, Sendable {
     case failed
 }
 
+enum ListenTogetherRetryAction: Equatable, Sendable {
+    case create(track: MusicTrackAttachmentV1, idempotencyKey: String)
+    case command(
+        command: ListenTogetherCommand,
+        track: MusicTrackAttachmentV1?,
+        roomHandle: String,
+        idempotencyKey: String
+    )
+
+    var track: MusicTrackAttachmentV1? {
+        switch self {
+        case .create(let track, _), .command(_, let track?, _, _): track
+        case .command(_, nil, _, _): nil
+        }
+    }
+
+    var command: ListenTogetherCommand? {
+        if case .command(let command, _, _, _) = self { return command }
+        return nil
+    }
+}
+
 enum ListenTogetherPresentationState: Equatable, Sendable {
     case inactive
+    case creating(MusicTrackAttachmentV1)
+    case creationFailed(MusicTrackAttachmentV1, String)
     case waiting
     case playing
     case paused
@@ -167,15 +191,30 @@ enum ListenTogetherPresentationState: Equatable, Sendable {
         room: ListenTogetherRoomSnapshotV1?,
         commandStatus: ListenTogetherCommandStatus?,
         isChanging: Bool,
-        failedCommand: ListenTogetherCommand?,
+        mutation: ListenTogetherRetryAction?,
+        failureMessage: String?,
         lastConfirmedPlayback: ListenTogetherPlaybackState
     ) -> Self {
+        if let mutation {
+            if isChanging {
+                if case .create(let track, _) = mutation, room == nil {
+                    return .creating(track)
+                }
+                return .syncing(mutation.command)
+            }
+            if commandStatus == .failed {
+                if case .create(let track, _) = mutation, room == nil {
+                    return .creationFailed(track, failureMessage ?? "没有建好一起听，请再试一次。")
+                }
+                return .commandFailed(mutation.command, lastConfirmedPlayback)
+            }
+        }
         guard let room else { return .inactive }
         if case .offline = connection { return .offline }
         if room.state == .failed { return .roomFailed(room.errorCode) }
         if room.state == .ended { return .inactive }
         if commandStatus == .failed {
-            return .commandFailed(failedCommand, lastConfirmedPlayback)
+            return .commandFailed(mutation?.command, lastConfirmedPlayback)
         }
         if isChanging || commandStatus == .accepted || room.state == .syncing {
             return .syncing(room.pendingCommand.flatMap(ListenTogetherCommand.init(rawValue:)))
@@ -199,6 +238,8 @@ enum ListenTogetherPresentationState: Equatable, Sendable {
 extension ListenTogetherPresentationState {
     var statusTag: String {
         switch self {
+        case .creating: "正在创建"
+        case .creationFailed: "创建失败"
         case .waiting: "等待加入"
         case .playing: "已连接"
         case .paused: "已暂停"
@@ -212,6 +253,8 @@ extension ListenTogetherPresentationState {
 
     var statusLine: String {
         switch self {
+        case .creating: "正在创建一起听…"
+        case .creationFailed: "没有建好一起听"
         case .waiting: "等待加入 / 点此打开网易云邀请"
         case .playing: "已连接，正在一起听"
         case .paused: "房间仍保持连接"
@@ -225,6 +268,8 @@ extension ListenTogetherPresentationState {
 
     var primarySymbol: String {
         switch self {
+        case .creating: "circle"
+        case .creationFailed: "arrow.clockwise"
         case .waiting: "arrow.up.forward.app.fill"
         case .playing: "pause.fill"
         case .paused: "play.fill"
@@ -235,10 +280,13 @@ extension ListenTogetherPresentationState {
 
     var primaryAccessibilityLabel: String {
         switch self {
+        case .creating: "正在创建一起听"
+        case .creationFailed: "重新建房"
         case .waiting: "打开网易云一起听邀请"
         case .playing: "暂停一起听"
         case .paused: "继续一起听"
-        case .commandFailed: "重试上一次一起听操作"
+        case .commandFailed(let command, _):
+            command == .playTrack ? "重试换歌" : "重试上一次一起听操作"
         case .roomFailed: "重新创建一起听邀请"
         case .syncing: "正在同步一起听操作"
         case .offline: "Murmur 连接异常，控制暂不可用"
@@ -264,7 +312,7 @@ extension ListenTogetherPresentationState {
 
     var isFailure: Bool {
         switch self {
-        case .commandFailed, .roomFailed, .offline: true
+        case .creationFailed, .commandFailed, .roomFailed, .offline: true
         default: false
         }
     }
@@ -280,7 +328,7 @@ extension ListenTogetherPresentationState {
     var allowsTrackSkipping: Bool {
         switch self {
         case .playing, .paused, .syncing, .commandFailed, .offline: true
-        case .waiting, .roomFailed, .inactive: false
+        case .creating, .creationFailed, .waiting, .roomFailed, .inactive: false
         }
     }
 
@@ -324,7 +372,7 @@ final class NeteaseMusicModel: ObservableObject {
     @Published private(set) var isResolvingShare = false
     @Published private(set) var isChangingRoom = false
     @Published private(set) var failureMessage: String?
-    @Published private(set) var lastFailedCommand: ListenTogetherCommand?
+    @Published private(set) var roomMutation: ListenTogetherRetryAction?
     @Published private(set) var lastConfirmedPlaybackState: ListenTogetherPlaybackState = .unknown
 
     /// Not private: 一起听 的选歌面板要用同一个已认证的客户端搜歌，而它是一个
@@ -378,7 +426,11 @@ final class NeteaseMusicModel: ObservableObject {
         failureMessage = nil
     }
 
-    func clearFailure() { failureMessage = nil }
+    func clearFailure() {
+        failureMessage = nil
+        commandStatus = nil
+        roomMutation = nil
+    }
 
 #if DEBUG
     func seedUITestSharePreviewIfRequested() {
@@ -396,9 +448,14 @@ final class NeteaseMusicModel: ObservableObject {
             room: room,
             commandStatus: commandStatus,
             isChanging: isChangingRoom,
-            failedCommand: lastFailedCommand,
+            mutation: roomMutation,
+            failureMessage: failureMessage,
             lastConfirmedPlayback: lastConfirmedPlaybackState
         )
+    }
+
+    var displayTrack: MusicTrackAttachmentV1? {
+        roomMutation?.track ?? room?.currentTrack
     }
 
     func createRoom(for track: MusicTrackAttachmentV1) async -> URL? {
@@ -414,41 +471,17 @@ final class NeteaseMusicModel: ObservableObject {
         // 建房和换歌都会改房间，所以此刻已经在路上的那次轮询讲的都是旧事。
         // 递增放在两条分支之前：换歌那条以前漏了，回来的旧快照会把刚确认
         // 的结果盖掉。
-        roomGeneration += 1
-        isChangingRoom = true
-        lastFailedCommand = nil
-        commandStatus = room?.isActive == true ? .accepted : nil
-        defer { isChangingRoom = false }
-        do {
-            let snapshot: ListenTogetherRoomSnapshotV1
-            if let current = room, current.isActive {
-                let result = try await api.commandListenTogetherRoom(
-                    handle: current.roomHandle,
-                    command: .playTrack,
-                    track: track,
-                    idempotencyKey: UUID().uuidString.lowercased()
-                )
-                snapshot = result.room
-                commandStatus = result.status
-                lastFailedCommand = result.status == .failed ? .playTrack : nil
-            } else {
-                snapshot = try await api.createListenTogetherRoom(
-                    initialTrack: track,
-                    idempotencyKey: UUID().uuidString.lowercased()
-                )
-                commandStatus = nil
-            }
-            apply(snapshot)
-            failureMessage = nil
-            // Someone already connected to the room does not need to be sent
-            // out of Murmur again. A waiting room still returns its invitation.
-            return snapshot.userJoined ? nil : snapshot.inviteURL
-        } catch {
-            failureMessage = MurmurFailure.from(error).message
-            commandStatus = .failed
-            lastFailedCommand = room?.isActive == true ? .playTrack : nil
-            return nil
+        let key = UUID().uuidString.lowercased()
+        let action: ListenTogetherRetryAction
+        if let current = room, current.isActive {
+            action = .command(
+                command: .playTrack, track: track,
+                roomHandle: current.roomHandle, idempotencyKey: key
+            )
+        } else {
+            action = .create(track: track, idempotencyKey: key)
         }
+        return await perform(action)
     }
 
     /// 汇流，不是丢弃。
@@ -485,14 +518,21 @@ final class NeteaseMusicModel: ObservableObject {
                    snapshot.state != .syncing,
                    snapshot.pendingCommand == nil {
                     commandStatus = nil
+                    roomMutation = nil
                 }
             } else {
                 room = nil
-                commandStatus = nil
-                lastFailedCommand = nil
+                if case .create = roomMutation, commandStatus == .failed {
+                    // A failed create is a local mutation state. An idle poll
+                    // finding no room must not erase the song or its retry key.
+                } else {
+                    commandStatus = nil
+                    roomMutation = nil
+                    failureMessage = nil
+                }
                 lastConfirmedPlaybackState = .unknown
             }
-            failureMessage = nil
+            if room != nil { failureMessage = nil }
         } catch {
             if reportFailure {
                 failureMessage = MurmurFailure.from(error).message
@@ -502,40 +542,69 @@ final class NeteaseMusicModel: ObservableObject {
 
     func command(_ command: ListenTogetherCommand) async {
         guard let room, room.isActive else { return }
+        _ = await perform(.command(
+            command: command,
+            track: nil,
+            roomHandle: room.roomHandle,
+            idempotencyKey: UUID().uuidString.lowercased()
+        ))
+    }
+
+    @discardableResult
+    private func perform(_ action: ListenTogetherRetryAction) async -> URL? {
         roomGeneration += 1
         isChangingRoom = true
-        commandStatus = .accepted
-        lastFailedCommand = nil
+        roomMutation = action
+        commandStatus = action.command == nil ? nil : .accepted
+        failureMessage = nil
         defer { isChangingRoom = false }
         do {
-            let result = try await api.commandListenTogetherRoom(
-                handle: room.roomHandle,
-                command: command,
-                track: nil,
-                idempotencyKey: UUID().uuidString.lowercased()
-            )
-            apply(result.room)
-            commandStatus = result.status
-            lastFailedCommand = result.status == .failed ? command : nil
+            let snapshot: ListenTogetherRoomSnapshotV1
+            switch action {
+            case .create(let track, let key):
+                snapshot = try await api.createListenTogetherRoom(
+                    initialTrack: track, idempotencyKey: key
+                )
+                commandStatus = nil
+                roomMutation = nil
+            case .command(let command, let track, let handle, let key):
+                let result = try await api.commandListenTogetherRoom(
+                    handle: handle, command: command, track: track, idempotencyKey: key
+                )
+                snapshot = result.room
+                commandStatus = result.status
+                if result.status == .synchronized { roomMutation = nil }
+            }
+            apply(snapshot)
             failureMessage = nil
-            if result.status == .accepted {
+            if commandStatus == .accepted {
                 await refreshRoom()
             }
+            return snapshot.userJoined ? nil : snapshot.inviteURL
         } catch {
             commandStatus = .failed
-            lastFailedCommand = command
+            if case .create = action {
+                failureMessage = MurmurFailure.from(error).message
+            }
+            return nil
         }
     }
 
-    func retryLastCommand() async {
-        guard let lastFailedCommand else { return }
-        await command(lastFailedCommand)
+    @discardableResult
+    func retryLastAction() async -> URL? {
+        guard let roomMutation else { return nil }
+        return await perform(roomMutation)
     }
 
     func closeRoom() async {
         guard let room else { return }
         roomGeneration += 1
         isChangingRoom = true
+        // Closing is a new user decision.  A prior failed pause or track
+        // change must not remain available for retry after this point.
+        commandStatus = nil
+        roomMutation = nil
+        failureMessage = nil
         defer { isChangingRoom = false }
         do {
             self.room = try await api.closeListenTogetherRoom(
@@ -543,7 +612,7 @@ final class NeteaseMusicModel: ObservableObject {
                 idempotencyKey: UUID().uuidString.lowercased()
             )
             commandStatus = nil
-            lastFailedCommand = nil
+            roomMutation = nil
             lastConfirmedPlaybackState = .unknown
             failureMessage = nil
         } catch {
@@ -558,7 +627,7 @@ final class NeteaseMusicModel: ObservableObject {
         }
         if !snapshot.isActive {
             commandStatus = nil
-            lastFailedCommand = nil
+            roomMutation = nil
         }
     }
 

@@ -29,6 +29,7 @@ from .app_lock import UserOperationLock
 from .app_music import (
     MUSIC_NOT_FOUND_LINE,
     AppMusic,
+    MusicChoice,
     load_music_track,
     music_fallback_text,
     music_prompt_line,
@@ -46,6 +47,8 @@ from .photo import Photo, PhotoTooLarge, save_preview
 from .photo import load as load_photo
 
 log = logging.getLogger("murmur.app_worker")
+
+MUSIC_MODEL_FALLBACK_LINE = "这首歌先放在这里，陪你听一会儿。"
 
 
 _MEMORY_LINK_SCHEMA = """
@@ -167,6 +170,7 @@ class EngineMomentProcessor:
         rooms=None,
         room_user_allowlist: frozenset[str] = frozenset(),
         music_user_allowlist: frozenset[str] = frozenset(),
+        store: AppStore | None = None,
     ):
         self.cfg = cfg
         self.data_root = data_root
@@ -183,6 +187,9 @@ class EngineMomentProcessor:
         # 开关是 `self.music` 在不在，这一条是灰度名单——和 App API 那面
         # 同一个判断，空集合等于放行。房间白名单不是这个语义，别混用。
         self.music_user_allowlist = music_user_allowlist
+        # The App database is the outbox for room side effects.  Direct unit
+        # processors may omit it; the production builder always supplies it.
+        self.store = store
 
     def __call__(
         self, job: Job, memory: Memory, on_bubble: Callable[[str], None]
@@ -226,13 +233,21 @@ class EngineMomentProcessor:
         # prompt（不然它会答一句和卡片无关的话），而且点歌那一轮必须关掉
         # 逐条气泡流——先把曲目确定并落库，再一次性输出文字和卡片。
         music = self._music_for(job.user_id)
-        shared = music.verify_shared(job.music_track) if music else None
-        choice = music.choose_for(job.note) if music and shared is None else None
+        stored_effect = self._stored_music_effect(job)
+        shared = (
+            music.verify_shared(job.music_track)
+            if music and stored_effect is None else None
+        )
+        choice = (
+            MusicChoice(True, stored_effect["track"])
+            if stored_effect is not None
+            else music.choose_for(job.note) if music and shared is None else None
+        )
         chosen = choice.track if choice else None
         # 房间是外部副作用，必须先于模型和落库发生；但它只往这一轮多加一句，
         # 不替这一轮说话。点歌是把一个模糊或确定的需求拆成一首歌，开不开房、
         # 换不换歌是拿到歌之后另一件事。
-        room_line = self._apply_music_to_room(job, chosen)
+        chosen, room_line, room_effect = self._apply_music_to_room(job, chosen)
         context_extra: list[str] = []
         if shared is not None:
             context_extra.append(music_prompt_line(shared, actor="他"))
@@ -269,15 +284,29 @@ class EngineMomentProcessor:
             )
             if reading is not None:
                 return reading
-        reply = respond(
-            moment, memory, self.cfg, photo=photo, note=job.note, chat_id=chat_id,
-            # 点歌那一轮不流式：一条崩溃后重来的 moment 不能换一首歌，也不能
-            # 把同一张卡片发两次。曲目落库之后才由调用方一次性发出去。
-            on_bubble=None if chosen is not None else on_bubble,
-            dossier=prompt_dossier,
-            history_entries=self._archive_context(memory, job),
-            context_extra=context_extra or None,
-        )
+        try:
+            reply = respond(
+                moment, memory, self.cfg, photo=photo, note=job.note, chat_id=chat_id,
+                # 点歌那一轮不流式：一条崩溃后重来的 moment 不能换一首歌，也不能
+                # 把同一张卡片发两次。曲目落库之后才由调用方一次性发出去。
+                on_bubble=None if chosen is not None else on_bubble,
+                dossier=prompt_dossier,
+                history_entries=self._archive_context(memory, job),
+                context_extra=context_extra or None,
+            )
+        except Exception as error:
+            if room_effect is None or room_effect.get("status") == "planned":
+                raise
+            # The room operation is already a durable external fact.  Retrying
+            # the model would only risk replaying that fact and hiding the card.
+            log.warning(
+                "App music reply used deterministic fallback moment_id=%s "
+                "error_type=%s",
+                job.moment_id, type(error).__name__,
+            )
+            reply = Reply(
+                scene="（一起听）", move="speak", say=[MUSIC_MODEL_FALLBACK_LINE]
+            )
         # 两句固定说明：一首都没找到，和房间那边发生了什么。都要跟它自己的话
         # 一起进 `say`，这样它们会被落库、被崩溃后的重放原样带回来，不必在发
         # 事件那一层再单独记一件事。两句互斥——没找到就没有歌可以进房间——
@@ -360,7 +389,61 @@ class EngineMomentProcessor:
             None,
         )
 
-    def _apply_music_to_room(self, job: Job, chosen: dict | None) -> str | None:
+    @staticmethod
+    def _decode_music_effect(raw: str | None) -> dict | None:
+        if raw is None:
+            return None
+        value = json.loads(raw)
+        if (
+            not isinstance(value, dict)
+            or value.get("version") != 1
+            or value.get("action") not in {"create", "play_track"}
+            or value.get("status") not in {
+                "planned", "created", "accepted", "synchronized", "failed",
+                "room_ended", "idempotency_conflict",
+            }
+            or not isinstance(value.get("idempotency_key"), str)
+        ):
+            raise ValueError("stored music effect is invalid")
+        track = load_music_track(json.dumps(value.get("track"), ensure_ascii=False))
+        if track is None or track.get("provider") != "netease":
+            raise ValueError("stored music effect track is invalid")
+        value["track"] = track
+        room_handle = value.get("room_handle")
+        if value["action"] == "play_track" and not isinstance(room_handle, str):
+            raise ValueError("stored music effect room is invalid")
+        line = value.get("line")
+        if line is not None and not isinstance(line, str):
+            raise ValueError("stored music effect line is invalid")
+        return value
+
+    def _stored_music_effect(self, job: Job) -> dict | None:
+        return self._decode_music_effect(getattr(job, "music_effect", None))
+
+    def _save_music_effect(
+        self, job: Job, effect: dict, *, first: bool = False
+    ) -> dict:
+        if self.store is None:
+            return effect
+        saved = (
+            self.store.ensure_music_effect(job, effect)
+            if first else self.store.replace_music_effect(job, effect)
+        )
+        return self._decode_music_effect(json.dumps(saved, ensure_ascii=False)) or effect
+
+    @staticmethod
+    def _finished_music_effect(effect: dict, *, status: str, line: str,
+                               room_handle: str | None = None) -> dict:
+        value = dict(effect)
+        value["status"] = status
+        value["line"] = line
+        if room_handle is not None:
+            value["room_handle"] = room_handle
+        return value
+
+    def _apply_music_to_room(
+        self, job: Job, chosen: dict | None
+    ) -> tuple[dict | None, str | None, dict | None]:
         """Create a room for a resolved request, or change an active room.
 
         Returns the one line to append to this turn's reply, or ``None`` when
@@ -370,10 +453,9 @@ class EngineMomentProcessor:
         a song, and what that does to a room is a separate decision that adds a
         sentence rather than replacing 它自己的话.
 
-        Always try the create idempotency key first.  If the worker completed
-        the external create and crashed before persisting its reply, replaying
-        this moment then returns that same create result instead of mistaking
-        the existing room for a reason to send one extra ``play_track``.
+        The first observed room state becomes a durable create-or-switch plan.
+        Replays execute that exact plan with its original idempotency key; they
+        never reinterpret a room the user closed as permission to create one.
         """
         if (
             self.rooms is None
@@ -381,49 +463,154 @@ class EngineMomentProcessor:
             or chosen is None
             or chosen.get("provider") != "netease"
         ):
-            return None
+            return chosen, None, None
         from .app_listen_together import (
             ListenTogetherError,
             RoomConflict,
             RoomIdempotencyConflict,
+            RoomNotFound,
         )
 
-        try:
+        # Small processor unit tests and third-party call sites can construct
+        # the engine without the App Store.  They retain the old manager-level
+        # idempotency path; the production builder always supplies the durable
+        # outbox below.
+        if self.store is None:
             try:
-                self.rooms.create(
-                    user_id=job.user_id,
-                    initial_track=chosen,
-                    idempotency_key=f"chat:{job.moment_id}:create",
-                )
-                line = "房间准备好了。点歌曲卡片里的邀请，去网易云加入。"
-            except RoomIdempotencyConflict:
-                # The same moment resolving to different tracks is not a new
-                # instruction.  Fail closed instead of turning the replay into
-                # an extra command inside whichever room happens to be active.
-                #
-                # 只有「建房成功、Memory 提交之前崩了、重放又选中了另一首」
-                # 才走到这里；提交落地的重放走 `_complete_linked`，读回原歌
-                # 不重选。房间是连着的，所以不能说「没连上」。
-                line = (
-                    "刚才那次已经建过房间了，里面放的不是这首。"
-                    "想换的话点卡片上的按钮。"
-                )
-            except RoomConflict:
+                try:
+                    self.rooms.create(
+                        user_id=job.user_id,
+                        initial_track=chosen,
+                        idempotency_key=f"chat:{job.moment_id}:create",
+                    )
+                    line = "房间准备好了。点歌曲卡片里的邀请，去网易云加入。"
+                except RoomIdempotencyConflict:
+                    line = (
+                        "刚才那次已经建过房间了，里面放的不是这首。"
+                        "想换的话点卡片上的按钮。"
+                    )
+                except RoomConflict:
+                    current = self.rooms.current(
+                        user_id=job.user_id, refresh=False
+                    )
+                    if current is None:
+                        raise
+                    result = self.rooms.command(
+                        user_id=job.user_id,
+                        room_handle=current.room_handle,
+                        command="play_track",
+                        track=chosen,
+                        idempotency_key=f"chat:{job.moment_id}:play-track",
+                    )
+                    line = self._room_command_line(
+                        result.status, changing_track=True
+                    )
+            except ListenTogetherError:
+                line = "一起听那边这次没连上。"
+            return chosen, line, None
+
+        effect = self._stored_music_effect(job)
+        if effect is None:
+            try:
                 current = self.rooms.current(user_id=job.user_id, refresh=False)
-                if current is None:
-                    raise
+            except ListenTogetherError:
+                # No external action has happened, so there is nothing to put
+                # in the outbox yet.  The song card can still be delivered and
+                # the room half of the reply must stay truthful.
+                return chosen, "一起听那边这次没连上。", None
+            action = "play_track" if current is not None else "create"
+            effect = {
+                "version": 1,
+                "track": chosen,
+                "action": action,
+                "room_handle": current.room_handle if current is not None else None,
+                "idempotency_key": f"chat:{job.moment_id}:"
+                                   f"{'play-track' if current is not None else 'create'}",
+                "status": "planned",
+                "line": None,
+            }
+            effect = self._save_music_effect(job, effect, first=True)
+        chosen = effect["track"]
+        if effect["status"] != "planned":
+            return chosen, effect.get("line"), effect
+
+        try:
+            if effect["action"] == "create":
+                try:
+                    snapshot = self.rooms.create(
+                        user_id=job.user_id,
+                        initial_track=chosen,
+                        idempotency_key=effect["idempotency_key"],
+                    )
+                except RoomIdempotencyConflict:
+                    line = (
+                        "刚才那次已经建过房间了，里面放的不是这首。"
+                        "想换的话点卡片上的按钮。"
+                    )
+                    effect = self._save_music_effect(job, self._finished_music_effect(
+                        effect, status="idempotency_conflict", line=line
+                    ))
+                    return chosen, line, effect
+                except RoomConflict:
+                    current = self.rooms.current(
+                        user_id=job.user_id, refresh=False
+                    )
+                    if current is None:
+                        raise
+                    # Persist the conversion before the command.  A crash from
+                    # here on replays this exact room and never falls back to
+                    # creating whichever room happens to be absent later.
+                    effect = {
+                        **effect,
+                        "action": "play_track",
+                        "room_handle": current.room_handle,
+                        "idempotency_key": f"chat:{job.moment_id}:play-track",
+                        "status": "planned",
+                        "line": None,
+                    }
+                    effect = self._save_music_effect(job, effect)
+                else:
+                    line = "房间准备好了。点歌曲卡片里的邀请，去网易云加入。"
+                    effect = self._save_music_effect(job, self._finished_music_effect(
+                        effect, status="created", line=line,
+                        room_handle=snapshot.room_handle,
+                    ))
+                    return chosen, line, effect
+
+            # Either the first decision was play_track, or a concurrent create
+            # was durably converted above.  Only the recorded room may change.
+            current = self.rooms.current(user_id=job.user_id, refresh=False)
+            if (
+                current is None
+                or current.room_handle != effect.get("room_handle")
+            ):
+                line = "刚才的一起听房间已经结束了，这次没有重新开房。"
+                effect = self._save_music_effect(job, self._finished_music_effect(
+                    effect, status="room_ended", line=line
+                ))
+                return chosen, line, effect
+            try:
                 result = self.rooms.command(
                     user_id=job.user_id,
-                    room_handle=current.room_handle,
+                    room_handle=effect["room_handle"],
                     command="play_track",
                     track=chosen,
-                    idempotency_key=f"chat:{job.moment_id}:play-track",
+                    idempotency_key=effect["idempotency_key"],
                 )
+            except RoomNotFound:
+                line = "刚才的一起听房间已经结束了，这次没有重新开房。"
+                status = "room_ended"
+            else:
                 line = self._room_command_line(result.status, changing_track=True)
+                status = result.status
         except ListenTogetherError:
             # 歌已经由它自己递过去了，这里只说房间那一半。
             line = "一起听那边这次没连上。"
-        return line
+            status = "failed"
+        effect = self._save_music_effect(job, self._finished_music_effect(
+            effect, status=status, line=line
+        ))
+        return chosen, line, effect
 
     @staticmethod
     def _room_command_line(status: str, *, changing_track: bool = False) -> str:
@@ -1149,6 +1336,7 @@ def build_processor(
         music_user_allowlist=(
             settings.music_user_allowlist if music is not None else frozenset()
         ),
+        store=store,
     )
 
 

@@ -73,10 +73,12 @@ struct ListenTogetherTabView: View {
             Color.clear
         } else if !music.isListenTogetherAvailable {
             unavailable
-        } else if presentation == .inactive {
-            empty
         } else {
-            player
+            switch presentation {
+            case .inactive: empty
+            case .creating, .creationFailed: roomMutation
+            default: player
+            }
         }
     }
 
@@ -114,24 +116,78 @@ struct ListenTogetherTabView: View {
                 .foregroundStyle(MurmurTheme.secondaryInk)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("选一首歌") { showPicker = true }
-                .font(MurmurTheme.body(.subheadline, weight: .semibold))
-                .foregroundStyle(MurmurTheme.onAccent)
-                .padding(.horizontal, 24)
-                .frame(minHeight: MurmurTheme.floatingDisc)
-                .background(MurmurTheme.accent, in: Capsule())
-                .buttonStyle(MurmurPressStyle())
-                // 离线时搜索一定失败。给一个必然打不开的门不如先关上它。
-                .disabled(model.connection.isOffline)
-                .opacity(model.connection.isOffline ? 0.45 : 1)
-                .padding(.top, 8)
-            if model.connection.isOffline {
+            if music.isNeteaseSearchAvailable {
+                Button("选一首歌") { showPicker = true }
+                    .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                    .foregroundStyle(MurmurTheme.onAccent)
+                    .padding(.horizontal, 24)
+                    .frame(minHeight: MurmurTheme.floatingDisc)
+                    .background(MurmurTheme.accent, in: Capsule())
+                    .buttonStyle(MurmurPressStyle())
+                    // 离线时搜索一定失败。给一个必然打不开的门不如先关上它。
+                    .disabled(model.connection.isOffline)
+                    .opacity(model.connection.isOffline ? 0.45 : 1)
+                    .padding(.top, 8)
+            } else {
+                Text("选歌暂不可用")
+                    .font(MurmurTheme.body(.footnote))
+                    .foregroundStyle(MurmurTheme.secondaryInk)
+                    .padding(.top, 8)
+            }
+            if model.connection.isOffline, music.isNeteaseSearchAvailable {
                 Text("Murmur 连接异常，先连上再选歌。")
                     .font(MurmurTheme.body(.footnote))
                     .foregroundStyle(MurmurTheme.coral)
             }
         }
         .accessibilityIdentifier("listen-together-empty")
+    }
+
+    private var roomMutation: some View {
+        centred {
+            cover
+            Text(netease.displayTrack?.title ?? ListenTogetherRoomSnapshotV1.noTrackLine)
+                .font(MurmurTheme.display(.title3))
+                .foregroundStyle(MurmurTheme.ink)
+                .multilineTextAlignment(.center)
+            if let meta = metaLine {
+                Text(meta)
+                    .font(MurmurTheme.body(.subheadline))
+                    .foregroundStyle(MurmurTheme.secondaryInk)
+            }
+            switch presentation {
+            case .creating:
+                ProgressView("正在创建一起听…")
+                    .font(MurmurTheme.body(.footnote, weight: .medium))
+                    .tint(MurmurTheme.accentInk)
+                    .foregroundStyle(MurmurTheme.secondaryInk)
+                    .padding(.top, 8)
+            case .creationFailed(_, let message):
+                Text(message)
+                    .font(MurmurTheme.body(.footnote))
+                    .foregroundStyle(MurmurTheme.coral)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 8)
+                Button {
+                    Task {
+                        if let invite = await netease.retryLastAction() { openURL(invite) }
+                    }
+                } label: {
+                    Text("重新建房")
+                        .font(MurmurTheme.body(.subheadline, weight: .semibold))
+                        .foregroundStyle(MurmurTheme.onAccent)
+                        .padding(.horizontal, 24)
+                        .frame(minHeight: MurmurTheme.floatingDisc)
+                        .background(MurmurTheme.accent, in: Capsule())
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(MurmurPressStyle())
+            default:
+                EmptyView()
+            }
+        }
+        .accessibilityIdentifier("listen-together-room-mutation")
     }
 
     // MARK: - The player
@@ -143,7 +199,7 @@ struct ListenTogetherTabView: View {
             VStack(spacing: 4) {
                 // 只放歌名。`trackLine` 是给聊天页那张一行卡片用的，它自带
                 // 歌手；在这里用会和下面那行的歌手撞一次。
-                Text(netease.room?.currentTrack?.title ?? ListenTogetherRoomSnapshotV1.noTrackLine)
+                Text(netease.displayTrack?.title ?? ListenTogetherRoomSnapshotV1.noTrackLine)
                     .font(MurmurTheme.display(.title3))
                     .foregroundStyle(MurmurTheme.ink)
                     .multilineTextAlignment(.center)
@@ -181,7 +237,7 @@ struct ListenTogetherTabView: View {
     @ViewBuilder
     private var cover: some View {
         let shape = RoundedRectangle(cornerRadius: MurmurTheme.corner, style: .continuous)
-        CachedArtwork(url: netease.room?.currentTrack?.artworkURL) {
+        CachedArtwork(url: netease.displayTrack?.artworkURL) {
             // 中性灰，不是 accent。这块有 240pt，铺成青色远超 murmur-ui 的
             // accent 预算，而且和已上线的 `MusicCardView` 占位不是一个样子。
             shape.fill(MurmurTheme.secondaryInk.opacity(0.14))
@@ -220,7 +276,7 @@ struct ListenTogetherTabView: View {
     private var showsSideKeys: Bool {
         switch presentation {
         case .playing, .paused, .syncing, .commandFailed, .offline: true
-        case .waiting, .roomFailed, .inactive: false
+        case .creating, .creationFailed, .waiting, .roomFailed, .inactive: false
         }
     }
 
@@ -271,8 +327,10 @@ struct ListenTogetherTabView: View {
     private var secondaryActions: some View {
         VStack(spacing: 16) {
             HStack(spacing: 12) {
-                quietPill("换一首") { showPicker = true }
-                    .disabled(model.connection.isOffline)
+                if music.isNeteaseSearchAvailable {
+                    quietPill("换一首") { showPicker = true }
+                        .disabled(model.connection.isOffline)
+                }
                 if netease.room?.inviteURL != nil {
                     quietPill("在网易云打开") { openInvite() }
                 }
@@ -307,7 +365,7 @@ struct ListenTogetherTabView: View {
     // MARK: - Bits
 
     private var metaLine: String? {
-        guard let track = netease.room?.currentTrack else { return nil }
+        guard let track = netease.displayTrack else { return nil }
         let artists = track.artists.joined(separator: "、")
         guard let seconds = track.durationSeconds else {
             return artists.isEmpty ? nil : artists
@@ -341,11 +399,15 @@ struct ListenTogetherTabView: View {
         case .paused:
             Task { await netease.command(.resume) }
         case .commandFailed:
-            Task { await netease.retryLastCommand() }
+            Task { _ = await netease.retryLastAction() }
+        case .creationFailed:
+            Task {
+                if let invite = await netease.retryLastAction() { openURL(invite) }
+            }
         case .roomFailed:
             guard let track = netease.room?.currentTrack else { return }
             start(track)
-        case .inactive, .syncing, .offline:
+        case .inactive, .creating, .syncing, .offline:
             break
         }
     }

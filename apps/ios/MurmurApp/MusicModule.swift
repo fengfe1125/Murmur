@@ -74,6 +74,7 @@ final class MusicModule: ObservableObject {
     /// the module sees playback change without also subscribing to the player.
     @Published private(set) var nowPlaying = MusicNowPlaying.none
     @Published private(set) var isNeteaseCatalogAvailable = false
+    @Published private(set) var isNeteaseSearchAvailable = false
     @Published private(set) var isListenTogetherAvailable = false
     /// Whether the server has answered about this account at all yet.
     ///
@@ -128,6 +129,10 @@ final class MusicModule: ObservableObject {
         isNeteaseCatalogAvailable = availability.providers.contains {
             $0.id == MusicProvider.netease.rawValue
                 && $0.capabilities.contains("resolve_shared")
+        }
+        isNeteaseSearchAvailable = availability.providers.contains {
+            $0.id == MusicProvider.netease.rawValue
+                && $0.capabilities.contains("search")
         }
         isListenTogetherAvailable = availability.listenTogether?.enabled == true
             && availability.listenTogether?.provider == MusicProvider.netease.rawValue
