@@ -59,11 +59,16 @@ def rank_music_search_results(
     """
     clean_query = _normalise_search_text(query)
     clean_tracks = [dict(track) for track in tracks]
+    artist_query = any(
+        _normalise_search_text(artist) == clean_query
+        for track in clean_tracks
+        for artist in track.get("artists", [])
+    )
     exact = [
         track for track in clean_tracks
         if _normalise_search_text(track.get("title")) == clean_query
     ]
-    if exact:
+    if exact and not artist_query:
         return exact[:limit]
 
     compact_query = clean_query.replace(" ", "")

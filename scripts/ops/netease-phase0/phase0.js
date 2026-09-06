@@ -515,25 +515,27 @@ class NeteasePhase0 {
   }
 
   async sendPlayCommand(commandType, targetSongId, formerSongId = null) {
-    const room = this.requireRoom();
-    let nextStatus = room.playStatus;
-    let nextProgress = this.currentProgress();
-    if (commandType === "PLAY") nextStatus = "PLAY";
-    if (commandType === "PAUSE") nextStatus = "PAUSE";
-    if (commandType === "GOTO") {
-      nextStatus = "PLAY";
-      nextProgress = 0;
-    }
-    const result = await this.api.listentogether_play_command({
-      roomId: room.roomId, progress: nextProgress, commandType,
-      formerSongId: formerSongId || "-1", targetSongId,
-      clientSeq: room.clientSeq++, playStatus: nextStatus,
-      cookie: this.cookieHeader(), timeout: 10_000,
+    return this.timed("command_write", async () => {
+      const room = this.requireRoom();
+      let nextStatus = room.playStatus;
+      let nextProgress = this.currentProgress();
+      if (commandType === "PLAY") nextStatus = "PLAY";
+      if (commandType === "PAUSE") nextStatus = "PAUSE";
+      if (commandType === "GOTO") {
+        nextStatus = "PLAY";
+        nextProgress = 0;
+      }
+      const result = await this.api.listentogether_play_command({
+        roomId: room.roomId, progress: nextProgress, commandType,
+        formerSongId: formerSongId || "-1", targetSongId,
+        clientSeq: room.clientSeq++, playStatus: nextStatus,
+        cookie: this.cookieHeader(), timeout: 10_000,
+      });
+      requireCode(result, "play_command");
+      room.progress = nextProgress;
+      room.playStatus = nextStatus;
+      room.playStartedAt = nextStatus === "PLAY" ? this.monotonicNow() : null;
     });
-    requireCode(result, "play_command");
-    room.progress = nextProgress;
-    room.playStatus = nextStatus;
-    room.playStartedAt = nextStatus === "PLAY" ? this.monotonicNow() : null;
   }
 
   /// 放完一首之后往下走：多首就切下一首，单首就重放这一首。
@@ -663,8 +665,12 @@ class NeteasePhase0 {
       await this.restoreAfterRightsConflict(serverSeq);
       return false;
     }
-    const playable = await this.checkPlayableSongIds([target]);
-    if (!playable.includes(target)) {
+    // Keep the accepted queue entirely common-playable. Checking only the
+    // current target lets an unavailable later song contaminate the saved
+    // rollback queue; when the participant reaches it there is no longer a
+    // known-good queue to restore.
+    const playable = new Set(await this.checkPlayableSongIds(playlist));
+    if (!playlist.every((id) => playable.has(id))) {
       await this.restoreAfterRightsConflict(serverSeq);
       return false;
     }

@@ -1333,21 +1333,30 @@ def create_app(
                 502, "music_catalog_unavailable", "音乐服务返回了看不懂的内容。"
             ) from exc
         catalog_ms = round((time.monotonic() - catalog_started) * 1000, 1)
-        tracks = rank_music_search_results(clean, tracks, limit=limit)
+        # Keep the complete bounded candidate window until room playability is
+        # known. Truncating to the public page first can hide a playable exact
+        # version behind five unavailable exact versions.
+        tracks = rank_music_search_results(
+            clean, tracks, limit=MAX_MUSIC_SEARCH_CANDIDATES
+        )
         empty_reason = None
         rights_ms = 0.0
         if purpose == "listen_together" and tracks:
             assert playability_transport is not None
             rights_started = time.monotonic()
-            playable = set(await asyncio.to_thread(
-                playability_transport.playable_song_ids,
-                user_id=auth.user_id,
-                song_ids=[track["track_id"] for track in tracks],
-            ))
+            try:
+                playable = set(await asyncio.to_thread(
+                    playability_transport.playable_song_ids,
+                    user_id=auth.user_id,
+                    song_ids=[track["track_id"] for track in tracks],
+                ))
+            except ListenTogetherError as exc:
+                raise room_api_error(exc) from exc
             rights_ms = round((time.monotonic() - rights_started) * 1000, 1)
             tracks = [track for track in tracks if track["track_id"] in playable]
             if not tracks:
                 empty_reason = "no_common_playable_track"
+        tracks = tracks[:limit]
         log.info(
             "music_search_timing purpose=%s catalog_ms=%s rights_ms=%s total_ms=%s result_count=%s",
             purpose,

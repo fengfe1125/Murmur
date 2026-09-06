@@ -987,6 +987,10 @@ class ExperimentalNeteaseRoomAdapter:
                     ),
                 )
             state = self._accept_state(session, value)
+            if state.error_code == "counterpart_rights_unavailable":
+                return AdapterCommandResult(
+                    "failed", self._public(state), state.error_code
+                )
             synchronized = self._command_confirmed(command, clean_track, before, state)
             return AdapterCommandResult(
                 "synchronized" if synchronized else "accepted", self._public(state)
@@ -1338,11 +1342,17 @@ class RoomIPCClient:
         # 客户端那边的刷新还是静默失败，于是表现成「header 不会自己更新」。
         timeout_seconds: float = 15.0,
         create_timeout_seconds: float = 45.0,
+        command_timeout_seconds: float = 4.5,
         max_message_bytes: int = 64 * 1024,
     ):
         self.socket_path = os.fspath(socket_path)
         self.timeout = timeout_seconds
         self.create_timeout = create_timeout_seconds
+        # A command may still be reconciling inside the worker after the socket
+        # deadline, but the API must stop presenting an indefinite syncing state.
+        # Keep a little room below the product's five-second failure budget for
+        # HTTP response encoding and the client-side state transition.
+        self.command_timeout = command_timeout_seconds
         self.max_message_bytes = max_message_bytes
 
     def create(
@@ -1391,7 +1401,7 @@ class RoomIPCClient:
             "command": command,
             "track": track,
             "idempotency_key": idempotency_key,
-        }, timeout=self.create_timeout)
+        }, timeout=self.command_timeout)
         if not isinstance(data, dict) or set(data) != {"status", "room"}:
             raise RoomIPCUnavailable("worker returned an invalid command response")
         try:

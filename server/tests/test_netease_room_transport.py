@@ -419,6 +419,33 @@ class AdapterWithRealTransportTests(unittest.TestCase):
             "the command response already contains the confirmed snapshot",
         )
 
+    def test_a_rights_conflict_returned_with_a_command_fails_without_syncing(self):
+        def handler(request):
+            if request.url.path == "/api/room/status":
+                return httpx.Response(200, json=room_body(participantCount=2))
+            if request.url.path == "/api/room/playlist":
+                return httpx.Response(200, json=room_body(
+                    participantCount=2,
+                    serverSeq=2,
+                    errorCode="counterpart_rights_unavailable",
+                ))
+            return httpx.Response(200, json={"ok": True})
+
+        adapter = ExperimentalNeteaseRoomAdapter(
+            enabled=True,
+            transport=NeteaseHTTPRoomTransport(
+                "https://127.0.0.1:18763", transport=httpx.MockTransport(handler)
+            ),
+        )
+        room = adapter.create(initial_track=TRACK, idempotency_key="k")
+        result = adapter.command(
+            room_ref=room.room_ref, command="play_track", track=OTHER,
+            idempotency_key="k2",
+        )
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.error_code, "counterpart_rights_unavailable")
+        self.assertEqual(result.state.error_code, "counterpart_rights_unavailable")
+
     def test_a_disabled_adapter_still_refuses_even_with_a_transport(self):
         service = FakeService()
         adapter = ExperimentalNeteaseRoomAdapter(

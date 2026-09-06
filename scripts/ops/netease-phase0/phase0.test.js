@@ -140,6 +140,7 @@ test("timing metrics contain only stage duration and outcome", async (t) => {
   await item.phase0.roomStatus();
   assert.ok(samples.some((sample) => sample.stage === "playability_check"));
   assert.ok(samples.some((sample) => sample.stage === "playlist_write"));
+  assert.ok(samples.some((sample) => sample.stage === "command_write"));
   assert.ok(samples.some((sample) => sample.stage === "status_refresh"));
   for (const sample of samples) {
     assert.deepEqual(Object.keys(sample).sort(), ["durationMs", "outcome", "stage"]);
@@ -211,11 +212,15 @@ test("command benchmark builds 50 mixed commands and summarizes latency", () => 
   const results = Array.from({ length: 50 }, (_unused, index) => ({
     synchronized: index !== 49,
     latencyMs: index === 49 ? null : 200 + index,
+    independentlyVerified: index !== 49,
+    statusLatencyMs: index === 49 ? null : 100 + index,
   }));
   const summary = summarize(results);
   assert.equal(summary.synchronized, 49);
   assert.equal(summary.failed, 1);
   assert.equal(summary.withinThresholdRate, 0.98);
+  assert.equal(summary.statusReads, 49);
+  assert.equal(summary.statusP95LatencyMs, 146);
 });
 
 test("logout helper accepts only an authenticated allowlisted session shape", () => {
@@ -459,6 +464,29 @@ test("an unplayable participant switch restores the last playable queue and surf
   assert.equal(recovered.currentSongId, "22");
   assert.equal(Object.hasOwn(recovered, "errorCode"), false);
   assert.ok(recovered.queueVersion > version);
+});
+
+test("a remote queue with an unplayable later song never replaces the common queue", async (t) => {
+  const item = fixture();
+  t.after(() => fs.rmSync(item.directory, { recursive: true, force: true }));
+  await item.phase0.loginStart();
+  await item.phase0.loginStatus();
+  await item.phase0.createRoom({ songIds: ["11", "22"], initialSongId: "11" });
+  item.remote.unplayable = new Set(["33"]);
+  item.remote.serverSeq = 9;
+  item.remote.playlist = ["22", "33"];
+  item.remote.playCommand = {
+    targetSongId: "22", playStatus: "PLAY", progress: 0, serverSeq: 9,
+  };
+
+  const rejected = await item.phase0.roomStatus();
+  assert.equal(rejected.currentSongId, "11");
+  assert.equal(rejected.playlistLength, 2);
+  assert.equal(rejected.errorCode, "counterpart_rights_unavailable");
+  assert.equal(
+    item.calls.filter(([name]) => name === "listentogether_sync_list_command").at(-1)[1].displayList,
+    "11,22",
+  );
 });
 
 test("ten minutes of unreachable heartbeats fail closed without clearing an unverified session", async (t) => {

@@ -1,16 +1,15 @@
 # 网易云“一起听”个人 PoC 运行手册
 
-> 状态：实验运行手册｜适用：单用户、专用机器人账号、隔离 VPS｜核验：2026-08-31｜依据：本分支的 app_listen_together、app_music_links 实现与 server/tests 闸门；不代表网易云音乐已向 Murmur 授权，也不构成生产验收
+> 状态：实验运行手册｜适用：单用户、专用机器人账号、隔离 VPS｜核验：2026-09-06｜依据：生产基线 `093aa897` 与 PR #36 的搜索、版权和双向同步实现及测试；不代表网易云音乐已向 Murmur 授权，也不构成公开分发许可
 >
 > 禁止：生产、公测、商店分发、主账号 Cookie、验证码绕过、音频代理或版权限制绕过
 
 ## 1. 两段式闸门
 
-当前分支已经实现曲库、链接解析、iOS 分享/卡片、公共房间 API、内存状态机、IPC、
-幂等和故障收尾，但**没有实现或注入可访问网易云“一起听”的私有协议 transport**。
-`ExperimentalNeteaseRoomAdapter` 在没有经过评审的 transport 时会返回
-`room_protocol_unsupported`，不会创建假房间或伪报同步成功。因此当前可直接验收的是
-搜歌、发歌和分享流程；真正的“一起听”仍停在 Phase 0 协议研究闸门。
+当前代码已经实现曲库、链接解析、iOS 分享/卡片、公共房间 API、内存状态机、IPC、
+幂等、故障收尾和到 Phase 0 的回环 HTTP transport。没有配置协议地址时
+`ExperimentalNeteaseRoomAdapter` 仍返回 `room_protocol_unsupported`；配置地址、专用机器人
+账号和单用户白名单后，房间仍只是非官方、可随时关闭的个人实验，不得据此扩大到公测或分发。
 
 仓库自带的隔离测试工具位于 `scripts/ops/netease-phase0/`。它与 Murmur worker 完全分离，
 只监听 VPS 回环地址，并通过 SSH 隧道提供二维码登录和房间控制页面。专用测试账号的 Cookie
@@ -20,9 +19,9 @@
 `f5ce55bcb46e29c8e5350ca796fb1cc9d9914acd`（MIT）；它只作为 Phase 0 研究依赖，不链接进
 正式 Murmur 服务，也不代表网易云已授权。
 
-第一段只在独立测试 VPS 验证房间协议。测试实例不得使用 Murmur 生产数据库、生产
-`.env`、用户照片或长期记忆。只有双账号真机验收通过，才允许把相同 adapter 接入现有
-`murmur-app-worker`；接入发布时两个网易开关仍保持关闭。
+Phase 0 服务只监听回环地址，随机能力路径不进入主 App API；机器人可播检查也只通过该
+回环能力地址调用。测试实例不得接触用户照片或长期记忆。Phase 0 源码部署目录不受
+`murmur-update` 管理，主服务更新与 Phase 0 更新必须分别授权、分别核对哈希和重启。
 
 曲库和房间是独立能力：曲库失败不影响 Audius；房间失败也不能拖垮 App API 或 worker。
 
@@ -55,10 +54,8 @@ MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL=
 MURMUR_NETEASE_ROOM_DISCONNECT_GRACE_SECONDS=600
 ```
 
-`MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL` 是为 Phase 0 之后的受审 transport 预留的启动
-闸门，并不等于当前代码已经实现 HTTP transport。隔离验证通过、真实 transport 接入并
-通过自动化测试后，才能填写该入口、唯一 Murmur `user_id` 白名单并开启房间开关。
-在此之前，即使误开房间开关，adapter 也必须保持 fail-closed。
+`MURMUR_NETEASE_ROOM_PROTOCOL_BASE_URL` 只接受受审的回环 Phase 0 地址。缺少地址、凭据文件、
+唯一 Murmur `user_id` 白名单或显式房间开关中的任一项时，adapter 都必须 fail-closed。
 
 ## 4. 进程与状态
 
@@ -75,9 +72,9 @@ MURMUR_NETEASE_ROOM_DISCONNECT_GRACE_SECONDS=600
 2. 确认机器人凭据属于专用测试账号，文件权限为 `0600`；
 3. 保持房间关闭，只开启曲库并重启 App API/worker；
 4. 用 allowlist 用户完成搜歌、卡片、粘贴和 iOS 分享测试；
-5. 在隔离 harness 完成 Phase 0、真实 transport 经评审接入后，填写唯一用户白名单与
-   协议入口，再开启房间并重启 worker、App API；当前分支不得执行这一步；
-6. 完成创建、加入、状态、命令、手动结束与异常收尾验收；
+5. 经单独生产授权，核对 Phase 0 文件哈希、填写唯一用户白名单与回环协议入口，再分别
+   重启 Phase 0、worker 和 App API；
+6. 完成创建、加入、双方切歌、版权冲突回退、状态刷新、手动结束与异常收尾验收；
 7. 记录提交 SHA、开关、测试账号别名、测试时间和结果，绝不记录会话值。
 
 ## 6. Kill switch
@@ -109,7 +106,13 @@ MURMUR_NETEASE_ROOM_DISCONNECT_GRACE_SECONDS=600
 ## 8. 个人试用通过标准
 
 - 双账号连续两小时不异常掉线；
-- 50 次混合控制至少 95% 在两秒内确认两端同步；
+- 50 次混合控制全部得到同步或明确失败，其中至少 95% 的成功命令在两秒内确认；
+- 每次命令后的独立状态读取 P95 不超过两秒，结合三秒客户端轮询后，参与者切歌到
+  Murmur 显示的端到端 P95 不超过五秒；
+- 搜索、可播检查、歌单写入、播放命令写入、确认与状态刷新只记录阶段、耗时和结果，
+  不记录用户、搜索词、歌曲、账号或房间标识；
+- 参与者切到任一方不可播歌曲时恢复上一首共同可播歌曲，房间不断开，并显示
+  `counterpart_rights_unavailable`；下一次成功切歌清除提示；
 - 超时、拒绝和断线绝不显示为 synchronized；
 - 手动结束后停止心跳；异常失联十分钟后自动收尾；
 - 七天内无风控、明显漂移或需要人工修协议；

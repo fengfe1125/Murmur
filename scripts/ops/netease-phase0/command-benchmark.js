@@ -48,6 +48,9 @@ function percentile(values, fraction) {
 function summarize(results, thresholdMs = 2_000) {
   const synchronized = results.filter((item) => item.synchronized);
   const latencies = synchronized.map((item) => item.latencyMs);
+  const verifiedReads = results.filter((item) =>
+    item.independentlyVerified && Number.isFinite(item.statusLatencyMs));
+  const statusLatencies = verifiedReads.map((item) => item.statusLatencyMs);
   const withinThreshold = synchronized.filter((item) => item.latencyMs <= thresholdMs).length;
   return {
     commands: results.length,
@@ -59,6 +62,10 @@ function summarize(results, thresholdMs = 2_000) {
     medianLatencyMs: percentile(latencies, 0.5),
     p95LatencyMs: percentile(latencies, 0.95),
     maxLatencyMs: latencies.length ? Math.max(...latencies) : null,
+    statusReads: verifiedReads.length,
+    statusMedianLatencyMs: percentile(statusLatencies, 0.5),
+    statusP95LatencyMs: percentile(statusLatencies, 0.95),
+    statusMaxLatencyMs: statusLatencies.length ? Math.max(...statusLatencies) : null,
   };
 }
 
@@ -113,6 +120,7 @@ async function main() {
     let synchronized = false;
     let independentlyVerified = false;
     let latencyMs = null;
+    let statusLatencyMs = null;
     let error = null;
     try {
       const payload = { command: item.command };
@@ -125,7 +133,9 @@ async function main() {
         String(accepted.currentSongId) === item.expectedSongId &&
         accepted.playStatus === item.expectedStatus;
       if (!synchronized) throw new Error("command_not_synchronized");
+      const statusStarted = Date.now();
       const status = await jsonRequest(new URL("api/room/status", baseUrl));
+      statusLatencyMs = Date.now() - statusStarted;
       independentlyVerified = snapshotMatches(status, item);
       if (!independentlyVerified) throw new Error("independent_snapshot_mismatch");
     } catch (caught) {
@@ -134,7 +144,7 @@ async function main() {
     }
     results.push({
       sequence: index + 1, command: item.command, synchronized,
-      independentlyVerified, latencyMs, error,
+      independentlyVerified, latencyMs, statusLatencyMs, error,
     });
     report.summary = summarize(results, thresholdMs);
     writeReport(output, report);
@@ -145,7 +155,8 @@ async function main() {
   report.completedAt = new Date().toISOString();
   report.summary = summarize(results, thresholdMs);
   writeReport(output, report);
-  if (report.summary.synchronized !== 50 || report.summary.withinThresholdRate < 0.95) {
+  if (report.summary.synchronized !== 50 || report.summary.withinThresholdRate < 0.95 ||
+      report.summary.statusReads !== 50 || report.summary.statusP95LatencyMs > thresholdMs) {
     process.exitCode = 1;
   }
 }

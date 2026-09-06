@@ -19,6 +19,7 @@ from _helpers import EnrolledClient, make_config  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from murmur.app_api import create_app  # noqa: E402
+from murmur.app_listen_together import RoomIPCUnavailable  # noqa: E402
 from murmur.app_music import (  # noqa: E402
     MAX_MUSIC_SEARCH_CANDIDATES,
     MusicCatalog,
@@ -240,6 +241,15 @@ class NeteaseSearchRankingTests(unittest.TestCase):
         tracks = [self.track(1, "夜曲", "周杰伦"), self.track(2, "晴天", "周杰伦")]
         ranked = rank_music_search_results("周杰伦", tracks)
         self.assertEqual(len(ranked), 2)
+
+    def test_artist_search_survives_a_song_whose_title_matches_the_artist_name(self):
+        tracks = [
+            self.track(1, "周杰伦", "别的歌手"),
+            self.track(2, "夜曲", "周杰伦"),
+            self.track(3, "晴天", "周杰伦"),
+        ]
+        ranked = rank_music_search_results("周杰伦", tracks)
+        self.assertEqual([track["track_id"] for track in ranked[:2]], ["2", "3"])
 
     def test_no_exact_title_keeps_fuzzy_fallbacks(self):
         tracks = [self.track(1, "山楂树之恋（官方版）", "尚文婷"), self.track(2, "新鲜感", "雷智皓")]
@@ -838,6 +848,11 @@ class PlayableRoomClient:
         return [song_id for song_id in song_ids if song_id in self.playable_ids]
 
 
+class FailingPlayableRoomClient:
+    def playable_song_ids(self, *, user_id, song_ids):
+        raise RoomIPCUnavailable("phase 0 unavailable")
+
+
 class MusicSearchAPITests(unittest.TestCase):
     """/v1/music/search：选歌器要的那一页。"""
 
@@ -925,6 +940,27 @@ class MusicSearchAPITests(unittest.TestCase):
         self.assertEqual([t["track_id"] for t in response.json()["tracks"]], ["186017"])
         self.assertEqual(len(rooms.calls), 1)
 
+    def test_playability_filter_can_select_an_exact_candidate_after_public_page_limit(self):
+        tracks = [
+            {
+                **NETEASE_TRACK,
+                "track_id": str(186016 + index),
+                "title": "同名歌",
+                "canonical_url": f"https://music.163.com/song?id={186016 + index}",
+            }
+            for index in range(7)
+        ]
+        rooms = PlayableRoomClient({tracks[5]["track_id"]})
+        response = self.post(
+            self.use(catalog=SearchingCatalog(tracks), rooms=rooms),
+            {"query": "同名歌", "purpose": "listen_together", "limit": 5},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            [item["track_id"] for item in response.json()["tracks"]],
+            [tracks[5]["track_id"]],
+        )
+
     def test_shanzhashuzhilian_selects_the_playable_exact_title_without_hardcoding(self):
         def track(track_id, title, artist):
             return {
@@ -960,6 +996,15 @@ class MusicSearchAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["tracks"], [])
         self.assertEqual(response.json()["empty_reason"], "no_common_playable_track")
+
+    def test_listen_together_playability_outage_is_retryable_not_a_generic_500(self):
+        response = self.post(
+            self.use(rooms=FailingPlayableRoomClient()),
+            {"query": "夜曲", "purpose": "listen_together"},
+        )
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"]["code"], "room_ipc_unavailable")
+        self.assertTrue(response.json()["error"]["retryable"])
 
     def test_invalid_purpose_is_rejected_before_catalog_or_room_calls(self):
         rooms = PlayableRoomClient({"186016"})
