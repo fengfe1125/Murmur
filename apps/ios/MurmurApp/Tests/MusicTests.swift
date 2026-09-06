@@ -1076,6 +1076,21 @@ final class SharedMusicDraftStoreTests: XCTestCase {
 }
 
 final class ListenTogetherContractTests: XCTestCase {
+    func testListenTogetherSearchPurposeUsesTheServerWireValue() throws {
+        let data = try JSONEncoder().encode(MusicSearchPurpose.listenTogether)
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "\"listen_together\"")
+    }
+
+    func testSearchResponseDecodesNoCommonPlayableTrackReason() throws {
+        let response = try JSONDecoder().decode(
+            SearchMusicResponseV1.self,
+            from: Data(#"{"tracks":[],"empty_reason":"no_common_playable_track"}"#.utf8)
+        )
+
+        XCTAssertEqual(response.tracks, [])
+        XCTAssertEqual(response.emptyReason, .noCommonPlayableTrack)
+    }
+
     func testPlaybackStateDecodesWhenTheServerSendsIt() throws {
         let room = try decodeRoom(playbackState: "playing")
         XCTAssertEqual(room.playbackState, .playing)
@@ -1108,6 +1123,17 @@ final class ListenTogetherContractTests: XCTestCase {
         XCTAssertEqual(
             resolve(room(state: .failed, error: "invite_expired")),
             .roomFailed("invite_expired")
+        )
+        XCTAssertEqual(
+            resolve(
+                room(
+                    state: .connected, joined: true, playback: .unknown,
+                    error: "counterpart_rights_unavailable"
+                ),
+                confirmed: .paused
+            ),
+            .paused,
+            "版权回退是非阻塞提示，不能把仍连接的房间变成永久同步中"
         )
     }
 
@@ -1610,6 +1636,35 @@ final class NeteaseMusicModelTests: XCTestCase {
             model.room?.currentTrack?.trackID, MusicFixtures.neteaseOther.trackID
         )
     }
+
+    func testRightsConflictNoticeClearsOnTheNextSuccessfulSnapshot() async throws {
+        let api = ScriptedMurmurAPIClient()
+        let model = model(api)
+        await api.setRoom(ListenTogetherRoomSnapshotV1(
+            roomHandle: "handle-1", state: .connected,
+            currentTrack: MusicFixtures.netease, userJoined: true,
+            updatedAt: "2026-09-05T00:00:00Z",
+            errorCode: "counterpart_rights_unavailable",
+            playbackState: .playing
+        ))
+
+        await model.refreshRoom()
+        XCTAssertEqual(
+            model.room?.nonblockingNotice,
+            "这首歌双方版权不一致，已退回上一首。"
+        )
+
+        await api.setRoom(ListenTogetherRoomSnapshotV1(
+            roomHandle: "handle-1", state: .connected,
+            currentTrack: MusicFixtures.neteaseOther, userJoined: true,
+            updatedAt: "2026-09-05T00:00:03Z",
+            playbackState: .playing
+        ))
+        await model.refreshRoom()
+
+        XCTAssertNil(model.room?.nonblockingNotice)
+        XCTAssertEqual(model.room?.currentTrack, MusicFixtures.neteaseOther)
+    }
 }
 
 /// The player is an Audius stream player; a NetEase card is an external
@@ -1652,6 +1707,21 @@ final class NeteaseSearchModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .results([MusicFixtures.netease]))
         let queries = await api.searchQueries
         XCTAssertEqual(queries, ["夜曲"])
+        let purposes = await api.searchPurposes
+        XCTAssertEqual(purposes, [.listenTogether])
+    }
+
+    func testNoCommonPlayableTrackReasonSurvivesAnEmptySearch() async {
+        let api = ScriptedMurmurAPIClient()
+        await api.setSearch(results: [], emptyReason: .noCommonPlayableTrack)
+        let model = NeteaseSearchModel(api: api)
+        model.query = "山楂树之恋"
+
+        model.search()
+        await settle()
+
+        XCTAssertEqual(model.phase, .results([]))
+        XCTAssertEqual(model.emptyReason, .noCommonPlayableTrack)
     }
 
     func testNoResultsIsAnAnswerNotAFailure() async {
@@ -1721,12 +1791,19 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
     struct Refused: Error {}
 
     private var searchResults: [MusicTrackAttachmentV1] = []
+    private var searchEmptyReason: MusicSearchEmptyReason?
     private var searchFails = false
     private(set) var searchQueries: [String] = []
+    private(set) var searchPurposes: [MusicSearchPurpose] = []
 
     func setSharedTrack(_ track: MusicTrackAttachmentV1?) { sharedTrack = track }
-    func setSearch(results: [MusicTrackAttachmentV1], fails: Bool = false) {
+    func setSearch(
+        results: [MusicTrackAttachmentV1],
+        emptyReason: MusicSearchEmptyReason? = nil,
+        fails: Bool = false
+    ) {
         searchResults = results
+        searchEmptyReason = emptyReason
         searchFails = fails
     }
 
@@ -1735,6 +1812,14 @@ private actor ScriptedMurmurAPIClient: MurmurAPIClient {
         searchQueries.append(query)
         guard !searchFails else { throw Refused() }
         return searchResults
+    }
+
+    func searchMusic(
+        query: String, limit: Int, purpose: MusicSearchPurpose
+    ) async throws -> SearchMusicResponseV1 {
+        searchPurposes.append(purpose)
+        let tracks = try await searchMusic(query: query, limit: limit)
+        return SearchMusicResponseV1(tracks: tracks, emptyReason: searchEmptyReason)
     }
     func setFailing(_ value: Bool) { failing = value }
     func setCurrentDelay(_ delay: Duration) { currentDelay = delay }

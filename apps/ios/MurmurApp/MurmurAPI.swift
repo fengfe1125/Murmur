@@ -222,15 +222,24 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
     }
 
     func searchMusic(query: String, limit: Int) async throws -> [MusicTrackAttachmentV1] {
-        let body = try encoder.encode(SearchMusicRequest(query: query, limit: limit))
-        let response: SearchMusicResponseV1 = try await send(
+        (try await searchMusic(query: query, limit: limit, purpose: .share)).tracks
+    }
+
+    func searchMusic(
+        query: String,
+        limit: Int,
+        purpose: MusicSearchPurpose
+    ) async throws -> SearchMusicResponseV1 {
+        let body = try encoder.encode(SearchMusicRequest(
+            query: query, limit: limit, purpose: purpose
+        ))
+        return try await send(
             path: "/v1/music/search",
             method: "POST",
             body: body,
             contentType: "application/json",
             authenticated: true
         )
-        return response.tracks
     }
 
     func createListenTogetherRoom(
@@ -774,6 +783,7 @@ private struct ChallengeRequest: Encodable {
 private struct SearchMusicRequest: Encodable {
     let query: String
     let limit: Int
+    let purpose: MusicSearchPurpose
 }
 
 private struct ResolveSharedMusicRequest: Encodable {

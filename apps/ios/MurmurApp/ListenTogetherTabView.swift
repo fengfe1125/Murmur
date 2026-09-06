@@ -36,7 +36,11 @@ struct ListenTogetherTabView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(MurmurTheme.paper.ignoresSafeArea())
         .sheet(isPresented: $showPicker) {
-            NeteaseSearchSheet(api: netease.api, onPick: start)
+            NeteaseSearchSheet(
+                api: netease.api,
+                purpose: .listenTogether,
+                onPick: start
+            )
         }
         .accessibilityIdentifier("listen-together-tab")
     }
@@ -225,6 +229,16 @@ struct ListenTogetherTabView: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             .padding(.top, 16)
+
+            if let notice = netease.room?.nonblockingNotice {
+                Text(notice)
+                    .font(MurmurTheme.body(.footnote, weight: .medium))
+                    .foregroundStyle(MurmurTheme.coral)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 10)
+                    .accessibilityIdentifier("listen-together-rights-notice")
+            }
 
             transport.padding(.top, 24)
             secondaryActions.padding(.top, 32)
@@ -453,12 +467,18 @@ final class NeteaseSearchModel: ObservableObject {
 
     @Published var query = ""
     @Published private(set) var phase: Phase = .idle
+    @Published private(set) var emptyReason: MusicSearchEmptyReason?
 
     private let api: any MurmurAPIClient
+    private let purpose: MusicSearchPurpose
     private var inFlight: Task<Void, Never>?
 
-    init(api: any MurmurAPIClient) {
+    init(
+        api: any MurmurAPIClient,
+        purpose: MusicSearchPurpose = .listenTogether
+    ) {
         self.api = api
+        self.purpose = purpose
     }
 
     /// 只在提交时搜，不做逐键防抖。网易云那条路是非官方接口、跑在一个可丢弃
@@ -468,14 +488,19 @@ final class NeteaseSearchModel: ObservableObject {
         inFlight?.cancel()
         guard !clean.isEmpty else {
             phase = .idle
+            emptyReason = nil
             return
         }
         phase = .searching
+        emptyReason = nil
         inFlight = Task {
             do {
-                let tracks = try await api.searchMusic(query: clean, limit: 5)
+                let result = try await api.searchMusic(
+                    query: clean, limit: 5, purpose: purpose
+                )
                 guard !Task.isCancelled else { return }
-                phase = .results(tracks)
+                emptyReason = result.emptyReason
+                phase = .results(result.tracks)
             } catch {
                 guard !Task.isCancelled else { return }
                 phase = .failed(MurmurFailure.from(error).message)
@@ -486,6 +511,7 @@ final class NeteaseSearchModel: ObservableObject {
 
 struct NeteaseSearchSheet: View {
     let api: any MurmurAPIClient
+    let purpose: MusicSearchPurpose
     /// 同一个搜索面板，两个去处：一起听那屏拿它开房间，composer 拿它发一张卡。
     /// 按钮上的词得说清楚按下去会发生什么。
     let actionLabel: String
@@ -497,13 +523,15 @@ struct NeteaseSearchSheet: View {
 
     init(
         api: any MurmurAPIClient,
+        purpose: MusicSearchPurpose = .listenTogether,
         actionLabel: String = "一起听",
         onPick: @escaping (MusicTrackAttachmentV1) -> Void
     ) {
         self.api = api
+        self.purpose = purpose
         self.actionLabel = actionLabel
         self.onPick = onPick
-        _model = StateObject(wrappedValue: NeteaseSearchModel(api: api))
+        _model = StateObject(wrappedValue: NeteaseSearchModel(api: api, purpose: purpose))
     }
 
     var body: some View {
@@ -557,7 +585,11 @@ struct NeteaseSearchSheet: View {
                 Spacer()
             }
         case .results(let tracks) where tracks.isEmpty:
-            message("没找到这首。换个说法试试。")
+            if model.emptyReason == .noCommonPlayableTrack {
+                message("找到了，但没有双方都能播放的版本。")
+            } else {
+                message("没找到这首。换个说法试试。")
+            }
         case .results(let tracks):
             List(tracks) { track in
                 PickerTrackRow(

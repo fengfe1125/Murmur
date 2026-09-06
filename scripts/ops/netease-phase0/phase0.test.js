@@ -4,13 +4,14 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { Readable } = require("node:stream");
 const test = require("node:test");
 const { NeteasePhase0, Phase0Error, cookiesFromResponse } = require("./phase0");
 const { safeShape } = require("./inspect-status");
 const { positiveIds } = require("./check-playable");
 const { validateStatus } = require("./soak");
 const { buildCases, safeBaseUrl, summarize } = require("./command-benchmark");
-const { resolveCapability } = require("./server");
+const { createServer, resolveCapability } = require("./server");
 const { sessionCookie } = require("./logout-session");
 const { createFaultableApi } = require("./server");
 
@@ -42,7 +43,12 @@ function fakeApi(calls, remote) {
         if (name === "song_detail") {
           // dt 是毫秒时长。真实接口一直有，之前被丢掉了——没有它就不知道
           // 歌什么时候放完。
-          return ok({ songs: query.ids.split(",").map((id) => ({ id, dt: 230_000 })) });
+          return ok({ songs: query.ids.split(",").map((id) => ({
+            id, dt: remote.durations?.get(String(id)) || 230_000,
+          })) });
+        }
+        if (name === "check_music") {
+          return { body: { success: !remote.unplayable?.has(String(query.id)) } };
         }
         if (name === "listentogether_room_create") {
           remote.inRoom = true;
@@ -59,6 +65,11 @@ function fakeApi(calls, remote) {
           remote.playlist = query.displayList.split(",");
         }
         if (name === "listentogether_sync_playlist_get" && remote.playCommand) {
+          if (typeof remote.beforePlaylistGet === "function") {
+            const hook = remote.beforePlaylistGet;
+            remote.beforePlaylistGet = null;
+            await hook();
+          }
           return ok({ data: {
             playCommand: remote.playCommand,
             playlist: { displayList: { result: remote.playlist } },
@@ -84,7 +95,24 @@ function fakeApi(calls, remote) {
   });
 }
 
-function fixture() {
+async function requestServer(phase0, { method, route, body }) {
+  const server = createServer({
+    phase0, capability: "a".repeat(32),
+    publicDirectory: path.join(__dirname, "public"),
+  });
+  const request = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+  request.method = method;
+  request.url = `/${"a".repeat(32)}${route}`;
+  return new Promise((resolve) => {
+    const response = {
+      writeHead(status, headers) { this.status = status; this.headers = headers; },
+      end(data) { resolve({ status: this.status, body: JSON.parse(String(data)) }); },
+    };
+    server.emit("request", request, response);
+  });
+}
+
+function fixture({ recordTiming = () => {} } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "murmur-netease-phase0-"));
   const sessionPath = path.join(directory, "secrets", "session.json");
   const calls = [];
@@ -94,12 +122,29 @@ function fixture() {
     api: fakeApi(calls, remote), qrToSvg: async () => "<svg></svg>", sessionPath,
     now: () => currentTime,
     monotonicNow: () => currentTime,
+    recordTiming,
   });
   return {
     calls, directory, phase0, remote, sessionPath,
     advance(milliseconds) { currentTime += milliseconds; },
   };
 }
+
+test("timing metrics contain only stage duration and outcome", async (t) => {
+  const samples = [];
+  const item = fixture({ recordTiming: (sample) => samples.push(sample) });
+  t.after(() => fs.rmSync(item.directory, { recursive: true, force: true }));
+  await item.phase0.loginStart();
+  await item.phase0.loginStatus();
+  await item.phase0.createRoom({ songIds: ["11"], initialSongId: "11" });
+  await item.phase0.roomStatus();
+  assert.ok(samples.some((sample) => sample.stage === "playability_check"));
+  assert.ok(samples.some((sample) => sample.stage === "playlist_write"));
+  assert.ok(samples.some((sample) => sample.stage === "status_refresh"));
+  for (const sample of samples) {
+    assert.deepEqual(Object.keys(sample).sort(), ["durationMs", "outcome", "stage"]);
+  }
+});
 
 test("QR login persists only allowlisted cookies with private permissions", async (t) => {
   const item = fixture();
@@ -190,7 +235,29 @@ test("fault injection blocks only the guarded experimental upstream", async () =
   assert.equal(await controller.api.ping(), "pong");
 });
 
-test("room lifecycle sends playlist, control, status and end calls", async (t) => {
+test("capability playability endpoint returns only robot-playable song IDs", async (t) => {
+  const item = fixture();
+  t.after(() => fs.rmSync(item.directory, { recursive: true, force: true }));
+  await item.phase0.loginStart();
+  await item.phase0.loginStatus();
+  item.remote.unplayable = new Set(["22"]);
+
+  const result = await requestServer(item.phase0, {
+    method: "POST", route: "/api/music/playability",
+    body: { songIds: [11, 22, 33] },
+  });
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { playableSongIds: ["11", "33"] });
+  assert.deepEqual(
+    item.calls.filter(([name]) => name === "check_music").map(([, query]) => query.id),
+    ["11", "22", "33"],
+  );
+  assert.equal(JSON.stringify(result.body).includes("cookie"), false);
+  assert.equal(JSON.stringify(result.body).includes("url"), false);
+});
+
+test("room refresh reads only playlist while heartbeat refreshes membership", async (t) => {
   const item = fixture();
   t.after(() => fs.rmSync(item.directory, { recursive: true, force: true }));
   await item.phase0.loginStart();
@@ -219,15 +286,29 @@ test("room lifecycle sends playlist, control, status and end calls", async (t) =
   assert.equal(replaced.currentSongId, "33");
   assert.equal(replaced.playlistLength, 2);
   assert.equal(replaced.playlistReplaced, true);
-  assert.equal((await item.phase0.roomStatus()).participantCount, 2);
+  const statusCallsBeforeRefresh = item.calls.filter(
+    ([name]) => name === "listentogether_status",
+  ).length;
+  assert.equal((await item.phase0.roomStatus()).participantCount, 1);
+  assert.equal(
+    item.calls.filter(([name]) => name === "listentogether_status").length,
+    statusCallsBeforeRefresh,
+    "the 3s room refresh must not read membership or health",
+  );
+  await item.phase0.heartbeatTick();
+  assert.equal(item.phase0.publicRoom().participantCount, 2);
   assert.equal((await item.phase0.endRoom()).state, "ended");
   const names = item.calls.map(([name]) => name);
   for (const expected of [
     "listentogether_room_create", "listentogether_sync_list_command",
     "listentogether_play_command", "listentogether_heatbeat",
-    "listentogether_status", "listentogether_room_check",
+    "listentogether_status",
     "listentogether_sync_playlist_get", "listentogether_end",
   ]) assert.ok(names.includes(expected), expected);
+  assert.equal(
+    names.includes("listentogether_room_check"), false,
+    "active 3s refresh leaves membership and health to heartbeat",
+  );
 });
 
 test("room rejects a target outside its validated playlist", async (t) => {
@@ -241,6 +322,21 @@ test("room rejects a target outside its validated playlist", async (t) => {
     (error) => error instanceof Phase0Error && error.code === "song_not_in_playlist",
   );
   await item.phase0.endRoom();
+});
+
+test("room creation rejects a robot-unplayable playlist before mutating the room", async (t) => {
+  const item = fixture();
+  t.after(() => fs.rmSync(item.directory, { recursive: true, force: true }));
+  await item.phase0.loginStart();
+  await item.phase0.loginStatus();
+  item.remote.unplayable = new Set(["22"]);
+
+  await assert.rejects(
+    item.phase0.createRoom({ songIds: ["11", "22"], initialSongId: "11" }),
+    (error) => error instanceof Phase0Error && error.code === "song_unavailable",
+  );
+  assert.deepEqual(item.phase0.publicRoom(), { state: "idle" });
+  assert.equal(item.calls.some(([name]) => name === "listentogether_room_create"), false);
 });
 
 test("failed active-room replacement restores the previous local and remote playlist", async (t) => {
@@ -280,6 +376,89 @@ test("a newer remote server sequence becomes the authoritative local state", asy
   };
   assert.equal((await item.phase0.roomStatus()).currentSongId, "11");
   await item.phase0.endRoom();
+});
+
+test("a newer playable remote playlist fills durations and advances queue version", async (t) => {
+  const item = fixture();
+  t.after(() => fs.rmSync(item.directory, { recursive: true, force: true }));
+  await item.phase0.loginStart();
+  await item.phase0.loginStatus();
+  const created = await item.phase0.createRoom({ songIds: ["11"], initialSongId: "11" });
+  item.remote.durations = new Map([["33", 90_000], ["44", 120_000]]);
+  item.remote.playlist = ["33", "44"];
+  item.remote.playCommand = {
+    targetSongId: "44", playStatus: "PLAY", progress: 10_000, serverSeq: 9,
+  };
+
+  const status = await item.phase0.roomStatus();
+  assert.equal(status.currentSongId, "44");
+  assert.ok(status.queueVersion > created.queueVersion);
+  item.advance(200_000);
+  assert.equal(item.phase0.publicRoom().progressMs, 120_000);
+  assert.ok(item.calls.some(([name, query]) => name === "song_detail" && query.ids === "33,44"));
+});
+
+test("a concurrent participant switch wins when its remote sequence is newest", async (t) => {
+  const item = fixture();
+  t.after(() => fs.rmSync(item.directory, { recursive: true, force: true }));
+  await item.phase0.loginStart();
+  await item.phase0.loginStatus();
+  await item.phase0.createRoom({ songIds: ["11", "22"], initialSongId: "11" });
+  item.remote.beforePlaylistGet = async () => {
+    item.remote.serverSeq += 1;
+    item.remote.playlist = ["11", "22", "33"];
+    item.remote.playCommand = {
+      targetSongId: "33", playStatus: "PLAY", progress: 0,
+      serverSeq: item.remote.serverSeq,
+    };
+  };
+
+  const result = await item.phase0.setPlaylist({
+    songIds: ["11", "22"], initialSongId: "22",
+  });
+  assert.equal(result.currentSongId, "33");
+  assert.deepEqual(item.remote.playlist, ["11", "22", "33"]);
+});
+
+test("an unplayable participant switch restores the last playable queue and surfaces rights error", async (t) => {
+  const item = fixture();
+  t.after(() => fs.rmSync(item.directory, { recursive: true, force: true }));
+  await item.phase0.loginStart();
+  await item.phase0.loginStatus();
+  await item.phase0.createRoom({ songIds: ["11", "22"], initialSongId: "11" });
+  const version = item.phase0.publicRoom().queueVersion;
+  item.remote.unplayable = new Set(["33"]);
+  item.remote.serverSeq = 9;
+  item.remote.playlist = ["33"];
+  item.remote.playCommand = {
+    targetSongId: "33", playStatus: "PLAY", progress: 0, serverSeq: 9,
+  };
+
+  const rejected = await item.phase0.roomStatus();
+  assert.equal(rejected.state, "active");
+  assert.equal(rejected.currentSongId, "11");
+  assert.equal(rejected.playlistLength, 2);
+  assert.equal(rejected.queueVersion, version);
+  assert.equal(rejected.errorCode, "counterpart_rights_unavailable");
+  assert.equal(
+    item.calls.filter(([name]) => name === "listentogether_sync_list_command").at(-1)[1].displayList,
+    "11,22",
+  );
+  assert.equal(
+    item.calls.filter(([name]) => name === "listentogether_play_command").at(-1)[1].targetSongId,
+    "11",
+  );
+
+  item.remote.unplayable.clear();
+  item.remote.serverSeq = 11;
+  item.remote.playlist = ["11", "22"];
+  item.remote.playCommand = {
+    targetSongId: "22", playStatus: "PLAY", progress: 0, serverSeq: 11,
+  };
+  const recovered = await item.phase0.roomStatus();
+  assert.equal(recovered.currentSongId, "22");
+  assert.equal(Object.hasOwn(recovered, "errorCode"), false);
+  assert.ok(recovered.queueVersion > version);
 });
 
 test("ten minutes of unreachable heartbeats fail closed without clearing an unverified session", async (t) => {

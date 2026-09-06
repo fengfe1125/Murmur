@@ -49,8 +49,31 @@ struct ResolveSharedMusicResponseV1: Codable, Equatable, Sendable {
     let track: MusicTrackAttachmentV1
 }
 
+enum MusicSearchPurpose: String, Codable, Equatable, Sendable {
+    case share
+    case listenTogether = "listen_together"
+}
+
+enum MusicSearchEmptyReason: String, Codable, Equatable, Sendable {
+    case noCommonPlayableTrack = "no_common_playable_track"
+}
+
 struct SearchMusicResponseV1: Codable, Equatable, Sendable {
     let tracks: [MusicTrackAttachmentV1]
+    let emptyReason: MusicSearchEmptyReason?
+
+    enum CodingKeys: String, CodingKey {
+        case tracks
+        case emptyReason = "empty_reason"
+    }
+
+    init(
+        tracks: [MusicTrackAttachmentV1],
+        emptyReason: MusicSearchEmptyReason? = nil
+    ) {
+        self.tracks = tracks
+        self.emptyReason = emptyReason
+    }
 }
 
 enum ListenTogetherRoomState: String, Codable, Sendable {
@@ -222,6 +245,16 @@ enum ListenTogetherPresentationState: Equatable, Sendable {
         if room.state == .creating || room.state == .waitingForUser || !room.userJoined {
             return .waiting
         }
+        // 网易云参与者选到机器人账号不可播的版本时，服务端会把歌恢复到上一首，
+        // 并在这个仍然有效的房间快照上带一个非阻塞错误码。若恢复快照暂时没有
+        // playback_state，就沿用最后确认状态，不能因此把控制面永久卡成「同步中」。
+        if room.errorCode == ListenTogetherRoomSnapshotV1.counterpartRightsUnavailable,
+           room.playbackState == .unknown {
+            return switch lastConfirmedPlayback {
+            case .paused: .paused
+            case .playing, .unknown: .playing
+            }
+        }
         return switch room.playbackState {
         case .playing: .playing
         case .paused: .paused
@@ -345,6 +378,12 @@ extension ListenTogetherPresentationState {
 extension ListenTogetherRoomSnapshotV1 {
     /// 还没有歌可说的时候说什么。
     static let noTrackLine = "和 Murmur 一起听"
+    static let counterpartRightsUnavailable = "counterpart_rights_unavailable"
+
+    var nonblockingNotice: String? {
+        guard errorCode == Self.counterpartRightsUnavailable else { return nil }
+        return "这首歌双方版权不一致，已退回上一首。"
+    }
 
     var trackLine: String {
         guard let track = currentTrack else { return Self.noTrackLine }

@@ -35,6 +35,14 @@ function normalizeSongIds(value) {
   return [...new Set(value.map((item) => positiveId(item)))];
 }
 
+function normalizePlayableSongIds(value) {
+  const ids = normalizeSongIds(value);
+  if (ids.length > 10) {
+    throw new Phase0Error("invalid_request", "songIds must contain 1-10 IDs");
+  }
+  return ids;
+}
+
 function responseBody(response) {
   return response && typeof response.body === "object" && response.body !== null
     ? response.body
@@ -112,6 +120,7 @@ class NeteasePhase0 {
     now = () => Date.now(),
     monotonicNow = () => Number(process.hrtime.bigint() / 1_000_000n),
     heartbeatFailureTimeoutMs = 10 * 60 * 1000,
+    recordTiming = () => {},
   }) {
     if (!Number.isInteger(heartbeatFailureTimeoutMs) || heartbeatFailureTimeoutMs < 1_000) {
       throw new Error("heartbeatFailureTimeoutMs must be at least one second");
@@ -122,12 +131,35 @@ class NeteasePhase0 {
     this.now = now;
     this.monotonicNow = monotonicNow;
     this.heartbeatFailureTimeoutMs = heartbeatFailureTimeoutMs;
+    this.recordTiming = recordTiming;
     this.cookies = readSecret(sessionPath);
     this.qrKey = null;
     this.room = null;
     this.heartbeatTimer = null;
     this.heartbeatFailureSince = null;
     this.lastTerminalState = null;
+  }
+
+  async timed(stage, operation) {
+    const started = this.monotonicNow();
+    let outcome = "success";
+    try {
+      return await operation();
+    } catch (error) {
+      outcome = "failure";
+      throw error;
+    } finally {
+      try {
+        this.recordTiming({
+          stage,
+          durationMs: Math.max(0, this.monotonicNow() - started),
+          outcome,
+        });
+      } catch {
+        // Telemetry must never turn a successful playback operation into a
+        // user-visible failure.
+      }
+    }
   }
 
   cookieHeader() {
@@ -240,6 +272,23 @@ class NeteasePhase0 {
     return positiveId(responseBody(result)?.data?.profile?.userId, "userId");
   }
 
+  async playableSongIds(songIds) {
+    const ids = normalizePlayableSongIds(songIds);
+    return this.checkPlayableSongIds(ids);
+  }
+
+  async checkPlayableSongIds(ids) {
+    return this.timed("playability_check", async () => {
+      const checks = await Promise.all(ids.map(async (id) => {
+        const result = await this.api.check_music({
+          id, cookie: this.cookieHeader(), timeout: 10_000,
+        });
+        return responseBody(result).success === true ? id : null;
+      }));
+      return checks.filter(Boolean);
+    });
+  }
+
   async createRoom({ songIds, initialSongId }) {
     if (this.room) throw new Phase0Error("room_already_active");
     const { playlist, initial, durations } = await this.validatePlaylist(songIds, initialSongId);
@@ -254,7 +303,8 @@ class NeteasePhase0 {
     this.room = {
       roomId: String(roomId), accountId, playlist, durations,
       currentIndex: playlist.indexOf(initial), clientSeq: 1,
-      lastServerSeq: 0,
+      lastServerSeq: 0, queueVersion: 1, errorCode: null,
+      participantCount: 1, inRoom: true,
       playStatus: "PLAY", progress: 0, playStartedAt: this.monotonicNow(),
       createdAt: this.now(),
     };
@@ -282,6 +332,8 @@ class NeteasePhase0 {
     const detailBody = requireCode(details, "song_detail");
     const available = new Set((detailBody.songs || []).map((song) => String(song.id)));
     if (!playlist.every((id) => available.has(id))) throw new Phase0Error("song_unavailable");
+    const playable = new Set(await this.checkPlayableSongIds(playlist));
+    if (!playlist.every((id) => playable.has(id))) throw new Phase0Error("song_unavailable");
     // 时长本来被丢掉了，但没有它就不知道歌什么时候放完——进度会一直往上爬，
     // 对面看到「3:50 的歌播到第 6 分钟」就判定同步失败。
     const durations = new Map();
@@ -307,6 +359,10 @@ class NeteasePhase0 {
       // 判断状态有没有倒退。两者本来都只留在进程内，界面用不到，接入才要。
       roomId: this.room.roomId,
       serverSeq: this.room.lastServerSeq,
+      queueVersion: this.room.queueVersion,
+      participantCount: this.room.participantCount,
+      inRoom: this.room.inRoom,
+      ...(this.room.errorCode ? { errorCode: this.room.errorCode } : {}),
       ...extra,
     };
   }
@@ -320,31 +376,49 @@ class NeteasePhase0 {
   async replacePlaylist() {
     const room = this.requireRoom();
     const ids = room.playlist.join(",");
-    const result = await this.api.listentogether_sync_list_command({
-      roomId: room.roomId, commandType: "REPLACE", userId: room.accountId,
-      version: room.clientSeq++, displayList: ids, randomList: ids,
-      cookie: this.cookieHeader(), timeout: 10_000,
+    return this.timed("playlist_write", async () => {
+      const result = await this.api.listentogether_sync_list_command({
+        roomId: room.roomId, commandType: "REPLACE", userId: room.accountId,
+        version: room.clientSeq++, displayList: ids, randomList: ids,
+        cookie: this.cookieHeader(), timeout: 10_000,
+      });
+      requireCode(result, "playlist_replace");
     });
-    requireCode(result, "playlist_replace");
   }
 
   async setPlaylist({ songIds, initialSongId }) {
     const room = this.requireRoom();
-    const { playlist, initial } = await this.validatePlaylist(songIds, initialSongId);
+    const { playlist, initial, durations } = await this.validatePlaylist(songIds, initialSongId);
     const previous = {
       playlist: room.playlist,
+      durations: room.durations,
       currentIndex: room.currentIndex,
       playStatus: room.playStatus,
       progress: room.progress,
       playStartedAt: room.playStartedAt,
+      queueVersion: room.queueVersion,
+      errorCode: room.errorCode,
+      lastServerSeq: room.lastServerSeq,
     };
     const former = room.playlist[room.currentIndex];
     room.playlist = playlist;
+    room.durations = durations;
     room.currentIndex = playlist.indexOf(initial);
     try {
       await this.replacePlaylist();
       await this.sendPlayCommand("GOTO", initial, former);
+      const confirmed = await this.confirmRemoteCommand(
+        initial, "PLAY", previous.lastServerSeq,
+      );
+      const newerRemoteWon = !confirmed && room.lastServerSeq > previous.lastServerSeq;
+      if (!confirmed && !newerRemoteWon) {
+        throw new Phase0Error("command_sync_timeout");
+      }
       await this.sendHeartbeat();
+      if (confirmed) {
+        room.queueVersion += 1;
+        room.errorCode = null;
+      }
     } catch (error) {
       Object.assign(room, previous);
       await this.replacePlaylist().catch(() => {});
@@ -360,6 +434,7 @@ class NeteasePhase0 {
     const room = this.requireRoom();
     let target = room.playlist[room.currentIndex];
     const former = target;
+    const previousServerSeq = room.lastServerSeq;
     let targetIndex = room.currentIndex;
     if (action === "NEXT") {
       targetIndex = (room.currentIndex + 1) % room.playlist.length;
@@ -379,30 +454,35 @@ class NeteasePhase0 {
       await this.sendPlayCommand(action, target);
     }
     room.currentIndex = targetIndex;
-    if (!(await this.confirmRemoteCommand(target, room.playStatus))) {
+    if (!(await this.confirmRemoteCommand(target, room.playStatus, previousServerSeq))) {
       throw new Phase0Error("command_sync_timeout");
     }
     return this.publicRoom({ commandAccepted: true, synchronized: true });
   }
 
-  async confirmRemoteCommand(targetSongId, playStatus) {
-    const started = this.monotonicNow();
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const result = await this.api.listentogether_sync_playlist_get({
-        roomId: this.requireRoom().roomId,
-        cookie: this.cookieHeader(), timeout: 1_800,
-      });
-      const body = requireCode(result, "command_status");
-      this.applyRemotePlaylist(body);
-      const command = body?.data?.playCommand;
-      if (String(command?.targetSongId) === String(targetSongId) &&
-          String(command?.playStatus || "").toUpperCase() === playStatus) {
-        return true;
+  async confirmRemoteCommand(targetSongId, playStatus, previousServerSeq) {
+    return this.timed("command_confirm", async () => {
+      const started = this.monotonicNow();
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const result = await this.api.listentogether_sync_playlist_get({
+          roomId: this.requireRoom().roomId,
+          cookie: this.cookieHeader(), timeout: 1_200,
+        });
+        const body = requireCode(result, "command_status");
+        await this.applyRemotePlaylist(body);
+        const command = body?.data?.playCommand;
+        if (String(command?.targetSongId) === String(targetSongId) &&
+            String(command?.playStatus || "").toUpperCase() === playStatus) {
+          return true;
+        }
+        const observedServerSeq = Number(command?.serverSeq);
+        if (Number.isSafeInteger(observedServerSeq) &&
+            observedServerSeq > previousServerSeq) return false;
+        if (this.monotonicNow() - started >= 4_000) break;
+        await delay(100);
       }
-      if (this.monotonicNow() - started >= 1_800) break;
-      await delay(100);
-    }
-    return false;
+      return false;
+    });
   }
 
   /// 当前这首歌的时长，拿不到就是 null（不知道就别装作知道）。
@@ -489,13 +569,21 @@ class NeteasePhase0 {
   async heartbeatTick() {
     if (this.heartbeatBusy || !this.room) return;
     this.heartbeatBusy = true;
-    const roomId = this.room.roomId;
+    const room = this.room;
+    const roomId = room.roomId;
     try {
-      const playlist = await this.api.listentogether_sync_playlist_get({
-        roomId, cookie: this.cookieHeader(), timeout: 10_000,
-      });
+      const [status, playlist] = await Promise.all([
+        this.api.listentogether_status({ cookie: this.cookieHeader(), timeout: 10_000 }),
+        this.api.listentogether_sync_playlist_get({
+          roomId, cookie: this.cookieHeader(), timeout: 10_000,
+        }),
+      ]);
       if (!this.room || this.room.roomId !== roomId) return;
-      this.applyRemotePlaylist(requireCode(playlist, "playlist_status"));
+      const statusBody = requireCode(status, "room_status");
+      await this.applyRemotePlaylist(requireCode(playlist, "playlist_status"));
+      room.inRoom = Boolean(statusBody?.data?.inRoom);
+      room.participantCount = Array.isArray(statusBody?.data?.roomInfo?.roomUsers)
+        ? statusBody.data.roomInfo.roomUsers.length : 0;
       // 一首放完之后要真的往下走。不然进度停在结尾、房主永远卡在同一首，
       // 对面的真实客户端早就播完进下一首了，两边立刻对不上。
       if (this.currentTrackFinished()) await this.advanceAfterTrackEnd();
@@ -532,7 +620,7 @@ class NeteasePhase0 {
     return this.room;
   }
 
-  applyRemotePlaylist(body) {
+  async applyRemotePlaylist(body) {
     const room = this.requireRoom();
     const data = body?.data;
     const command = data?.playCommand;
@@ -554,30 +642,75 @@ class NeteasePhase0 {
     const currentIndex = playlist.indexOf(target);
     if (currentIndex < 0) return false;
 
+    const previousTarget = room.playlist[room.currentIndex];
+    const queueChanged = previousTarget !== target ||
+      playlist.length !== room.playlist.length ||
+      playlist.some((id, index) => id !== room.playlist[index]);
+    if (!queueChanged) {
+      room.playStatus = playStatus;
+      room.progress = Math.floor(progress);
+      room.playStartedAt = playStatus === "PLAY" ? this.monotonicNow() : null;
+      room.lastServerSeq = serverSeq;
+      return true;
+    }
+
+    const details = await this.api.song_detail({
+      ids: playlist.join(","), cookie: this.cookieHeader(), timeout: 10_000,
+    });
+    const detailBody = requireCode(details, "song_detail");
+    const songs = new Map((detailBody.songs || []).map((song) => [String(song.id), song]));
+    if (!playlist.every((id) => songs.has(id))) {
+      await this.restoreAfterRightsConflict(serverSeq);
+      return false;
+    }
+    const playable = await this.checkPlayableSongIds([target]);
+    if (!playable.includes(target)) {
+      await this.restoreAfterRightsConflict(serverSeq);
+      return false;
+    }
+
+    const durations = new Map(room.durations);
+    for (const song of songs.values()) {
+      const ms = Number(song?.dt);
+      if (Number.isFinite(ms) && ms > 0) durations.set(String(song.id), Math.floor(ms));
+    }
+
     room.playlist = playlist;
+    room.durations = durations;
     room.currentIndex = currentIndex;
     room.playStatus = playStatus;
     room.progress = Math.floor(progress);
     room.playStartedAt = playStatus === "PLAY" ? this.monotonicNow() : null;
     room.lastServerSeq = serverSeq;
+    room.queueVersion += 1;
+    room.errorCode = null;
     return true;
+  }
+
+  async restoreAfterRightsConflict(serverSeq) {
+    const room = this.requireRoom();
+    const previousTarget = room.playlist[room.currentIndex];
+    // Do not adopt the incompatible remote queue. Re-publish the last queue
+    // both accounts could play, then move playback back to its current song.
+    // Consuming the rejected server sequence prevents every 3s status poll
+    // from repeating the same rollback forever.
+    await this.replacePlaylist();
+    await this.sendPlayCommand("GOTO", previousTarget);
+    await this.sendHeartbeat();
+    room.lastServerSeq = serverSeq;
+    room.errorCode = "counterpart_rights_unavailable";
   }
 
   async roomStatus() {
     if (!this.room) return this.publicRoom();
-    const room = this.room;
-    const [status, check, playlist] = await Promise.all([
-      this.api.listentogether_status({ cookie: this.cookieHeader(), timeout: 10_000 }),
-      this.api.listentogether_room_check({ roomId: room.roomId, cookie: this.cookieHeader(), timeout: 10_000 }),
-      this.api.listentogether_sync_playlist_get({ roomId: room.roomId, cookie: this.cookieHeader(), timeout: 10_000 }),
-    ]);
-    const statusBody = requireCode(status, "room_status");
-    requireCode(check, "room_check");
-    const playlistBody = requireCode(playlist, "playlist_status");
-    this.applyRemotePlaylist(playlistBody);
-    const participantCount = Array.isArray(statusBody?.data?.roomInfo?.roomUsers)
-      ? statusBody.data.roomInfo.roomUsers.length : 0;
-    return this.publicRoom({ inRoom: Boolean(statusBody?.data?.inRoom), participantCount });
+    return this.timed("status_refresh", async () => {
+      const room = this.room;
+      const playlist = await this.api.listentogether_sync_playlist_get({
+        roomId: room.roomId, cookie: this.cookieHeader(), timeout: 10_000,
+      });
+      await this.applyRemotePlaylist(requireCode(playlist, "playlist_status"));
+      return this.publicRoom();
+    });
   }
 
   async endRoom() {

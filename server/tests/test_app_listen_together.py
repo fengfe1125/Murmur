@@ -462,6 +462,15 @@ class RoomIPCTests(unittest.TestCase):
         self.assertEqual(closed.state, "ended")
         self.assertIsNone(self.client.current(user_id="u1"))
 
+    def test_playability_round_trips_without_creating_a_room(self):
+        self.assertEqual(
+            self.client.playable_song_ids(
+                user_id="u1", song_ids=["186016", "1391891631"]
+            ),
+            ["186016", "1391891631"],
+        )
+        self.assertEqual(self.adapter.rooms, {})
+
     def test_a_worker_side_refusal_arrives_as_the_same_typed_error(self):
         self.client.create(
             user_id="u1", initial_track=dict(TRACK), idempotency_key="key-00000001"

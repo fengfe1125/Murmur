@@ -66,6 +66,8 @@ class FakeService:
             if self.states:
                 self.last = self.states.pop(0)
             return httpx.Response(200, json=self.last)
+        if request.url.path == "/api/music/playability":
+            return httpx.Response(200, json={"playableSongIds": ["186016"]})
         return httpx.Response(200, json={"ok": True})
 
     def transport(self):
@@ -76,6 +78,24 @@ class FakeService:
 
 
 class TransportTranslationTests(unittest.TestCase):
+    def test_playability_uses_the_robot_session_endpoint_and_validates_shape(self):
+        service = FakeService()
+        self.assertEqual(
+            service.transport().playable_song_ids(["186016", "1391891631"]),
+            ["186016"],
+        )
+        self.assertEqual(service.calls, [("POST", "/api/music/playability")])
+
+    def test_room_status_carries_a_nonblocking_rights_conflict(self):
+        service = FakeService(states=[
+            room_body(errorCode="counterpart_rights_unavailable")
+        ])
+        state = service.transport().create_room(
+            initial_track=TRACK, client_sequence=1, queue_version=1,
+            idempotency_key="k",
+        )
+        self.assertEqual(state.error_code, "counterpart_rights_unavailable")
+
     def test_creating_a_room_reads_membership_from_a_second_status_call(self):
         """建房那一下不带成员信息，所以状态必须再查一次才完整。"""
         service = FakeService()
@@ -367,6 +387,37 @@ class AdapterWithRealTransportTests(unittest.TestCase):
         self.assertEqual(result.state.playback_state, "paused")
 
         adapter.close(room_ref=created.room_ref)
+
+    def test_a_confirmed_command_reuses_its_returned_snapshot(self):
+        calls = []
+
+        def handler(request):
+            calls.append((request.method, request.url.path))
+            if request.url.path == "/api/room/status":
+                return httpx.Response(200, json=room_body(participantCount=2))
+            if request.url.path == "/api/room/command":
+                return httpx.Response(200, json=room_body(
+                    participantCount=2, playStatus="PAUSE", serverSeq=1,
+                    queueVersion=1,
+                ))
+            return httpx.Response(200, json={"ok": True})
+
+        transport = NeteaseHTTPRoomTransport(
+            "https://127.0.0.1:18763", transport=httpx.MockTransport(handler)
+        )
+        adapter = ExperimentalNeteaseRoomAdapter(enabled=True, transport=transport)
+        room = adapter.create(initial_track=TRACK, idempotency_key="k")
+        status_reads_before = calls.count(("GET", "/api/room/status"))
+        result = adapter.command(
+            room_ref=room.room_ref, command="pause", track=None,
+            idempotency_key="k2",
+        )
+        self.assertEqual(result.status, "synchronized")
+        self.assertEqual(result.state.playback_state, "paused")
+        self.assertEqual(
+            calls.count(("GET", "/api/room/status")), status_reads_before,
+            "the command response already contains the confirmed snapshot",
+        )
 
     def test_a_disabled_adapter_still_refuses_even_with_a_transport(self):
         service = FakeService()

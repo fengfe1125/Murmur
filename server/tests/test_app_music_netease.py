@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from murmur.app_api import create_app  # noqa: E402
 from murmur.app_music import (  # noqa: E402
+    MAX_MUSIC_SEARCH_CANDIDATES,
     MusicCatalog,
     MusicCatalogUnavailable,
     MusicTrackInvalid,
@@ -27,6 +28,7 @@ from murmur.app_music import (  # noqa: E402
     NeteaseCatalogAdapter,
     music_prompt_line,
     normalize_music_track,
+    rank_music_search_results,
 )
 from murmur.app_music_links import (  # noqa: E402
     MAX_SHARED_TEXT_BYTES,
@@ -159,9 +161,90 @@ class NeteaseCatalogTests(unittest.TestCase):
         self.assertEqual(seen["url"].path, "/api/search/get")
         self.assertEqual(seen["url"].params["s"], "夜曲")
         self.assertEqual(seen["url"].params["type"], "1")
-        self.assertEqual(seen["url"].params["limit"], "5")
+        self.assertEqual(seen["url"].params["limit"], str(MAX_MUSIC_SEARCH_CANDIDATES))
         self.assertNotIn("authorization", seen["headers"])
         self.assertNotIn("cookie", seen["headers"])
+
+    def test_search_fetches_ten_candidates_before_public_ranking(self):
+        songs = [netease_song(id=index) for index in range(1, 11)]
+        client = netease_catalog(
+            lambda request: httpx.Response(200, json={"result": {"songs": songs}})
+        )
+        found = client.search("夜曲", limit=MAX_MUSIC_SEARCH_CANDIDATES)
+        self.assertEqual(len(found), 10)
+
+    def test_a_small_cached_search_does_not_hide_later_candidates(self):
+        calls = []
+        songs = [netease_song(id=index) for index in range(1, 11)]
+
+        def handler(request):
+            calls.append(request.url.params["limit"])
+            return httpx.Response(200, json={"result": {"songs": songs}})
+
+        client = netease_catalog(handler)
+        self.assertEqual(len(client.search("夜曲", limit=1)), 1)
+        self.assertEqual(len(client.search("夜曲", limit=10)), 10)
+        self.assertEqual(calls, ["10"])
+
+
+class NeteaseSearchRankingTests(unittest.TestCase):
+    def track(self, track_id, title, artist):
+        return {
+            **NETEASE_TRACK,
+            "track_id": str(track_id),
+            "title": title,
+            "artists": [artist],
+            "canonical_url": f"https://music.163.com/song?id={track_id}",
+        }
+
+    def test_exact_titles_exclude_similar_and_unrelated_results(self):
+        tracks = [
+            self.track(1, "山楂树之恋", "程佳佳"),
+            self.track(2, "山楂树の恋(DJ版)", "祝酒"),
+            self.track(3, "山楂树之恋", "雷智皓"),
+            self.track(4, "山楂树之恋（官方版）", "尚文婷"),
+            self.track(5, "新鲜感", "雷智皓"),
+        ]
+        ranked = rank_music_search_results("  山楂树之恋  ", tracks)
+        self.assertEqual([track["track_id"] for track in ranked], ["1", "3"])
+
+    def test_nfkc_case_and_whitespace_are_equivalent(self):
+        tracks = [
+            self.track(1, "ＡＢＣ  Song", "First"),
+            self.track(2, "ABC Song Remix", "Second"),
+        ]
+        self.assertEqual(
+            [track["track_id"] for track in rank_music_search_results("abc song", tracks)],
+            ["1"],
+        )
+
+    def test_artist_disambiguation_moves_the_named_artist_first(self):
+        tracks = [
+            self.track(1, "山楂树之恋", "雷智皓"),
+            self.track(2, "山楂树之恋", "程佳佳"),
+            self.track(3, "山楂树之恋（官方版）", "程佳佳"),
+        ]
+        ranked = rank_music_search_results("山楂树之恋 程佳佳", tracks)
+        self.assertEqual([track["track_id"] for track in ranked], ["2", "1"])
+
+    def test_artist_can_come_before_the_exact_title(self):
+        tracks = [
+            self.track(1, "山楂树之恋", "雷智皓"),
+            self.track(2, "山楂树之恋", "程佳佳"),
+            self.track(3, "山楂树之恋（官方版）", "程佳佳"),
+        ]
+        ranked = rank_music_search_results("程佳佳 山楂树之恋", tracks)
+        self.assertEqual([track["track_id"] for track in ranked], ["2", "1"])
+
+    def test_artist_only_search_is_not_removed_by_exact_title_filter(self):
+        tracks = [self.track(1, "夜曲", "周杰伦"), self.track(2, "晴天", "周杰伦")]
+        ranked = rank_music_search_results("周杰伦", tracks)
+        self.assertEqual(len(ranked), 2)
+
+    def test_no_exact_title_keeps_fuzzy_fallbacks(self):
+        tracks = [self.track(1, "山楂树之恋（官方版）", "尚文婷"), self.track(2, "新鲜感", "雷智皓")]
+        ranked = rank_music_search_results("山楂树之恋", tracks)
+        self.assertEqual([track["track_id"] for track in ranked], ["1", "2"])
 
     def test_resolve_supports_detail_shape_and_caches_it(self):
         calls = []
@@ -654,7 +737,9 @@ class NeteaseCompleteTests(unittest.TestCase):
 
         adapter = NeteaseCatalogAdapter(transport=httpx.MockTransport(handler))
         try:
-            found = adapter.search("夜曲", limit=2)
+            # Artist search intentionally keeps both titles; an exact-title
+            # search now narrows to exact-title versions before completion.
+            found = adapter.search("周杰伦", limit=2)
             self.assertNotIn("artwork_url", found[0])
             completed = adapter.complete(found)
             self.assertEqual(len(detail_urls), 1, "一页结果只该多花一个请求")
@@ -743,6 +828,16 @@ class SearchingCatalog:
         return [dict(track) for track in self.tracks[:limit]]
 
 
+class PlayableRoomClient:
+    def __init__(self, playable_ids):
+        self.playable_ids = set(playable_ids)
+        self.calls = []
+
+    def playable_song_ids(self, *, user_id, song_ids):
+        self.calls.append((user_id, list(song_ids)))
+        return [song_id for song_id in song_ids if song_id in self.playable_ids]
+
+
 class MusicSearchAPITests(unittest.TestCase):
     """/v1/music/search：选歌器要的那一页。"""
 
@@ -770,10 +865,23 @@ class MusicSearchAPITests(unittest.TestCase):
         self.clients.append(client)
         return client
 
-    def use(self, *, catalog=None, enabled: bool = True) -> TestClient:
-        settings = app_settings(self.root, netease_catalog_enabled=enabled)
+    def use(self, *, catalog=None, enabled: bool = True, rooms=None) -> TestClient:
+        overrides = {"netease_catalog_enabled": enabled}
+        if rooms is not None:
+            secret = self.root / "netease-bot.json"
+            secret.write_text("{}", encoding="utf-8")
+            secret.chmod(0o600)
+            overrides.update({
+                "netease_room_experiment_enabled": True,
+                "netease_room_user_allowlist": frozenset({self.device.user_id}),
+                "netease_bot_secret_path": secret,
+                "netease_room_protocol_base_url": "http://127.0.0.1:18763",
+            })
+        settings = app_settings(self.root, **overrides)
         self.catalog = catalog or SearchingCatalog()
-        self.device.client = self._client(settings, music_catalog=self.catalog)
+        self.device.client = self._client(
+            settings, music_catalog=self.catalog, room_client=rooms
+        )
         return self.device.client
 
     def post(self, client, body):
@@ -791,7 +899,81 @@ class MusicSearchAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["tracks"], [NETEASE_TRACK])
         # 空白折叠后才交给曲库，且补全是开着的——这一页每行都要给人看。
-        self.assertEqual(self.catalog.calls, [("夜曲 周杰伦", 5, "netease", True)])
+        self.assertEqual(
+            self.catalog.calls,
+            [("夜曲 周杰伦", MAX_MUSIC_SEARCH_CANDIDATES, "netease", True)],
+        )
+
+    def test_omitted_purpose_defaults_to_share_without_room_filtering(self):
+        rooms = PlayableRoomClient([])
+        response = self.post(self.use(rooms=rooms), {"query": "夜曲"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["tracks"], [NETEASE_TRACK])
+        self.assertEqual(rooms.calls, [])
+
+    def test_listen_together_filters_by_robot_account_playability(self):
+        second = {
+            **NETEASE_TRACK, "track_id": "186017", "title": "晴天",
+            "canonical_url": "https://music.163.com/song?id=186017",
+        }
+        rooms = PlayableRoomClient({"186017"})
+        response = self.post(
+            self.use(catalog=SearchingCatalog([NETEASE_TRACK, second]), rooms=rooms),
+            {"query": "周杰伦", "purpose": "listen_together"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual([t["track_id"] for t in response.json()["tracks"]], ["186017"])
+        self.assertEqual(len(rooms.calls), 1)
+
+    def test_shanzhashuzhilian_selects_the_playable_exact_title_without_hardcoding(self):
+        def track(track_id, title, artist):
+            return {
+                **NETEASE_TRACK,
+                "track_id": str(track_id), "title": title, "artists": [artist],
+                "canonical_url": f"https://music.163.com/song?id={track_id}",
+            }
+
+        catalog = SearchingCatalog([
+            track(1381755293, "山楂树之恋", "程佳佳"),
+            track(2737771303, "山楂树の恋(DJ版)", "祝酒"),
+            track(446557635, "山楂树之恋", "雷智皓"),
+            track(1383727340, "山楂树之恋（官方版）", "尚文婷"),
+            track(446627373, "新鲜感", "雷智皓"),
+        ])
+        rooms = PlayableRoomClient({"1381755293"})
+        response = self.post(
+            self.use(catalog=catalog, rooms=rooms),
+            {"query": "山楂树之恋", "purpose": "listen_together"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            [(item["title"], item["artists"]) for item in response.json()["tracks"]],
+            [("山楂树之恋", ["程佳佳"])],
+        )
+
+    def test_no_common_playable_track_has_a_specific_empty_reason(self):
+        rooms = PlayableRoomClient([])
+        response = self.post(
+            self.use(rooms=rooms),
+            {"query": "夜曲", "purpose": "listen_together"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["tracks"], [])
+        self.assertEqual(response.json()["empty_reason"], "no_common_playable_track")
+
+    def test_invalid_purpose_is_rejected_before_catalog_or_room_calls(self):
+        rooms = PlayableRoomClient({"186016"})
+        response = self.post(
+            self.use(rooms=rooms), {"query": "夜曲", "purpose": "broadcast"}
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.catalog.calls, [])
+        self.assertEqual(rooms.calls, [])
+
+    def test_non_string_purpose_is_rejected_as_validation_error(self):
+        response = self.post(self.use(), {"query": "夜曲", "purpose": {"bad": True}})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.catalog.calls, [])
 
     def test_finding_nothing_is_an_answer_not_an_error(self):
         response = self.post(self.use(catalog=SearchingCatalog(tracks=[])), {"query": "没有这首"})

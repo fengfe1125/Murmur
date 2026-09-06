@@ -76,6 +76,18 @@ final class MurmurUITests: XCTestCase {
         XCTAssertFalse(app.alerts["网易云音乐"].exists)
     }
 
+    func testListenTogetherRightsConflictIsNonblocking() throws {
+        let app = launchApp(arguments: ["--murmur-stub-netease-rights"])
+        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(
+            app.staticTexts["这首歌双方版权不一致，已退回上一首。"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertTrue(app.buttons["暂停一起听"].exists)
+        XCTAssertTrue(app.buttons["下一首"].exists)
+    }
+
     func testListenTogetherCreateFailureKeepsTheSongAndOffersRetry() throws {
         continueAfterFailure = false
         let app = launchApp(arguments: ["--murmur-stub-netease-create-fails"])
@@ -105,6 +117,20 @@ final class MurmurUITests: XCTestCase {
         app.buttons["tab-listenTogether"].tap()
         XCTAssertTrue(app.staticTexts["选歌暂不可用"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["选一首歌"].exists)
+    }
+
+    func testListenTogetherSearchExplainsWhenNoVersionWorksForBothAccounts() throws {
+        let app = launchApp(arguments: ["--murmur-stub-netease-search-no-common"])
+        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].tap()
+        app.buttons["选一首歌"].tap()
+        let field = app.textFields["netease-search-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("山楂树之恋\n")
+        XCTAssertTrue(
+            app.staticTexts["找到了，但没有双方都能播放的版本。"]
+                .waitForExistence(timeout: 5)
+        )
     }
 
     func testListenTogetherTerminalAndOfflineStatesStayDistinct() throws {

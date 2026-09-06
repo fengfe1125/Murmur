@@ -342,6 +342,20 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
             ),
         ]
     }
+    func searchMusic(
+        query: String,
+        limit: Int,
+        purpose: MusicSearchPurpose
+    ) async throws -> SearchMusicResponseV1 {
+        if arguments.contains("--murmur-stub-netease-search-no-common") {
+            return SearchMusicResponseV1(
+                tracks: [], emptyReason: .noCommonPlayableTrack
+            )
+        }
+        return SearchMusicResponseV1(
+            tracks: try await searchMusic(query: query, limit: limit)
+        )
+    }
     func createListenTogetherRoom(
         initialTrack: MusicTrackAttachmentV1,
         idempotencyKey: String
@@ -377,6 +391,13 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
                 playback: .unknown,
                 joined: false,
                 errorCode: "invite_expired"
+            )
+        } else if arguments.contains("--murmur-stub-netease-rights") {
+            room = uiRoom(
+                state: .connected,
+                playback: .playing,
+                joined: true,
+                errorCode: "counterpart_rights_unavailable"
             )
         } else if arguments.contains("--murmur-stub-netease-playing")
                     || arguments.contains("--murmur-stub-netease-command-fails")
