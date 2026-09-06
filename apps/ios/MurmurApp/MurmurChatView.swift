@@ -668,7 +668,11 @@ private struct MomentWorkbench: View {
                     onSend: { model.submitMusic($0) }
                 )
             } else if music.isNeteaseSearchAvailable {
-                NeteaseSearchSheet(api: netease.api, actionLabel: "发送") {
+                NeteaseSearchSheet(
+                    api: netease.api,
+                    purpose: .share,
+                    actionLabel: "发送"
+                ) {
                     model.submitMusic($0)
                 }
             }

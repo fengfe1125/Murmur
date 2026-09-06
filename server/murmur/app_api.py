@@ -39,6 +39,7 @@ from .app_listen_together import (
 )
 from .app_lock import UserOperationLock
 from .app_music import (
+    MAX_MUSIC_SEARCH_CANDIDATES,
     MAX_MUSIC_SEARCH_RESULTS,
     MusicCatalog,
     MusicCatalogUnavailable,
@@ -49,6 +50,7 @@ from .app_music import (
     normalize_music_track,
     normalize_playback_track,
     parse_music_track,
+    rank_music_search_results,
 )
 from .app_music_links import MAX_SHARED_TEXT_BYTES, MusicLink, MusicLinkRejected
 from .app_settings import AppSettings, music_user_allowed
@@ -1283,6 +1285,12 @@ def create_app(
         if music_catalog is None or not netease_catalog_enabled_for(settings, auth.user_id):
             raise APIError(403, "music_unavailable", "音乐功能未开启。")
         data = _json(raw)
+        purpose = data.get("purpose", "share")
+        if not isinstance(purpose, str) or purpose not in {"share", "listen_together"}:
+            raise APIError(400, "validation_error", "purpose 无效。")
+        playability_transport = (
+            room_transport(auth.user_id) if purpose == "listen_together" else None
+        )
         query = data.get("query")
         if not isinstance(query, str):
             raise APIError(400, "validation_error", "搜索词无效。")
@@ -1303,11 +1311,13 @@ def create_app(
         # builds a pager that never terminates.
         if not 1 <= limit <= MAX_MUSIC_SEARCH_RESULTS:
             raise APIError(400, "validation_error", "limit 无效。")
+        started = time.monotonic()
+        catalog_started = started
         try:
             tracks = await asyncio.to_thread(
                 music_catalog.search,
                 clean,
-                limit,
+                MAX_MUSIC_SEARCH_CANDIDATES,
                 provider="netease",
                 complete=True,
             )
@@ -1322,8 +1332,44 @@ def create_app(
             raise APIError(
                 502, "music_catalog_unavailable", "音乐服务返回了看不懂的内容。"
             ) from exc
+        catalog_ms = round((time.monotonic() - catalog_started) * 1000, 1)
+        # Keep the complete bounded candidate window until room playability is
+        # known. Truncating to the public page first can hide a playable exact
+        # version behind five unavailable exact versions.
+        tracks = rank_music_search_results(
+            clean, tracks, limit=MAX_MUSIC_SEARCH_CANDIDATES
+        )
+        empty_reason = None
+        rights_ms = 0.0
+        if purpose == "listen_together" and tracks:
+            assert playability_transport is not None
+            rights_started = time.monotonic()
+            try:
+                playable = set(await asyncio.to_thread(
+                    playability_transport.playable_song_ids,
+                    user_id=auth.user_id,
+                    song_ids=[track["track_id"] for track in tracks],
+                ))
+            except ListenTogetherError as exc:
+                raise room_api_error(exc) from exc
+            rights_ms = round((time.monotonic() - rights_started) * 1000, 1)
+            tracks = [track for track in tracks if track["track_id"] in playable]
+            if not tracks:
+                empty_reason = "no_common_playable_track"
+        tracks = tracks[:limit]
+        log.info(
+            "music_search_timing purpose=%s catalog_ms=%s rights_ms=%s total_ms=%s result_count=%s",
+            purpose,
+            catalog_ms,
+            rights_ms,
+            round((time.monotonic() - started) * 1000, 1),
+            len(tracks),
+        )
         # Finding nothing is an answer, not a failure.
-        return {"tracks": tracks}
+        result = {"tracks": tracks}
+        if empty_reason is not None:
+            result["empty_reason"] = empty_reason
+        return result
 
     @app.put("/v1/music/playback-state")
     async def update_playback_state(request: Request):

@@ -13,6 +13,7 @@ import json
 import re
 import threading
 import time
+import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Protocol
@@ -34,6 +35,98 @@ MUSIC_PROVIDERS = frozenset({"audius", "netease"})
 # 一页搜索结果的上限。适配器和 App API 共用这一个数：两边各写一个 5，改一处
 # 就会变成「客户端要 10、服务端悄悄给 5」。
 MAX_MUSIC_SEARCH_RESULTS = 5
+# Search a wider, still-bounded upstream window before deterministic ranking.
+# The public API remains capped by MAX_MUSIC_SEARCH_RESULTS.
+MAX_MUSIC_SEARCH_CANDIDATES = 10
+
+
+def _normalise_search_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def rank_music_search_results(
+    query: str, tracks: list[dict], *, limit: int = MAX_MUSIC_SEARCH_RESULTS
+) -> list[dict]:
+    """Rank catalog results without provider- or song-specific exceptions.
+
+    A title-exact query is deliberately narrow: once exact-title versions
+    exist, remixes, parenthesised variants and unrelated recall are noise.
+    Artist-only and title-plus-artist queries retain fuzzy fallback results,
+    with the named artist/version moved first.  Equal scores preserve the
+    catalog's original order.
+    """
+    clean_query = _normalise_search_text(query)
+    clean_tracks = [dict(track) for track in tracks]
+    artist_query = any(
+        _normalise_search_text(artist) == clean_query
+        for track in clean_tracks
+        for artist in track.get("artists", [])
+    )
+    exact = [
+        track for track in clean_tracks
+        if _normalise_search_text(track.get("title")) == clean_query
+    ]
+    if exact and not artist_query:
+        return exact[:limit]
+
+    compact_query = clean_query.replace(" ", "")
+    qualified_titles: list[str] = []
+    for track in clean_tracks:
+        title = _normalise_search_text(track.get("title"))
+        compact_title = title.replace(" ", "")
+        artists = [_normalise_search_text(value) for value in track.get("artists", [])]
+        if (
+            compact_title and compact_title in compact_query
+            and any(artist.replace(" ", "") in compact_query for artist in artists if artist)
+        ):
+            qualified_titles.append(title)
+    if qualified_titles:
+        # A title+artist query is still an exact-title search. Pick the longest
+        # mentioned title so a shorter partial title cannot widen the result,
+        # then use the artist only to order versions of that exact title.
+        title = max(qualified_titles, key=lambda value: len(value.replace(" ", "")))
+        versions = [
+            (index, track) for index, track in enumerate(clean_tracks)
+            if _normalise_search_text(track.get("title")) == title
+        ]
+
+        def artist_rank(item: tuple[int, dict]) -> tuple[int, int]:
+            index, track = item
+            artists = [_normalise_search_text(value) for value in track.get("artists", [])]
+            matched = any(
+                artist.replace(" ", "") in compact_query for artist in artists if artist
+            )
+            return (0 if matched else 1), index
+
+        return [track for _, track in sorted(versions, key=artist_rank)][:limit]
+
+    def score(item: tuple[int, dict]) -> tuple[int, int]:
+        index, track = item
+        title = _normalise_search_text(track.get("title"))
+        artists = [_normalise_search_text(value) for value in track.get("artists", [])]
+        artist_text = " ".join(value for value in artists if value)
+        compact_all = (title + artist_text).replace(" ", "")
+        if compact_query and compact_all == compact_query:
+            rank = 0
+        elif clean_query in artists:
+            rank = 1
+        elif compact_query and compact_query in compact_all:
+            rank = 2
+        elif title.startswith(clean_query):
+            rank = 3
+        elif clean_query and clean_query in title:
+            rank = 4
+        elif clean_query and clean_query in artist_text:
+            rank = 5
+        else:
+            rank = 6
+        return rank, index
+
+    return [
+        track for _, track in sorted(enumerate(clean_tracks), key=score)
+    ][:limit]
 
 
 class MusicError(RuntimeError):
@@ -649,19 +742,22 @@ class NeteaseCatalogAdapter:
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
         query = _bounded_text(query, "query", 120)
-        limit = max(1, min(int(limit), MAX_MUSIC_SEARCH_RESULTS))
+        limit = max(1, min(int(limit), MAX_MUSIC_SEARCH_CANDIDATES))
         cache_key = " ".join(query.casefold().split())
         now = time.monotonic()
         with self._lock:
             cached = self._search_cache.get(cache_key)
             if cached is not None and cached[0] > now:
                 self._search_cache.move_to_end(cache_key)
-                return [dict(item) for item in cached[1][:limit]]
+                return rank_music_search_results(query, cached[1], limit=limit)
             if cached is not None:
                 del self._search_cache[cache_key]
         payload = self._get(
             "/api/search/get",
-            {"s": query, "type": 1, "limit": limit, "offset": 0},
+            {
+                "s": query, "type": 1,
+                "limit": MAX_MUSIC_SEARCH_CANDIDATES, "offset": 0,
+            },
         )
         result = payload.get("result")
         songs = result.get("songs") if isinstance(result, dict) else None
@@ -670,7 +766,7 @@ class NeteaseCatalogAdapter:
         if not isinstance(songs, list):
             raise MusicCatalogUnavailable("music catalog returned invalid search results")
         tracks: list[dict] = []
-        for item in songs[:limit]:
+        for item in songs[:MAX_MUSIC_SEARCH_CANDIDATES]:
             if not self._api_track_available(item):
                 continue
             try:
@@ -690,7 +786,7 @@ class NeteaseCatalogAdapter:
             self._search_cache.move_to_end(cache_key)
             while len(self._search_cache) > self.max_search_entries:
                 self._search_cache.popitem(last=False)
-        return tracks
+        return rank_music_search_results(query, tracks, limit=limit)
 
     def search_tracks(self, query: str, limit: int = 5) -> list[dict]:
         return self.search(query, limit=limit)

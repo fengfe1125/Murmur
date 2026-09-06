@@ -330,6 +330,11 @@ protocol MurmurAPIClient: Sendable {
     func reportMusicPlayback(_ event: MusicPlaybackEvent) async throws
     func resolveSharedMusic(text: String, idempotencyKey: String) async throws -> MusicTrackAttachmentV1
     func searchMusic(query: String, limit: Int) async throws -> [MusicTrackAttachmentV1]
+    func searchMusic(
+        query: String,
+        limit: Int,
+        purpose: MusicSearchPurpose
+    ) async throws -> SearchMusicResponseV1
     func createListenTogetherRoom(
         initialTrack: MusicTrackAttachmentV1,
         idempotencyKey: String
@@ -364,6 +369,17 @@ extension MurmurAPIClient {
 
     func searchMusic(query: String, limit: Int) async throws -> [MusicTrackAttachmentV1] {
         throw MurmurFailure(code: "netease_unavailable", message: "网易云音乐功能尚未开启。", retryable: false)
+    }
+
+    /// Compatibility seam for clients and test doubles written before room
+    /// searches needed a purpose. Their existing search remains a share search;
+    /// real transports override this overload and send the purpose to the API.
+    func searchMusic(
+        query: String,
+        limit: Int,
+        purpose: MusicSearchPurpose
+    ) async throws -> SearchMusicResponseV1 {
+        SearchMusicResponseV1(tracks: try await searchMusic(query: query, limit: limit))
     }
 
     func createListenTogetherRoom(

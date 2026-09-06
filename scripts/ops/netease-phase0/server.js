@@ -125,6 +125,9 @@ function createServer({ phase0, capability, publicDirectory, faultController = n
         result = await serialize(() => phase0.loginStart());
       } else if (request.method === "GET" && route === "/api/login/status") {
         result = await phase0.loginStatus();
+      } else if (request.method === "POST" && route === "/api/music/playability") {
+        const body = await readJson(request);
+        result = { playableSongIds: await phase0.playableSongIds(body.songIds) };
       } else if (request.method === "POST" && route === "/api/room/create") {
         const body = await readJson(request);
         result = await serialize(() => phase0.createRoom(body));
@@ -205,6 +208,11 @@ async function main() {
       type: "svg", errorCorrectionLevel: "M", margin: 2,
     }),
     sessionPath: path.join(stateDirectory, "bot-session.json"),
+    recordTiming: (sample) => {
+      // Stage-only telemetry: never add IDs, room/account data, search text or
+      // request bodies here. Journal aggregation can derive P50/P95.
+      process.stdout.write(`PHASE0_TIMING ${JSON.stringify(sample)}\n`);
+    },
   });
   const server = createServer({
     phase0, capability, publicDirectory: path.join(__dirname, "public"),

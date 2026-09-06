@@ -274,6 +274,7 @@ class AdapterRoomState:
     user_joined: bool
     invite_url: str | None
     playback_state: str = "unknown"
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +285,8 @@ class AdapterCommandResult:
 
 
 class ListenTogetherRoomAdapter(Protocol):
+    def playable_song_ids(self, song_ids: list[str]) -> list[str]: ...
+
     def create(self, *, initial_track: dict, idempotency_key: str) -> AdapterRoomState: ...
 
     def snapshot(self, *, room_ref: str) -> AdapterRoomState: ...
@@ -394,10 +397,38 @@ class ListenTogetherRoomManager:
             raise RoomInvalid("adapter returned an invalid playback state")
         track = _public_track(value.current_track) if value.current_track is not None else None
         invite = _https_url(value.invite_url, "invite_url") if value.invite_url else None
+        error_code = (
+            _bounded_text(value.error_code, "adapter error code", 100)
+            if value.error_code is not None else None
+        )
         return AdapterRoomState(
             room_ref, value.lifecycle, track, bool(value.user_joined), invite,
-            value.playback_state,
+            value.playback_state, error_code,
         )
+
+    def playable_song_ids(self, *, user_id: str, song_ids: list[str]) -> list[str]:
+        """Ask the isolated robot session which bounded IDs it can play."""
+        with self._lock:
+            self._require_open()
+            self._identity(user_id, "user_id")
+            if not isinstance(song_ids, list) or not 1 <= len(song_ids) <= 10:
+                raise RoomInvalid("song_ids must contain 1-10 IDs")
+            clean: list[str] = []
+            for value in song_ids:
+                song_id = self._identity(value, "song_id")
+                if not song_id.isdecimal() or song_id in clean:
+                    raise RoomInvalid("song_ids are invalid")
+                clean.append(song_id)
+        # No room state is read or written here, so do not hold the manager's
+        # room lock across a network call and delay a 3s active-room refresh.
+        playable = self.adapter.playable_song_ids(clean)
+        if not isinstance(playable, list):
+            raise RoomTransportUnavailable("adapter returned invalid playability")
+        allowed = set(clean)
+        if any(not isinstance(value, str) or value not in allowed for value in playable):
+            raise RoomTransportUnavailable("adapter returned invalid playability")
+        playable_set = set(playable)
+        return [value for value in clean if value in playable_set]
 
     def _snapshot(self, room: _ActiveRoom) -> RoomSnapshotV1:
         state = room.state
@@ -419,7 +450,7 @@ class ListenTogetherRoomManager:
         room.adapter_state = self._adapter_state(state)
         room.state = room.adapter_state.lifecycle
         room.pending_command = None
-        room.error_code = None
+        room.error_code = room.adapter_state.error_code
         room.updated_at = self._now_text()
         room.last_confirmed = self._clock()
 
@@ -528,7 +559,7 @@ class ListenTogetherRoomManager:
                 if adapter_result.status == "synchronized":
                     room.state = room.adapter_state.lifecycle
                     room.pending_command = None
-                    room.error_code = None
+                    room.error_code = room.adapter_state.error_code
                     room.last_confirmed = self._clock()
                 elif adapter_result.status == "accepted":
                     room.state = "syncing"
@@ -682,6 +713,7 @@ class NeteaseTransportState:
     server_sequence: int
     queue_version: int
     authenticated: bool = True
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -689,10 +721,13 @@ class NeteaseTransportAck:
     accepted: bool
     client_sequence: int
     authenticated: bool = True
+    state: NeteaseTransportState | None = None
 
 
 class NeteaseRoomTransport(Protocol):
     """Reviewed private-protocol boundary; intentionally has no HTTP implementation."""
+
+    def playable_song_ids(self, song_ids: list[str]) -> list[str]: ...
 
     def create_room(
         self,
@@ -792,6 +827,8 @@ class ExperimentalNeteaseRoomAdapter:
             or not isinstance(value.queue_version, int) or value.queue_version < 0
         ):
             raise RoomTransportUnavailable("transport returned invalid protocol counters")
+        if value.error_code is not None:
+            _bounded_text(value.error_code, "transport error code", 100)
         return value
 
     @staticmethod
@@ -803,6 +840,13 @@ class ExperimentalNeteaseRoomAdapter:
             user_joined=value.user_joined,
             invite_url=value.invite_url,
             playback_state=value.playback_state,
+            error_code=value.error_code,
+        )
+
+    def playable_song_ids(self, song_ids: list[str]) -> list[str]:
+        transport = self._ready()
+        return self._transport_call(
+            None, lambda: transport.playable_song_ids(song_ids)
         )
 
     def _transport_call(self, session: _NeteaseSession | None, operation: Callable):
@@ -932,15 +976,21 @@ class ExperimentalNeteaseRoomAdapter:
                 return AdapterCommandResult("failed", self._public(session.state), "command_rejected")
             if ack.client_sequence != sent_sequence:
                 raise RoomOutOfOrder("NetEase ACK did not match the command sequence")
-            value = self._transport_call(
-                session,
-                lambda: transport.get_state(
-                    external_room_id=session.external_room_id,
-                    client_sequence=session.client_sequence,
-                    queue_version=session.queue_version,
-                ),
-            )
+            value = ack.state
+            if value is None:
+                value = self._transport_call(
+                    session,
+                    lambda: transport.get_state(
+                        external_room_id=session.external_room_id,
+                        client_sequence=session.client_sequence,
+                        queue_version=session.queue_version,
+                    ),
+                )
             state = self._accept_state(session, value)
+            if state.error_code == "counterpart_rights_unavailable":
+                return AdapterCommandResult(
+                    "failed", self._public(state), state.error_code
+                )
             synchronized = self._command_confirmed(command, clean_track, before, state)
             return AdapterCommandResult(
                 "synchronized" if synchronized else "accepted", self._public(state)
@@ -994,6 +1044,10 @@ class InMemoryRoomAdapter:
         self.calls: list[tuple] = []
         self._counter = 0
 
+    def playable_song_ids(self, song_ids: list[str]) -> list[str]:
+        self.calls.append(("playability", tuple(song_ids)))
+        return list(song_ids)
+
     def create(self, *, initial_track: dict, idempotency_key: str) -> AdapterRoomState:
         self._counter += 1
         ref = f"fake-external-{self._counter}"
@@ -1044,7 +1098,7 @@ class InMemoryRoomAdapter:
         state = self._get(room_ref)
         self.rooms[room_ref] = AdapterRoomState(
             state.room_ref, "connected", state.current_track, True,
-            state.invite_url, state.playback_state,
+            state.invite_url, state.playback_state, state.error_code,
         )
 
     def _get(self, room_ref: str) -> AdapterRoomState:
@@ -1220,6 +1274,7 @@ class RoomIPCServer:
         allowed = {
             "create": {"operation", "user_id", "initial_track", "idempotency_key"},
             "current": {"operation", "user_id"},
+            "playability": {"operation", "user_id", "song_ids"},
             "command": {
                 "operation", "user_id", "room_handle", "command", "track",
                 "idempotency_key",
@@ -1237,6 +1292,12 @@ class RoomIPCServer:
         if operation == "current":
             room = self.manager.current(user_id=request["user_id"])
             return room.to_wire() if room else None
+        if operation == "playability":
+            return {
+                "playable_song_ids": self.manager.playable_song_ids(
+                    user_id=request["user_id"], song_ids=request["song_ids"]
+                )
+            }
         if operation == "command":
             return self.manager.command(
                 user_id=request["user_id"],
@@ -1281,11 +1342,17 @@ class RoomIPCClient:
         # 客户端那边的刷新还是静默失败，于是表现成「header 不会自己更新」。
         timeout_seconds: float = 15.0,
         create_timeout_seconds: float = 45.0,
+        command_timeout_seconds: float = 4.5,
         max_message_bytes: int = 64 * 1024,
     ):
         self.socket_path = os.fspath(socket_path)
         self.timeout = timeout_seconds
         self.create_timeout = create_timeout_seconds
+        # A command may still be reconciling inside the worker after the socket
+        # deadline, but the API must stop presenting an indefinite syncing state.
+        # Keep a little room below the product's five-second failure budget for
+        # HTTP response encoding and the client-side state transition.
+        self.command_timeout = command_timeout_seconds
         self.max_message_bytes = max_message_bytes
 
     def create(
@@ -1303,6 +1370,21 @@ class RoomIPCClient:
         data = self._request({"operation": "current", "user_id": user_id})
         return _room_from_wire(data) if data is not None else None
 
+    def playable_song_ids(self, *, user_id: str, song_ids: list[str]) -> list[str]:
+        data = self._request({
+            "operation": "playability",
+            "user_id": user_id,
+            "song_ids": song_ids,
+        })
+        if not isinstance(data, dict) or set(data) != {"playable_song_ids"}:
+            raise RoomIPCUnavailable("worker returned invalid playability")
+        playable = data["playable_song_ids"]
+        if not isinstance(playable, list) or any(
+            not isinstance(value, str) for value in playable
+        ):
+            raise RoomIPCUnavailable("worker returned invalid playability")
+        return playable
+
     def command(
         self,
         *,
@@ -1319,7 +1401,7 @@ class RoomIPCClient:
             "command": command,
             "track": track,
             "idempotency_key": idempotency_key,
-        }, timeout=self.create_timeout)
+        }, timeout=self.command_timeout)
         if not isinstance(data, dict) or set(data) != {"status", "room"}:
             raise RoomIPCUnavailable("worker returned an invalid command response")
         try:
