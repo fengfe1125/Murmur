@@ -30,3 +30,10 @@ xcodebuild test -project apps/ios/MurmurApp.xcodeproj -scheme Murmur \
 当年今日的 Metal shader 需要对应 Xcode Metal toolchain。测试与构建产物不提交。
 现有单元测试覆盖身份、SSE、失败恢复、临时文件、聊天持久化和独立存档。
 App Attest/APNs 真机、签名与生产环境必须另行验收，模拟器和无签名编译不替代它们。
+
+
+## 原生聊天与旧照浏览
+
+2026-09-23 客户端改为系统四标签与导航容器；聊天日期分页使用原目录内的 SQLite，首次读取校验并迁移 JSON。分页只限制内存窗口，不删除窗口外的本机记录，清空聊天和照片存档仍分别操作。没有新增跨设备同步。
+
+当年今日按照片日期横向浏览，明确点击“聊聊这张”才创建房间。日期分页、输入栏和截图检查见 [界面验收记录](../../../docs/validation/native-chat-photo-refactor-2026-09-23.md)。每日回顾客户端以 `/v1/reviews/config` 的能力结果开放；服务端不存在该路由或未开启时不开放回顾，本 PR 不包含每日回顾服务端实现或部署。

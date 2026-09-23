@@ -3,7 +3,138 @@ import UIKit
 
 @MainActor
 final class MurmurUITests: XCTestCase {
-    /// 聊天页只留一张小卡片：暂停和下一首在手边，其余的在那一整屏里。
+    override func setUp() async throws {
+        continueAfterFailure = false
+        await MainActor.run { XCUIDevice.shared.orientation = .portrait }
+    }
+
+    func testReducedMotionPhotoMenuOpensAndCloses() throws {
+        continueAfterFailure=false
+        let app=launchApp(arguments:["--murmur-ui-test-reduce-motion"])
+        let addButton=app.buttons["添加照片"]
+        XCTAssertTrue(addButton.waitForExistence(timeout:10)); addButton.tap()
+        XCTAssertTrue(app.buttons["从照片中选择"].firstMatch.waitForExistence(timeout:5))
+        let shot=XCTAttachment(screenshot:app.screenshot()); shot.name="Photo menu · Reduce Motion"; shot.lifetime = .keepAlways; add(shot)
+        app.coordinate(withNormalizedOffset:CGVector(dx:0.5,dy:0.3)).tap()
+        XCTAssertFalse(app.buttons["从照片中选择"].firstMatch.exists)
+    }
+    /// Retain fictional QA frames even if Xcode stalls finalizing its result bundle.
+    private func captureDiaryScreenshot(_ app: XCUIApplication, name: String) throws {
+        let screenshot = XCUIScreen.main.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("diary-qa")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(name + ".png")
+        try screenshot.pngRepresentation.write(to: url, options: .atomic)
+        print("DiaryQA screenshot: \(url.path)")
+    }
+
+    func testDailyReviewAccessibilityLabelsAndTargets() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-diary"])
+        XCTAssertTrue(app.buttons["daily-review-entry"].waitForExistence(timeout: 10))
+        try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .trait])
+        app.buttons["chat-calendar"].tap()
+        XCTAssertTrue(app.buttons["完成"].waitForExistence(timeout: 5))
+        try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .trait])
+        app.buttons["完成"].tap()
+        app.buttons["daily-review-entry"].tap()
+        XCTAssertTrue(app.buttons["answer-daily-question"].waitForExistence(timeout: 20))
+        try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .trait])
+    }
+
+    func testDailyReviewQuestionAndMemoryCorrection() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments:["--murmur-stub-diary","--murmur-seed-diary"])
+        XCTAssertTrue(app.buttons["daily-review-entry"].waitForExistence(timeout:10))
+        app.buttons["daily-review-entry"].tap()
+        XCTAssertTrue(app.buttons["answer-daily-question"].waitForExistence(timeout:20))
+        try captureDiaryScreenshot(app, name: "Daily review · Light")
+        app.buttons["answer-daily-question"].tap()
+        XCTAssertTrue(app.staticTexts["如果周末留出一段散步时间，你最需要先安排好什么？"].waitForExistence(timeout:5))
+        XCTAssertTrue(app.textFields["moment-composer"].exists)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        let dateHeader = settled(app.buttons["chat-calendar"])
+        if app.statusBars.firstMatch.exists {
+            XCTAssertGreaterThanOrEqual(dateHeader.frame.minY, app.statusBars.firstMatch.frame.maxY - 1)
+        }
+        try captureDiaryScreenshot(app, name: "Question context · Keyboard")
+        enterMoment(app.textFields["moment-composer"], "星期六上午")
+        app.buttons["send-moment"].tap()
+        XCTAssertTrue(line("已接上这一天的问题。", in: app).waitForExistence(timeout: 5))
+        app.buttons["daily-review-entry"].tap()
+        let memory = app.buttons.containing(.staticText,identifier:"查看来源与纠正  ›").firstMatch
+        if !memory.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(memory.waitForExistence(timeout:5)); memory.tap()
+        XCTAssertTrue(app.textFields["memory-editor"].exists || app.textViews["memory-editor"].exists)
+        let editor = app.textFields["memory-editor"]
+        editor.tap(); editor.typeText(" 我更愿意在晴天去。")
+        app.buttons["memory-save"].tap()
+        XCTAssertTrue(app.staticTexts["memory-result"].waitForExistence(timeout:5))
+        try captureDiaryScreenshot(app, name: "Memory · Corrected")
+    }
+
+    func testChatCalendarJumpsAndReturnsToLatest() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments:["--murmur-stub-diary","--murmur-seed-diary"])
+        XCTAssertTrue(app.buttons["chat-calendar"].waitForExistence(timeout:10))
+        app.buttons["chat-calendar"].tap()
+        let cell = nativeCalendarDay(in: app, daysAgo: 1)
+        if !cell.exists { app.buttons["DatePicker.PreviousMonth"].firstMatch.tap() }
+        XCTAssertTrue(cell.waitForExistence(timeout:5)); cell.tap()
+        try captureDiaryScreenshot(app, name: "Calendar · Selected day")
+        app.buttons["chat-jump-date"].tap()
+        XCTAssertTrue(app.staticTexts["你说：昨天整理了旅行照片。"].waitForExistence(timeout:5))
+        try captureDiaryScreenshot(app, name: "Chat · Historical date")
+        app.buttons["chat-return-latest"].tap()
+        XCTAssertTrue(app.staticTexts["Murmur 说：开始的时间还没有确定。"].waitForExistence(timeout:5))
+    }
+
+    func testDailyReviewDarkLargeTextAndForget() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-diary", "--murmur-ui-test-dark", "--murmur-ui-test-large-type", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])
+        XCTAssertTrue(app.buttons["daily-review-entry"].waitForExistence(timeout: 10))
+        app.buttons["daily-review-entry"].tap()
+        XCTAssertTrue(app.staticTexts["daily-review-title"].waitForExistence(timeout: 20))
+        try captureDiaryScreenshot(app, name: "Daily review · Dark XXXL")
+        let memory = app.buttons.containing(.staticText, identifier: "查看来源与纠正  ›").firstMatch
+        for _ in 0..<8 where !memory.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(memory.isHittable); memory.tap()
+        let forget = app.buttons["memory-forget"]
+        for _ in 0..<8 where !forget.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(forget.isHittable); forget.tap()
+        app.buttons["memory-forget-confirm"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["memory-result"].waitForExistence(timeout: 5))
+        try captureDiaryScreenshot(app, name: "Memory · Forgotten")
+    }
+
+    func testDailyReviewLandscapeAndCalendarAccessibility() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-diary"])
+        let date = app.buttons["chat-calendar"]
+        XCTAssertTrue(date.waitForExistence(timeout: 10)); XCTAssertEqual(date.label, "查看日期日历")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let landscape = NSPredicate { _, _ in
+            app.windows.firstMatch.frame.width > app.windows.firstMatch.frame.height
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: landscape, object: app)], timeout: 10), .completed)
+        XCTAssertTrue(date.isHittable) // Native toolbar metrics vary with size class.
+        date.tap()
+        XCTAssertTrue(app.buttons["DatePicker.PreviousMonth"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["DatePicker.NextMonth"].firstMatch.isHittable)
+        XCTAssertLessThanOrEqual(app.buttons["DatePicker.NextMonth"].firstMatch.frame.maxX, app.windows.firstMatch.frame.maxX)
+        try captureDiaryScreenshot(app, name: "Calendar · Landscape")
+        app.buttons["完成"].tap()
+        app.buttons["daily-review-entry"].tap()
+        let answer = app.buttons["answer-daily-question"]
+        for _ in 0..<5 where !answer.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(answer.isHittable); assertMinimumHitArea(answer)
+    }
+
     func testTheChatCardPausesAndSkipsWithoutLeavingTheConversation() throws {
         continueAfterFailure = false
         let app = launchApp(arguments: ["--murmur-stub-netease-playing"])
@@ -34,11 +165,11 @@ final class MurmurUITests: XCTestCase {
         continueAfterFailure = false
         let app = launchApp(arguments: ["--murmur-stub-netease-playing"])
         XCTAssertTrue(app.staticTexts["已连接，正在一起听"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["tab-chat"].isSelected)
+        XCTAssertTrue(app.buttons["tab-chat"].firstMatch.isSelected)
 
         app.buttons["打开一起听"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["tab-listenTogether"].isSelected)
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.isSelected)
         // 那四个搬过来的动作，现在都在一屏之内够得着。
         for item in ["上一首", "下一首", "在网易云打开", "结束一起听"] {
             XCTAssertTrue(app.buttons[item].waitForExistence(timeout: 3), item)
@@ -53,8 +184,8 @@ final class MurmurUITests: XCTestCase {
             ("--murmur-stub-netease-syncing", "暂停同步中…", "正在同步一起听操作"),
         ] {
             let app = launchApp(arguments: [argument])
-            XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
-            app.buttons["tab-listenTogether"].tap()
+            XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.waitForExistence(timeout: 5))
+            app.buttons["tab-listenTogether"].firstMatch.tap()
             XCTAssertTrue(app.staticTexts[text].waitForExistence(timeout: 5), argument)
             let control = app.buttons[action]
             XCTAssertTrue(control.exists, argument)
@@ -66,8 +197,8 @@ final class MurmurUITests: XCTestCase {
     func testListenTogetherCommandFailureStaysOnTheScreenAndCanRetry() throws {
         continueAfterFailure = false
         let app = launchApp(arguments: ["--murmur-stub-netease-command-fails"])
-        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
-        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].firstMatch.tap()
         let pause = app.buttons["暂停一起听"]
         XCTAssertTrue(pause.waitForExistence(timeout: 5))
         pause.tap()
@@ -78,8 +209,8 @@ final class MurmurUITests: XCTestCase {
 
     func testListenTogetherRightsConflictIsNonblocking() throws {
         let app = launchApp(arguments: ["--murmur-stub-netease-rights"])
-        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
-        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].firstMatch.tap()
         XCTAssertTrue(
             app.staticTexts["这首歌双方版权不一致，已退回上一首。"]
                 .waitForExistence(timeout: 5)
@@ -91,14 +222,15 @@ final class MurmurUITests: XCTestCase {
     func testListenTogetherCreateFailureKeepsTheSongAndOffersRetry() throws {
         continueAfterFailure = false
         let app = launchApp(arguments: ["--murmur-stub-netease-create-fails"])
-        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
-        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].firstMatch.tap()
         let choose = app.buttons["选一首歌"]
         XCTAssertTrue(choose.waitForExistence(timeout: 5))
         choose.tap()
 
-        let field = app.textFields["netease-search-field"]
+        let field = app.searchFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
         field.typeText("花海\n")
         let start = app.buttons["和 Murmur 一起听"].firstMatch
         XCTAssertTrue(start.waitForExistence(timeout: 5))
@@ -113,19 +245,20 @@ final class MurmurUITests: XCTestCase {
 
     func testListenTogetherSearchCTARequiresTheSearchCapability() throws {
         let app = launchApp(arguments: ["--murmur-stub-netease-no-search"])
-        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
-        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["选歌暂不可用"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["选一首歌"].exists)
     }
 
     func testListenTogetherSearchExplainsWhenNoVersionWorksForBothAccounts() throws {
         let app = launchApp(arguments: ["--murmur-stub-netease-search-no-common"])
-        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
-        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].firstMatch.tap()
         app.buttons["选一首歌"].tap()
-        let field = app.textFields["netease-search-field"]
+        let field = app.searchFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
         field.typeText("山楂树之恋\n")
         XCTAssertTrue(
             app.staticTexts["找到了，但没有双方都能播放的版本。"]
@@ -135,8 +268,8 @@ final class MurmurUITests: XCTestCase {
 
     func testListenTogetherTerminalAndOfflineStatesStayDistinct() throws {
         var app = launchApp(arguments: ["--murmur-stub-netease-room-failed"])
-        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
-        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["邀请已过期，点此重试"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["重新创建一起听邀请"].exists)
         // 邀请过期时切歌切给谁听？这两颗键不该在。
@@ -145,8 +278,9 @@ final class MurmurUITests: XCTestCase {
         app.terminate()
 
         app = launchApp(arguments: ["--murmur-stub-netease-offline"])
-        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
-        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].firstMatch.tap()
+        try captureDiaryScreenshot(app, name: "Native offline music")
         XCTAssertTrue(app.staticTexts["Murmur 连接异常"].waitForExistence(timeout: 5))
         let disabled = app.buttons["Murmur 连接异常，控制暂不可用"]
         XCTAssertTrue(disabled.exists)
@@ -219,7 +353,6 @@ final class MurmurUITests: XCTestCase {
         app.launchArguments = [
             "--murmur-ui-testing",
             "--murmur-reset-transcript",
-            "--murmur-stub-keyboard-overlap",
             "--murmur-stub-netease-share",
             "--murmur-ui-test-dark",
         ]
@@ -267,7 +400,6 @@ final class MurmurUITests: XCTestCase {
         app.launchArguments = [
             "--murmur-ui-testing",
             "--murmur-reset-transcript",
-            "--murmur-stub-keyboard-overlap",
             "--murmur-stub-netease-playing",
             "--murmur-ui-test-dark",
         ]
@@ -297,7 +429,7 @@ final class MurmurUITests: XCTestCase {
         }())
 
         // tab 那半：四格之后每格更窄，标签在 XXXL 下不许把整条 bar 撑破。
-        let stop = app.buttons["tab-listenTogether"]
+        let stop = app.buttons["tab-listenTogether"].firstMatch
         XCTAssertTrue(stop.exists)
         assertMinimumHitArea(stop)
         XCTAssertTrue(app.windows.firstMatch.frame.contains(stop.frame))
@@ -331,7 +463,7 @@ final class MurmurUITests: XCTestCase {
         // The transcript lives on this device on purpose, so quitting the app
         // must not be a way of losing the conversation.
         app.terminate()
-        app.launchArguments = ["--murmur-ui-testing", "--murmur-stub-keyboard-overlap"]
+        app.launchArguments = ["--murmur-ui-testing"]
         app.launch()
         XCTAssertTrue(line("今天的风", in: app).waitForExistence(timeout: 10))
     }
@@ -346,20 +478,20 @@ final class MurmurUITests: XCTestCase {
 
         for cycle in 1...30 {
             if cycle.isMultiple(of: 2) {
-                app.buttons["tab-me"].tap()
+                app.buttons["tab-me"].firstMatch.tap()
                 XCTAssertTrue(
                     app.descendants(matching: .any)["build-stamp"].firstMatch.waitForExistence(timeout: 3),
                     "cycle \(cycle): 我的 did not appear"
                 )
             } else {
-                app.buttons["tab-onThisDay"].tap()
+                app.buttons["tab-onThisDay"].firstMatch.tap()
                 XCTAssertTrue(
                     app.buttons["onthisday-entry"].waitForExistence(timeout: 3),
                     "cycle \(cycle): 当年今日 did not appear"
                 )
             }
 
-            app.buttons["tab-chat"].tap()
+            app.buttons["tab-chat"].firstMatch.tap()
             XCTAssertTrue(composer.waitForExistence(timeout: 3), "cycle \(cycle): chat did not appear")
             assertLatestTranscriptRowIsVisible(newest, above: composer, in: app, cycle: cycle)
         }
@@ -372,7 +504,7 @@ final class MurmurUITests: XCTestCase {
         // The deterministic 301pt geometry models a portrait software
         // keyboard. This compatibility test deliberately rotates the device,
         // so let UIKeyboardLayoutGuide provide the real landscape height.
-        let app = launchApp(stubKeyboard: false)
+        let app = launchApp()
         let composer = app.textFields["moment-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.label, "这一刻的文字")
@@ -394,7 +526,6 @@ final class MurmurUITests: XCTestCase {
         app.launchArguments = [
             "--murmur-ui-testing",
             "--murmur-reset-transcript",
-            "--murmur-stub-keyboard-overlap",
         ]
         app.launchEnvironment["AppleInterfaceStyle"] = "Dark"
         app.launchEnvironment["UIPreferredContentSizeCategoryName"] = "UICTContentSizeCategoryAccessibilityExtraExtraExtraLarge"
@@ -402,12 +533,12 @@ final class MurmurUITests: XCTestCase {
 
         let composer = app.textFields["moment-composer"]
         let addPhoto = app.buttons["添加照片"]
-        let settings = app.buttons["tab-me"]
+        let settings = app.buttons["tab-me"].firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertTrue(addPhoto.waitForExistence(timeout: 3))
         XCTAssertTrue(settings.waitForExistence(timeout: 3))
         assertMinimumHitArea(addPhoto)
-        assertMinimumHitArea(settings)
+        XCTAssertTrue(settings.isHittable) // Native tab metrics and hit regions belong to UIKit.
         enterMoment(composer, "大字也能到达")
         let send = app.buttons["send-moment"]
         XCTAssertTrue(send.isHittable)
@@ -435,15 +566,15 @@ final class MurmurUITests: XCTestCase {
         XCTAssertEqual(app.buttons["send-moment"].label, "发送这一刻")
         XCTAssertTrue(app.buttons["添加照片"].exists)
         // The four stops are named, and the one you are on says so.
-        XCTAssertEqual(app.buttons["tab-chat"].label, "聊天")
-        XCTAssertEqual(app.buttons["tab-listenTogether"].label, "一起听")
-        XCTAssertEqual(app.buttons["tab-onThisDay"].label, "当年今日")
-        XCTAssertEqual(app.buttons["tab-me"].label, "我的")
-        XCTAssertTrue(app.buttons["tab-chat"].isSelected)
+        XCTAssertEqual(app.buttons["tab-chat"].firstMatch.label, "聊天")
+        XCTAssertEqual(app.buttons["tab-listenTogether"].firstMatch.label, "一起听")
+        XCTAssertEqual(app.buttons["tab-onThisDay"].firstMatch.label, "当年今日")
+        XCTAssertEqual(app.buttons["tab-me"].firstMatch.label, "我的")
+        XCTAssertTrue(app.buttons["tab-chat"].firstMatch.isSelected)
         // The order is a design decision, and nothing else would catch a
         // reshuffle: 聊天 · 一起听 · 当年今日 · 我的, left to right.
         let stops = ["tab-chat", "tab-listenTogether", "tab-onThisDay", "tab-me"]
-        let xs = stops.map { app.buttons[$0].frame.minX }
+        let xs = stops.map { app.buttons[$0].firstMatch.frame.minX }
         XCTAssertEqual(xs, xs.sorted(), "tab 栏的顺序变了")
         XCTAssertTrue(
             app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "发来眼前的一刻")).firstMatch.exists
@@ -593,17 +724,35 @@ final class MurmurUITests: XCTestCase {
         )
     }
 
+    func testKeyboardRefocusUsingVisibleKeyboardKeys() throws {
+        continueAfterFailure = false
+        let app = launchApp()
+        let composer = app.textFields["moment-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout:10))
+        composer.tap()
+        XCTAssertTrue(waitForSoftwareKeyboard(in:app,visible:true,timeout:5))
+        let letter = app.keys["a"].exists ? app.keys["a"] : app.keys["A"]
+        XCTAssertTrue(letter.isHittable)
+        letter.tap()
+        app.coordinate(withNormalizedOffset:CGVector(dx:0.5,dy:0.3)).tap()
+        XCTAssertTrue(waitForSoftwareKeyboard(in:app,visible:false,timeout:5))
+        composer.tap()
+        XCTAssertTrue(waitForSoftwareKeyboard(in:app,visible:true,timeout:5))
+    }
+
     func testSystemKeyboardGeometryTracksDismissAndRefocusWithoutABlankBand() throws {
         continueAfterFailure = false
         // This integration test needs an attached Simulator window with its
         // software keyboard enabled. Headless XCTest can focus an off-screen
         // virtual keyboard; the frame assertions intentionally reject that.
-        let app = launchApp(stubKeyboard: false)
+        let app = launchApp()
         let composer = app.textFields["moment-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         let restingComposerY = composer.frame.minY
 
         composer.tap()
+        XCTAssertTrue(waitForSoftwareKeyboard(in: app, visible: true, timeout: 5),
+                      "A tap must show the real keyboard before XCTest injects typing")
         composer.typeText("系统键盘")
         XCTAssertTrue(waitForSoftwareKeyboard(in: app, visible: true, timeout: 5))
         XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
@@ -668,29 +817,25 @@ final class MurmurUITests: XCTestCase {
     func testSettingsExposesNotificationToggleAndFrequency() throws {
         continueAfterFailure = false
         let app = launchApp()
-        let settings = app.buttons["tab-me"]
+        let settings = app.buttons["tab-me"].firstMatch
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
         guard UIDevice.current.userInterfaceIdiom == .phone else { return }
         settings.tap()
-        XCTAssertTrue(
-            app.staticTexts["允许通知"].waitForExistence(timeout: 3)
-                || app.switches["允许通知"].waitForExistence(timeout: 2)
-                || app.descendants(matching: .any)["notification-toggle"].firstMatch.waitForExistence(timeout: 2)
-        )
-        XCTAssertTrue(
-            app.staticTexts["每天最多"].waitForExistence(timeout: 2)
-                || app.buttons["每天最多"].waitForExistence(timeout: 2)
-        )
-        // Which build is installed has to be readable from inside the app;
-        // a side-loaded build carries no version number that ever changes.
         XCTAssertTrue(app.descendants(matching: .any)["build-stamp"].firstMatch.exists)
-        app.swipeUp()
-        XCTAssertTrue(app.buttons["清空这一刻"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.buttons["清空聊天记录"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.buttons["删除账号与全部记忆"].waitForExistence(timeout: 2))
+        let notification = app.descendants(matching: .any)["notification-toggle"].firstMatch
+        for _ in 0..<8 where !notification.isHittable { app.swipeUp() }
+        XCTAssertTrue(notification.isHittable)
+        XCTAssertTrue(app.staticTexts["每天最多"].exists || app.buttons["每天最多"].exists)
+        let clear = app.buttons["清空聊天记录"]
+        for _ in 0..<5 where !clear.isHittable { app.swipeUp() }
+        XCTAssertTrue(clear.isHittable)
+        XCTAssertTrue(app.buttons["清空这一刻"].exists)
+        let delete = app.buttons["删除账号与全部记忆"]
+        for _ in 0..<5 where !delete.isHittable { app.swipeUp() }
+        XCTAssertTrue(delete.isHittable)
     }
 
-    func testAddPhotoMenuRisesWithoutDimmingTheTranscript() throws {
+    func testNativePhotoMenuOpensAndDismissesWithoutLosingTranscript() throws {
         continueAfterFailure = false
         let app = launchApp()
         let composer = app.textFields["moment-composer"]
@@ -700,17 +845,16 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(bubble(in: app).waitForExistence(timeout: 10))
 
         app.buttons["添加照片"].tap()
-        let menu = app.descendants(matching: .any)["photo-source-menu"].firstMatch
+        let menu = app.buttons["从照片中选择"].firstMatch
         XCTAssertTrue(menu.waitForExistence(timeout: 3))
         // It rises out of the composer rather than dropping over the top of it.
-        XCTAssertGreaterThan(app.textFields["moment-composer"].frame.minY, menu.frame.minY)
-        XCTAssertTrue(line("先垫一句", in: app).exists)
 
         // A tap anywhere off the menu puts it away again.  It has to go through
         // a coordinate rather than an element: the invisible catcher that
         // closes the menu sits over the transcript while the menu is open.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
         XCTAssertTrue(menu.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(line("先垫一句", in: app).exists)
     }
 
     func testRepliedMomentStaysInTheTranscript() throws {
@@ -755,34 +899,17 @@ final class MurmurUITests: XCTestCase {
         // line is for a draft that could not be prepared, and this is not one.
         XCTAssertFalse(app.descendants(matching: .any)["draft-error"].firstMatch.exists)
 
-        // The mark asks before it sends, and the question stands on the mark
-        // rather than somewhere near the row.  This is the assertion the whole
-        // hand-placed card exists for: `popover` and `confirmationDialog` both
-        // anchored to the row instead, which put the card level with the top of
-        // a tall photo — a good 60pt clear of the mark — so a loose bound here
-        // would not have caught it.
+        // Native confirmation must allow cancellation without resending.
         resend.tap()
-        let card = app.descendants(matching: .any)["resend-question"].firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 5))
-        // The card's foot is 8pt above the mark; what is measured here is its
-        // accessibility frame, which is the content box inside the card's 16pt
-        // padding, so a correct placement reads as ~24.  The anchoring this
-        // replaced put it ~70 clear of the mark, which is what the bound has to
-        // separate — not a hair's breadth either side of 24.
-        XCTAssertLessThan(
-            resend.frame.minY - card.frame.maxY, 32,
-            "the question did not come to rest on the mark"
-        )
-        XCTAssertGreaterThan(resend.frame.minY - card.frame.maxY, 0, "the question covered the mark")
-
-        // Backing out of it leaves the row exactly as it was.  Dismissing goes
-        // through a tap away rather than a cancel button, the way the
-        // add-photo menu closes.
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.25)).tap()
-        XCTAssertTrue(card.waitForNonExistence(timeout: 5))
-        XCTAssertTrue(resend.exists)
-        // The mark has to be reachable the moment the card is gone, not once
-        // some invisible catcher has finished animating off it.
+        let confirmDialog = app.buttons["confirm-resend"].firstMatch
+        XCTAssertTrue(confirmDialog.waitForExistence(timeout: 5))
+        if app.buttons["取消"].firstMatch.exists {
+            app.buttons["取消"].firstMatch.tap()
+        } else {
+            // iPad confirmation dialogs dismiss by tapping outside their popover.
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.15)).tap()
+        }
+        XCTAssertTrue(confirmDialog.waitForNonExistence(timeout: 5))
         XCTAssertTrue(resend.isHittable)
 
         // Going through with it sends that same row again rather than adding a
@@ -988,14 +1115,13 @@ final class MurmurUITests: XCTestCase {
     /// the history is persisted now, so without the reset each test would read
     /// whatever the one before it happened to say.
     private func launchApp(
-        arguments: [String] = [],
-        stubKeyboard: Bool = true
+        arguments: [String] = []
     ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
             "--murmur-ui-testing",
             "--murmur-reset-transcript",
-        ] + (stubKeyboard ? ["--murmur-stub-keyboard-overlap"] : []) + arguments
+        ] + arguments
         app.launch()
         return app
     }
@@ -1020,8 +1146,10 @@ final class MurmurUITests: XCTestCase {
     }
 
     private func assertMinimumHitArea(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertGreaterThanOrEqual(element.frame.width, 44, file: file, line: line)
-        XCTAssertGreaterThanOrEqual(element.frame.height, 44, file: file, line: line)
+        // Accessibility frames can represent 44pt as 43.999999999999886.
+        let epsilon: CGFloat = 0.001
+        XCTAssertGreaterThanOrEqual(element.frame.width + epsilon, 44, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(element.frame.height + epsilon, 44, file: file, line: line)
     }
 
     /// A photo waiting in the draft must not lift the composer off the
@@ -1040,12 +1168,21 @@ final class MurmurUITests: XCTestCase {
         let restingComposerY = composer.frame.minY
         composer.tap()
         XCTAssertTrue(waitForComposerToRise(composer, from: restingComposerY, timeout: 5))
-        XCTAssertEqual(
-            restingComposerY - composer.frame.minY,
-            229,
-            accuracy: 12,
-            "a draft photo added extra keyboard clearance"
-        )
+        XCTAssertTrue(waitForSoftwareKeyboard(in: app, visible: true, timeout: 5))
+        try captureDiaryScreenshot(app, name: "Native draft photo keyboard")
+        let withPhotoGap = app.keyboards.firstMatch.frame.minY - settled(composer).frame.maxY
+        XCTAssertGreaterThanOrEqual(withPhotoGap, 0)
+        // XCTest excludes the Pinyin candidate strip from keyboard.frame.
+        // Compare identical keyboard configurations instead of a fixed gap.
+        app.terminate()
+        let plain = launchApp()
+        let plainComposer = plain.textFields["moment-composer"]
+        XCTAssertTrue(plainComposer.waitForExistence(timeout: 5))
+        plainComposer.tap()
+        XCTAssertTrue(waitForSoftwareKeyboard(in: plain, visible: true, timeout: 5))
+        try captureDiaryScreenshot(plain, name: "Native plain keyboard")
+        let plainGap = plain.keyboards.firstMatch.frame.minY - settled(plainComposer).frame.maxY
+        XCTAssertEqual(withPhotoGap, plainGap, accuracy: 12, "a draft photo added keyboard clearance")
     }
 
     // MARK: - 当年今日
@@ -1106,21 +1243,22 @@ final class MurmurUITests: XCTestCase {
 
         // Three photos from this day, then the album.  A shelf that wrapped
         // would be back on 去年的今天 by the fourth swipe.
-        for _ in 0..<3 { photo.swipeDown() }
+        for _ in 0..<3 { photo.swipeLeft() }
         XCTAssertTrue(app.staticTexts["相册里翻到的"].waitForExistence(timeout: 5))
     }
 
-    /// One photo at a time: down moves to the next year, up carries the photo
-    /// into its own room.  Both directions are gated — |dy| > 60pt and clearly
-    /// vertical — which the stubbed shelf makes repeatable.
+    /// Native horizontal paging can return to a previous photo. Only the
+    /// explicit action opens a room.
     func testOnThisDaySwipesBetweenYearsAndOpensTheRoom() throws {
         let app = launchApp(arguments: ["--murmur-stub-onthisday"])
         openOnThisDay(in: app)
         let photo = readyOnThisDayPhoto(in: app)
         XCTAssertTrue(app.staticTexts["去年的今天"].waitForExistence(timeout: 5))
 
-        photo.swipeDown()
+        photo.swipeLeft()
         XCTAssertTrue(app.staticTexts["2 年前的今天"].waitForExistence(timeout: 5))
+        photo.swipeRight()
+        XCTAssertTrue(app.staticTexts["去年的今天"].waitForExistence(timeout: 5))
 
         openPhotoRoom(in: app)
         // And nowhere near the conversation: the composer never sees it.
@@ -1176,21 +1314,21 @@ final class MurmurUITests: XCTestCase {
         wait(for: [roomGone], timeout: 5)
         // Back on 当年今日's calendar, and today now carries a mark.
         XCTAssertTrue(
-            app.buttons[archiveDayIdentifier(daysAgo: 0)].waitForExistence(timeout: 5)
+            nativeCalendarDay(in: app, daysAgo: 0).waitForExistence(timeout: 5)
         )
         // The conversation is untouched: still on its empty state, with no row
         // of the room's anywhere in it.
-        app.buttons["tab-chat"].tap()
+        app.buttons["tab-chat"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["发来眼前的一刻。"].waitForExistence(timeout: 5))
         XCTAssertFalse(line("那天的天气", in: app).exists)
     }
 
     func testTodaysArchivedRoomCanContinueTwiceWithoutReplacingTheFirstReply() throws {
         let app = launchApp(arguments: ["--murmur-seed-today-archive"])
-        let tab = app.buttons["tab-onThisDay"]
+        let tab = app.buttons["tab-onThisDay"].firstMatch
         XCTAssertTrue(tab.waitForExistence(timeout: 5))
         tab.tap()
-        let day = app.buttons[archiveDayIdentifier(daysAgo: 0)]
+        let day = nativeCalendarDay(in: app, daysAgo: 0)
         XCTAssertTrue(day.waitForExistence(timeout: 8))
         day.tap()
 
@@ -1220,10 +1358,10 @@ final class MurmurUITests: XCTestCase {
 
     func testAHistoricalArchivedDayCanContinueAndKeepsItsEarlierAnswer() throws {
         let app = launchApp(arguments: ["--murmur-seed-historical-archive"])
-        let tab = app.buttons["tab-onThisDay"]
+        let tab = app.buttons["tab-onThisDay"].firstMatch
         XCTAssertTrue(tab.waitForExistence(timeout: 5))
         tab.tap()
-        let day = app.buttons[archiveDayIdentifier(daysAgo: 2)]
+        let day = nativeCalendarDay(in: app, daysAgo: 2)
         XCTAssertTrue(day.waitForExistence(timeout: 8))
         day.tap()
 
@@ -1262,10 +1400,10 @@ final class MurmurUITests: XCTestCase {
         let app = launchApp(arguments: [
             "--murmur-seed-historical-archive", "--murmur-fail-first-send"
         ])
-        let tab = app.buttons["tab-onThisDay"]
+        let tab = app.buttons["tab-onThisDay"].firstMatch
         XCTAssertTrue(tab.waitForExistence(timeout: 5))
         tab.tap()
-        let day = app.buttons[archiveDayIdentifier(daysAgo: 2)]
+        let day = nativeCalendarDay(in: app, daysAgo: 2)
         XCTAssertTrue(day.waitForExistence(timeout: 8))
         day.tap()
 
@@ -1299,25 +1437,110 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(line("暂时没有连上 Murmur。", in: app).exists)
     }
 
-    /// Closing the sheet while the photo is dissolving calls the send off.
-    /// The dissolve runs for most of a second and the close button stays live
-    /// for all of it, so the wait has to be cancellable: a moment created
-    /// behind someone who just tapped 关闭 is the one failure this feature
-    /// cannot have.  `--murmur-slow-dissolve` widens the window so the tap is
-    /// not racing the animation.
-    func testClosingDuringTheDissolveCallsTheSendOff() throws {
-        let app = launchApp(arguments: ["--murmur-stub-onthisday", "--murmur-slow-dissolve"])
+    func testClosingPhotoBrowserDoesNotCreateARoom() throws {
+        let app = launchApp(arguments: ["--murmur-stub-onthisday"])
         openOnThisDay(in: app)
-        let photo = readyOnThisDayPhoto(in: app)
-
-        photo.swipeUp()
+        _ = readyOnThisDayPhoto(in: app)
         app.buttons["close-onthisday"].tap()
+        XCTAssertTrue(app.buttons["onthisday-entry"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["photo-room-photo"].exists)
+    }
 
-        // Long enough to outlast the widened dissolve: if the wait still fired
-        // its send, the room would have opened inside this window.
-        XCTAssertFalse(
-            app.descendants(matching: .any)["photo-room-photo"].waitForExistence(timeout: 6)
-        )
+    func testNativeCalendarMarksAndSelectsRecordedDate() throws {
+        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-diary"])
+        XCTAssertTrue(app.buttons["chat-calendar"].waitForExistence(timeout: 10))
+        app.buttons["chat-calendar"].tap()
+        let day = nativeCalendarDay(in: app, daysAgo: 1)
+        XCTAssertTrue(day.waitForExistence(timeout: 5))
+        day.tap()
+        XCTAssertTrue(app.buttons["chat-jump-date"].waitForExistence(timeout: 5))
+        try captureDiaryScreenshot(app, name: "Native calendar")
+    }
+
+    func testNativeTabsKeepDraftAndArchiveNavigation() throws {
+        let app = launchApp(arguments: ["--murmur-seed-historical-archive"])
+        let composer = app.textFields["moment-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        enterMoment(composer, "还没发送的草稿")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
+        XCTAssertTrue(waitForSoftwareKeyboard(in: app, visible: false, timeout: 5))
+        try captureDiaryScreenshot(app, name: "Native chat")
+        app.buttons["tab-listenTogether"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["一起听还没有对你开放"].waitForExistence(timeout: 5))
+        try captureDiaryScreenshot(app, name: "Native music gate")
+        app.buttons["tab-me"].firstMatch.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["build-stamp"].firstMatch.waitForExistence(timeout: 5))
+        try captureDiaryScreenshot(app, name: "Native settings")
+        app.buttons["tab-onThisDay"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["onthisday-entry"].waitForExistence(timeout: 5))
+        try captureDiaryScreenshot(app, name: "Native photo archive")
+        nativeCalendarDay(in: app, daysAgo: 2).tap()
+        XCTAssertTrue(app.textFields["archive-day-composer"].waitForExistence(timeout: 5))
+        app.buttons["tab-chat"].firstMatch.tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertEqual(composer.value as? String, "还没发送的草稿")
+        app.buttons["tab-onThisDay"].firstMatch.tap()
+        XCTAssertTrue(app.textFields["archive-day-composer"].waitForExistence(timeout: 5))
+        XCTAssertTrue(line("这是一条旧日期里的回答", in: app).exists)
+    }
+
+    func testNativeRefactorPhotoAndChatVisualStates() throws {
+        continueAfterFailure = false
+        let variants: [(String, [String])] = [
+            ("Light", []),
+            ("Dark XXXL", ["--murmur-ui-test-dark", "--murmur-ui-test-large-type", "--murmur-ui-test-reduce-motion"])
+        ]
+        var regularDateHeight: CGFloat = 0
+        for (name, flags) in variants {
+            XCUIDevice.shared.orientation = .portrait
+            let app = launchApp(arguments: flags + ["--murmur-stub-onthisday", "--murmur-seed-long-transcript"])
+            XCTAssertTrue(app.buttons["chat-calendar"].waitForExistence(timeout: 5))
+            XCTAssertFalse(app.navigationBars.staticTexts["聊天"].exists)
+            try captureDiaryScreenshot(app, name: "Refactor chat · " + name)
+            app.swipeDown()
+            let latest = app.buttons["chat-return-latest"]
+            XCTAssertTrue(latest.waitForExistence(timeout: 5))
+            let composer = app.textFields["moment-composer"]
+            XCTAssertLessThanOrEqual(latest.frame.maxY, composer.frame.minY)
+            try captureDiaryScreenshot(app, name: "Refactor history · " + name)
+            latest.tap()
+            openOnThisDay(in: app)
+            _ = readyOnThisDayPhoto(in: app)
+            let date = app.staticTexts["onthisday-date"]
+            XCTAssertTrue(date.exists)
+            if flags.isEmpty { regularDateHeight = date.frame.height }
+            else { XCTAssertGreaterThan(date.frame.height, regularDateHeight * 1.3, "The full-screen browser must inherit Dynamic Type") }
+            let send = app.buttons["onthisday-send"]
+            XCTAssertTrue(send.isHittable)
+            XCTAssertLessThanOrEqual(send.frame.maxY, app.frame.maxY - 8)
+            XCTAssertGreaterThanOrEqual(send.frame.minY, 0)
+            try captureDiaryScreenshot(app, name: "Refactor photo · " + name)
+            openPhotoRoom(in: app)
+            XCTAssertTrue(app.textFields["photo-room-composer"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["close-photo-room"].isHittable)
+            try captureDiaryScreenshot(app, name: "Refactor room · " + name)
+            app.buttons["close-photo-room"].tap()
+            XCTAssertTrue(app.buttons["onthisday-entry"].waitForExistence(timeout: 5))
+            app.terminate()
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = launchApp(arguments: ["--murmur-stub-onthisday"])
+        openOnThisDay(in: app)
+        _ = readyOnThisDayPhoto(in: app)
+        let send = app.buttons["onthisday-send"]
+        XCTAssertTrue(send.isHittable)
+        XCTAssertLessThanOrEqual(send.frame.maxY, app.frame.maxY - 8)
+        try captureDiaryScreenshot(app, name: "Refactor photo · Landscape")
+        send.tap()
+        XCTAssertTrue(app.textFields["photo-room-composer"].waitForExistence(timeout: 5))
+    }
+
+    private func nativeCalendarDay(in app: XCUIApplication, daysAgo: Int) -> XCUIElement {
+        let date = Calendar.current.date(byAdding: .day, value: -daysAgo, to: Date())!
+        let day = String(Calendar.current.component(.day, from: date))
+        let calendar = app.descendants(matching: .any)["native-calendar"].firstMatch
+        return calendar.buttons.containing(.staticText, identifier: day).firstMatch
     }
 
     /// Three screens are alive at once so each keeps its place, which makes
@@ -1325,7 +1548,7 @@ final class MurmurUITests: XCTestCase {
     /// VoiceOver reader on 聊天 must not be able to swipe into 设置's switches.
     func testTheTabsNotOnScreenAreOutOfReach() throws {
         let app = launchApp()
-        XCTAssertTrue(app.buttons["tab-chat"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-chat"].firstMatch.waitForExistence(timeout: 5))
         // Two things that exist only in 我的 and only in 当年今日.  Both are
         // near the top of their screen, so "not there" is about reachability
         // rather than about a Form row that has not been scrolled to yet.
@@ -1337,7 +1560,7 @@ final class MurmurUITests: XCTestCase {
         // then pass whether or not the screen is there.
         XCTAssertFalse(app.staticTexts["一起听还没有对你开放"].exists)
 
-        app.buttons["tab-me"].tap()
+        app.buttons["tab-me"].firstMatch.tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["build-stamp"].firstMatch.waitForExistence(timeout: 5)
         )
@@ -1350,22 +1573,22 @@ final class MurmurUITests: XCTestCase {
     /// it: exactly one stop is selected, and it is the one that was pressed.
     func testPressingAStopMovesTheSelectionToIt() throws {
         let app = launchApp()
-        XCTAssertTrue(app.buttons["tab-chat"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["tab-chat"].isSelected)
-        XCTAssertFalse(app.buttons["tab-onThisDay"].isSelected)
-        XCTAssertFalse(app.buttons["tab-listenTogether"].isSelected)
+        XCTAssertTrue(app.buttons["tab-chat"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-chat"].firstMatch.isSelected)
+        XCTAssertFalse(app.buttons["tab-onThisDay"].firstMatch.isSelected)
+        XCTAssertFalse(app.buttons["tab-listenTogether"].firstMatch.isSelected)
 
-        app.buttons["tab-onThisDay"].tap()
+        app.buttons["tab-onThisDay"].firstMatch.tap()
         XCTAssertTrue(app.buttons["onthisday-entry"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["tab-onThisDay"].isSelected)
-        XCTAssertFalse(app.buttons["tab-chat"].isSelected)
-        XCTAssertFalse(app.buttons["tab-me"].isSelected)
-        XCTAssertFalse(app.buttons["tab-listenTogether"].isSelected)
+        XCTAssertTrue(app.buttons["tab-onThisDay"].firstMatch.isSelected)
+        XCTAssertFalse(app.buttons["tab-chat"].firstMatch.isSelected)
+        XCTAssertFalse(app.buttons["tab-me"].firstMatch.isSelected)
+        XCTAssertFalse(app.buttons["tab-listenTogether"].firstMatch.isSelected)
 
-        app.buttons["tab-listenTogether"].tap()
-        XCTAssertTrue(app.staticTexts["一起听"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["tab-listenTogether"].isSelected)
-        XCTAssertFalse(app.buttons["tab-onThisDay"].isSelected)
+        app.buttons["tab-listenTogether"].firstMatch.tap()
+        XCTAssertTrue(app.navigationBars["一起听"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.isSelected)
+        XCTAssertFalse(app.buttons["tab-onThisDay"].firstMatch.isSelected)
     }
 
     func testTheListenTogetherTabSaysSoWhenTheServerHasNotOpenedIt() throws {
@@ -1374,8 +1597,8 @@ final class MurmurUITests: XCTestCase {
         // disappear under people — and it explains itself instead of showing
         // controls that cannot work.
         let app = launchApp()
-        XCTAssertTrue(app.buttons["tab-listenTogether"].waitForExistence(timeout: 5))
-        app.buttons["tab-listenTogether"].tap()
+        XCTAssertTrue(app.buttons["tab-listenTogether"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["tab-listenTogether"].firstMatch.tap()
         XCTAssertTrue(
             app.staticTexts["一起听还没有对你开放"].waitForExistence(timeout: 5)
         )
@@ -1389,10 +1612,7 @@ final class MurmurUITests: XCTestCase {
         app.descendants(matching: .any)["onthisday-photo"]
     }
 
-    /// The card exists a beat before its pixels do, and 上滑 is not an offer
-    /// until they are in — the gesture is silently ignored, which reads in a
-    /// test as "the room never opened".  The card says which state it is in;
-    /// this waits for it to stop saying 正在载入.
+    /// Wait until the selected page has pixels before starting its room.
     @discardableResult
     private func readyOnThisDayPhoto(in app: XCUIApplication) -> XCUIElement {
         let photo = onThisDayPhoto(in: app)
@@ -1405,10 +1625,9 @@ final class MurmurUITests: XCTestCase {
         return photo
     }
 
-    /// 当年今日, opened the way a person opens it: the tab is a calendar, and
-    /// the browser is behind the card under it.
+    /// Open the browser through the home page entry.
     private func openOnThisDay(in app: XCUIApplication) {
-        let tab = app.buttons["tab-onThisDay"]
+        let tab = app.buttons["tab-onThisDay"].firstMatch
         XCTAssertTrue(tab.waitForExistence(timeout: 5))
         tab.tap()
         let entry = app.buttons["onthisday-entry"]
@@ -1418,7 +1637,8 @@ final class MurmurUITests: XCTestCase {
 
     /// The room, opened the way a person opens it.
     private func openPhotoRoom(in app: XCUIApplication) {
-        readyOnThisDayPhoto(in: app).swipeUp()
+        _ = readyOnThisDayPhoto(in: app)
+        app.buttons["onthisday-send"].tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["photo-room-photo"].waitForExistence(timeout: 10)
         )

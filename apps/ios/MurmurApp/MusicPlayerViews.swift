@@ -1,10 +1,6 @@
 import SwiftUI
 
-/// The strip that says something is playing, above the tab bar.
-///
-/// It is glass for the same reason the composer and the tab bar are: it floats
-/// over the conversation rather than pushing it up, and every floating pane in
-/// the app has to be the same material or they read as different surfaces.
+/// A compact player inset above the system tab bar.
 struct MusicMiniPlayer: View {
     @ObservedObject var player: MusicPlaybackController
     let onOpen: () -> Void
@@ -14,6 +10,8 @@ struct MusicMiniPlayer: View {
     var body: some View {
         if let track = player.track, player.state.isActive {
             HStack(spacing: 10) {
+                Button(action: onOpen) {
+                HStack {
                 artwork(for: track)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(track.title)
@@ -25,6 +23,8 @@ struct MusicMiniPlayer: View {
                         .foregroundStyle(MurmurTheme.secondaryInk)
                         .lineLimit(1)
                 }
+                }
+                }.buttonStyle(.plain).accessibilityLabel("打开播放器，\(track.title)")
                 Spacer(minLength: 4)
                 MusicTransportButton(state: player.state) { player.togglePlayPause() }
                 Button {
@@ -41,11 +41,10 @@ struct MusicMiniPlayer: View {
             .padding(.leading, 10)
             .padding(.trailing, 2)
             .padding(.vertical, 6)
-            .murmurGlass(radius: MurmurTheme.glassCorner)
-            .contentShape(RoundedRectangle(cornerRadius: MurmurTheme.glassCorner, style: .continuous))
-            .onTapGesture(perform: onOpen)
+            .background(.regularMaterial)
+            .contentShape(RoundedRectangle(cornerRadius: MurmurTheme.corner, style: .continuous))
             .padding(.horizontal, MurmurTheme.pageInset)
-            .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
+            .transition(.opacity)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("正在播放 \(track.title)")
             .accessibilityHint("轻点打开播放器")
@@ -83,18 +82,11 @@ struct MusicTransportButton: View {
                     Image(systemName: "play.fill")
                 }
             }
-            .font(.system(size: diameter * 0.38, weight: .semibold))
-            .foregroundStyle(MurmurTheme.accentInk)
-            .frame(width: diameter, height: diameter)
-            .background(MurmurTheme.accent.opacity(0.16), in: Circle())
-            // The drawn circle can be 36; the target has to reach 44.
-            .frame(
-                width: max(diameter, MurmurTheme.floatingDisc),
-                height: max(diameter, MurmurTheme.floatingDisc)
-            )
+            .font(diameter > 44 ? .title2 : .body)
         }
-        .buttonStyle(.plain)
-        .contentShape(Circle())
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.circle)
+        .controlSize(.large)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: state)
         .accessibilityLabel(state == .playing ? "暂停" : "播放")
     }
@@ -114,6 +106,8 @@ struct MusicPlayerSheet: View {
     @State private var scrubbing: TimeInterval?
 
     var body: some View {
+        NavigationStack {
+        ScrollView {
         VStack(spacing: 24) {
             if let track = player.track {
                 artwork(for: track)
@@ -161,6 +155,11 @@ struct MusicPlayerSheet: View {
         .padding(MurmurTheme.pageInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .background(MurmurTheme.paper)
+        }
+        .navigationTitle("正在播放")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+        }
         .presentationDetents([.medium, .large])
     }
 

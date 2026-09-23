@@ -34,7 +34,6 @@
 		A10000000000000000000205 /* MurmurArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000206 /* MurmurArchive.swift */; };
 		A10000000000000000000207 /* MurmurArchiveViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000208 /* MurmurArchiveViews.swift */; };
 		A10000000000000000000203 /* OnThisDayTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000204 /* OnThisDayTabView.swift */; };
-		A100000000000000000000F3 /* OnThisDay.metal in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F4 /* OnThisDay.metal */; };
 		A100000000000000000000F5 /* MurmurPhotoRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* MurmurPhotoRoom.swift */; };
 		A10000000000000000000301 /* MusicModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000302 /* MusicModels.swift */; };
 		A10000000000000000000303 /* MusicPlaybackReporting.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000304 /* MusicPlaybackReporting.swift */; };
@@ -53,6 +52,7 @@
 		B10000000000000000000001 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000011 /* ShareViewController.swift */; };
 		B10000000000000000000002 /* SharedMusicDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000318 /* SharedMusicDraft.swift */; };
 		B10000000000000000000003 /* MurmurShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* MurmurShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		D10000000000000000000001 /* MurmurDailyReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000002 /* MurmurDailyReview.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -130,7 +130,6 @@
 		A10000000000000000000206 /* MurmurArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurArchive.swift; sourceTree = "<group>"; };
 		A10000000000000000000208 /* MurmurArchiveViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurArchiveViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000204 /* OnThisDayTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnThisDayTabView.swift; sourceTree = "<group>"; };
-		A100000000000000000000F4 /* OnThisDay.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = OnThisDay.metal; sourceTree = "<group>"; };
 		A100000000000000000000F6 /* MurmurPhotoRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurPhotoRoom.swift; sourceTree = "<group>"; };
 		A10000000000000000000302 /* MusicModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicModels.swift; sourceTree = "<group>"; };
 		A10000000000000000000304 /* MusicPlaybackReporting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlaybackReporting.swift; sourceTree = "<group>"; };
@@ -150,6 +149,7 @@
 		B10000000000000000000012 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B10000000000000000000013 /* MurmurShareExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MurmurShareExtension.entitlements; sourceTree = "<group>"; };
 		B10000000000000000000014 /* MurmurShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MurmurShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		D10000000000000000000002 /* MurmurDailyReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurDailyReview.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -206,6 +206,7 @@
 				A1000000000000000000020A /* MurmurPlaceLookup.swift */,
 				A10000000000000000000019 /* MurmurEnvironment.swift */,
 				A10000000000000000000029 /* MurmurTranscript.swift */,
+				D10000000000000000000002 /* MurmurDailyReview.swift */,
 				A1000000000000000000002A /* MurmurTranscriptView.swift */,
 				A100000000000000000000B2 /* MurmurPhotoView.swift */,
 				A100000000000000000000F2 /* MurmurOnThisDay.swift */,
@@ -214,7 +215,6 @@
 				A10000000000000000000208 /* MurmurArchiveViews.swift */,
 				A10000000000000000000204 /* OnThisDayTabView.swift */,
 				A100000000000000000000F6 /* MurmurPhotoRoom.swift */,
-				A100000000000000000000F4 /* OnThisDay.metal */,
 				A100000000000000000000D2 /* MurmurDiagnostics.swift */,
 				A100000000000000000000E2 /* MurmurKeyboardInset.swift */,
 				A10000000000000000000302 /* MusicModels.swift */,
@@ -465,6 +465,7 @@
 				A10000000000000000000007 /* MurmurSessionModel.swift in Sources */,
 				A10000000000000000000008 /* MurmurEnvironment.swift in Sources */,
 				A1000000000000000000000F /* MurmurTranscript.swift in Sources */,
+				D10000000000000000000001 /* MurmurDailyReview.swift in Sources */,
 				A10000000000000000000010 /* MurmurTranscriptView.swift in Sources */,
 				A100000000000000000000B1 /* MurmurPhotoView.swift in Sources */,
 				A100000000000000000000F1 /* MurmurOnThisDay.swift in Sources */,
@@ -486,7 +487,6 @@
 				A10000000000000000000305 /* AudiusClient.swift in Sources */,
 				A10000000000000000000303 /* MusicPlaybackReporting.swift in Sources */,
 				A10000000000000000000301 /* MusicModels.swift in Sources */,
-				A100000000000000000000F3 /* OnThisDay.metal in Sources */,
 				A100000000000000000000D1 /* MurmurDiagnostics.swift in Sources */,
 				A100000000000000000000E1 /* MurmurKeyboardInset.swift in Sources */,
 			);

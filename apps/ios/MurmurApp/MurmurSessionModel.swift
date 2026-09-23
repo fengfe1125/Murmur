@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import UIKit
 
 @MainActor
@@ -30,6 +31,15 @@ final class MurmurSessionModel: ObservableObject {
     /// back off disk were already there, so they must not animate in, and the
     /// opening line must not be shown over a history that is still being read.
     @Published private(set) var transcriptRestored = false
+    @Published private(set) var historyPage: [MurmurMessage]?
+    @Published private(set) var transcriptDays: [MurmurTranscriptDay] = []
+    @Published private(set) var storageFailure: String?
+    @Published var readingDate = Date()
+    @Published private(set) var historyTarget: String?
+    @Published private(set) var navigationRevision = 0
+    @Published private(set) var loadingHistory = false
+    var visibleMessages: [MurmurMessage] { historyPage ?? messages }
+
     /// Why an outgoing row never landed, keyed by that row.
     ///
     /// A send that failed belongs to the line the person wrote, not to the
@@ -59,6 +69,8 @@ final class MurmurSessionModel: ObservableObject {
         playbackReporting: false
     )
 
+    let reviews: MurmurReviewModel
+    @Published var questionContext: MurmurQuestionContext?
     let transcriptStore: MurmurTranscriptStore
     /// 当年今日's own history, kept apart from the conversation.  Owned here
     /// because this is what hands it to a room; 当年今日's tab reads the same
@@ -75,6 +87,9 @@ final class MurmurSessionModel: ObservableObject {
     /// type the next line while Murmur is still answering the last one, and the
     /// server still sees one moment at a time.
     private var queue: [Submission] = []
+    private var persistenceTask: Task<Void, Never>?
+    private var clearingTranscript = false
+    private var uncopiedPhotos: [String: PhotoAttachment] = [:]
     private var pumpTask: Task<Void, Never>?
     private var pumpGeneration = 0
     private var isRunning = false
@@ -112,6 +127,7 @@ final class MurmurSessionModel: ObservableObject {
         bubblePacing: MurmurBubblePacing = .human
     ) {
         self.api = api
+        self.reviews = MurmurReviewModel(api: api)
         self.photoLoader = photoLoader
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.uploadTimeoutSeconds = uploadTimeoutSeconds
@@ -131,24 +147,120 @@ final class MurmurSessionModel: ObservableObject {
         defer { transcriptRestored = true }
         guard messages.isEmpty else { return }
         messages = await transcriptStore.load()
+        transcriptDays = await transcriptStore.days()
+        storageFailure = await transcriptStore.lastError
+        readingDate = messages.last?.sentAt ?? Date()
     }
 
     func clearTranscript() async {
+        guard !clearingTranscript else { return }
+        clearingTranscript = true
+        defer { clearingTranscript = false }
+        cancelPump()
+        for task in adoptTasks.values { await task.value }
+        await persistenceTask?.value
+        guard await transcriptStore.clear() else {
+            storageFailure = await transcriptStore.lastError
+            return
+        }
+        historyPage = nil
+        transcriptDays = []
+        storageFailure = nil
         messages = []
         pendingMessageID = nil
         adoptTasks = [:]
+        for photo in uncopiedPhotos.values { await photoLoader.discard(photo) }
+        uncopiedPhotos = [:]
         for task in rebuildTasks.values { task.cancel() }
         rebuildTasks = [:]
         // The marks belonged to rows that no longer exist; the originals those
         // rows were holding for a resend go with them.
         withdrawResendOffers()
         sendFailures = [:]
-        await transcriptStore.clear()
     }
 
     private func persistTranscript() {
+        guard !clearingTranscript else { return }
         let snapshot = messages
-        Task { [transcriptStore] in await transcriptStore.save(snapshot) }
+        let previous = persistenceTask
+        persistenceTask = Task { [weak self, transcriptStore] in
+            await previous?.value
+            let saved = await transcriptStore.save(snapshot)
+            guard let self else { return }
+            self.storageFailure = saved ? nil : await transcriptStore.lastError
+            self.transcriptDays = await transcriptStore.days()
+            // Only evict durable settled rows from RAM. Pending sends and
+            // failed writes keep their content for a visible retry.
+            if saved && self.messages.count > 300 {
+                let retained = Set(self.messages.suffix(300).map(\.id))
+                self.messages.removeAll { !retained.contains($0.id) && $0.delivery != .sending }
+            }
+        }
+    }
+
+    func retryTranscriptSave() {
+        Task {
+            // A failed initial read must be retried before an empty UI is
+            // treated as the user's current transcript. Saving never restores it.
+            if messages.isEmpty {
+                await loadTranscript()
+                guard storageFailure == nil else { return }
+            }
+            for (id, photo) in uncopiedPhotos {
+                if let name = await transcriptStore.adoptImage(at: photo.originalURL, id: id),
+                   let index = messages.firstIndex(where: { $0.id == id }) {
+                    messages[index].imageFile = name
+                    if await transcriptStore.save([messages[index]]) {
+                        uncopiedPhotos.removeValue(forKey: id)
+                        await photoLoader.discard(photo)
+                    }
+                }
+            }
+            persistTranscript()
+        }
+    }
+
+    func openChatDate(_ day: Date) async -> Bool {
+        guard !loadingHistory else { return false }
+        loadingHistory = true
+        defer { loadingHistory = false }
+        let storedPage = await transcriptStore.page(day: day)
+        let page = storedPage.map { stored in messages.first(where: { $0.id == stored.id }) ?? stored }
+        storageFailure = await transcriptStore.lastError
+        guard let first = page.first else { return false }
+        historyPage = page
+        readingDate = first.sentAt
+        historyTarget = first.id
+        navigationRevision += 1
+        return true
+    }
+
+    func loadHistory(earlier: Bool) async {
+        guard !loadingHistory, let anchor = earlier ? visibleMessages.first : visibleMessages.last else { return }
+        loadingHistory = true
+        defer { loadingHistory = false }
+        let storedPage = await transcriptStore.page(before: earlier ? anchor : nil, after: earlier ? nil : anchor)
+        let page = storedPage.map { stored in messages.first(where: { $0.id == stored.id }) ?? stored }
+        storageFailure = await transcriptStore.lastError
+        guard !page.isEmpty else { return }
+        let current = visibleMessages
+        var seen = Set<String>()
+        let combined = (earlier ? page + current : current + page).filter { seen.insert($0.id).inserted }
+        historyPage = earlier ? Array(combined.prefix(400)) : Array(combined.suffix(400))
+        historyTarget = anchor.id
+        navigationRevision += 1
+    }
+
+    func beginHistoryReading() {
+        guard historyPage == nil, !messages.isEmpty else { return }
+        historyPage = messages
+    }
+
+    func returnToLatest() {
+        historyPage = nil
+        readingDate = messages.last?.sentAt ?? Date()
+        historyTarget = nil
+        navigationRevision += 1
     }
 
     private func append(_ message: MurmurMessage) {
@@ -160,6 +272,7 @@ final class MurmurSessionModel: ObservableObject {
         guard let id = pendingMessageID,
               let index = messages.firstIndex(where: { $0.id == id }) else { return }
         mutate(&messages[index])
+        if let historyIndex = historyPage?.firstIndex(where: { $0.id == id }) { historyPage?[historyIndex] = messages[index] }
         persistTranscript()
     }
 
@@ -468,9 +581,10 @@ final class MurmurSessionModel: ObservableObject {
             text: note,
             sentAt: Date(),
             delivery: .sending,
-            idempotencyKey: key
+            idempotencyKey: key,
+            dailyQuestionDay: questionContext?.day
         )
-        let submission = Submission(
+        var submission = Submission(
             messageID: outgoing.id,
             note: note.isEmpty ? nil : note,
             photo: photo,
@@ -478,15 +592,20 @@ final class MurmurSessionModel: ObservableObject {
             idempotencyKey: key,
             replyToProactiveMomentID: note.isEmpty ? nil : proactiveMomentID
         )
+        submission.dailyQuestionDay = questionContext?.day
+        questionContext = nil
         draftText = ""
         draftPhoto = nil
         draftFailure = nil
         proactiveMomentID = nil
         append(outgoing)
         if let photo {
+            uncopiedPhotos[outgoing.id] = photo
             adoptTasks[outgoing.id] = Task { [transcriptStore] in
                 let name = await transcriptStore.adoptImage(at: photo.originalURL, id: outgoing.id)
+                let copyFailure = await transcriptStore.lastError
                 await MainActor.run {
+                    if name == nil { self.storageFailure = copyFailure }
                     guard let name,
                           let index = self.messages.firstIndex(where: { $0.id == outgoing.id })
                     else { return }
@@ -538,6 +657,10 @@ final class MurmurSessionModel: ObservableObject {
     /// which, after a bad afternoon on the server, is a screen full of messages
     /// with no way to send any of them.
     func resend(_ messageID: String) {
+        if !messages.contains(where: { $0.id == messageID }), let row = historyPage?.first(where: { $0.id == messageID }) {
+            messages.append(row)
+            messages.sort { $0.sentAt < $1.sentAt }
+        }
         sendFailures.removeValue(forKey: messageID)
         if let index = messages.firstIndex(where: { $0.id == messageID }) {
             messages[index].delivery = .sending
@@ -572,7 +695,8 @@ final class MurmurSessionModel: ObservableObject {
                 photo: photo,
                 musicTrack: row.musicTrack,
                 idempotencyKey: row.idempotencyKey ?? UUID().uuidString.lowercased(),
-                replyToProactiveMomentID: nil
+                replyToProactiveMomentID: nil,
+                dailyQuestionDay: row.dailyQuestionDay
             ))
         }
     }
@@ -746,6 +870,9 @@ final class MurmurSessionModel: ObservableObject {
         settingsMessage = nil
         do {
             try await api.deleteAccount()
+            await clearTranscript()
+            await archive.clear()
+            try reviews.reset()
             identity = nil
             devices = []
             connection = .needsEnrollment
@@ -759,6 +886,7 @@ final class MurmurSessionModel: ObservableObject {
         settingsMessage = nil
         do {
             try await api.resetLocalIdentity()
+            try reviews.reset()
             identity = nil
             devices = []
             requiresDeviceReconnect = false
@@ -859,7 +987,9 @@ final class MurmurSessionModel: ObservableObject {
                     photo: submission.photo,
                     musicTrack: submission.musicTrack,
                     idempotencyKey: submission.idempotencyKey,
-                    intent: nil
+                    intent: nil,
+                    contextMomentIDs: [],
+                    dailyQuestionDay: submission.dailyQuestionDay
                 )
             }
             try Task.checkCancellation()
@@ -875,7 +1005,6 @@ final class MurmurSessionModel: ObservableObject {
             var lastEventID: String?
             var retries = 0
             var terminal = false
-            var wasQuiet = false
             var seenEventIDs = Set<String>()
             while !terminal {
                 let stream = await api.events(momentID: receipt.momentID, lastEventID: lastEventID)
@@ -921,12 +1050,10 @@ final class MurmurSessionModel: ObservableObject {
                             // is not the place to show it.
                             break
                         case .quiet:
-                            wasQuiet = true
                             phase = .quiet
                         case let .done(_, nextMove, nextScene):
                             move = nextMove
                             scene = nextScene
-                            phase = wasQuiet && bubbles.isEmpty ? .quiet : .complete
                             terminal = true
                         case let .failure(_, streamFailure):
                             throw streamFailure
@@ -942,6 +1069,7 @@ final class MurmurSessionModel: ObservableObject {
                 }
             }
             await discardAfterTranscriptCopy(submission)
+            phase = bubbles.isEmpty ? .quiet : .complete
             pendingMessageID = nil
             if !bubbles.isEmpty && !didRequestNotificationPrompt {
                 didRequestNotificationPrompt = true
@@ -989,6 +1117,16 @@ final class MurmurSessionModel: ObservableObject {
     /// photo in it.
     private func discardAfterTranscriptCopy(_ submission: Submission) async {
         await adoptTasks.removeValue(forKey: submission.messageID)?.value
+        await persistenceTask?.value
+        if let photo = submission.photo {
+            guard let row = messages.first(where: { $0.id == submission.messageID }),
+                  row.imageFile != nil, await transcriptStore.save([row]) else {
+                uncopiedPhotos[submission.messageID] = photo
+                storageFailure = await transcriptStore.lastError ?? "图片尚未保存，请重试。"
+                return
+            }
+            uncopiedPhotos.removeValue(forKey: submission.messageID)
+        }
         await photoLoader.discard(submission.photo)
     }
 
@@ -1107,6 +1245,7 @@ private struct Submission: Sendable {
     let musicTrack: MusicTrackAttachmentV1?
     let idempotencyKey: String
     let replyToProactiveMomentID: String?
+    var dailyQuestionDay: String? = nil
 }
 
 private extension MurmurStreamEvent {
