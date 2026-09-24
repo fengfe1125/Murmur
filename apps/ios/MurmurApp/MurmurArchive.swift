@@ -144,8 +144,16 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
         // row is durable.  Besides making the contract honest for callers that
         // immediately reload, this keeps an app suspension directly after a
         // send from losing the optimistic row.
-        if !(await store.save([row])) { storageFailure = await store.lastError }
-        dayIndex = await store.days(archive: true)
+        if await store.save([row]) {
+            // The index counts days and photos; a text row on a day it already
+            // has changes neither, and reading it scans the whole archive.
+            let filingDay = MurmurDay.key(filingDate(for: row))
+            if row.imageFile != nil || !dayIndex.contains(where: { $0.id == filingDay }) {
+                dayIndex = await store.days(archive: true)
+            }
+        } else {
+            storageFailure = await store.lastError
+        }
         if rows.count > 400 { rows.removeFirst(rows.count - 400) }
     }
 
@@ -194,17 +202,19 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
     }
 
     func retryStorage() async {
+        var recovered = false
         for (id, pending) in pendingPhotoRows {
             var row = pending.0
             guard let image = await store.adoptImage(at: pending.1, id: id) else {
                 storageFailure = await store.lastError
-                return
+                break
             }
             row.imageFile = image
             guard await store.save([row]) else {
                 storageFailure = await store.lastError
-                return
+                break
             }
+            recovered = true
             rows.removeAll { $0.id == id }
             rows.append(row)
             pendingPhotoRows.removeValue(forKey: id)
@@ -214,6 +224,9 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
         }
         persist()
         await writer.drain()
+        if recovered {
+            dayIndex = await store.days(archive: true)
+        }
     }
 
     func holdsPendingPhoto(rowID: String) -> Bool {
@@ -225,6 +238,8 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
         ownedPendingOriginals.insert(rowID)
     }
 
+    /// Re-saves the rows in memory after a delivery or moment change.  Neither
+    /// touches the day index, so it is not read again here.
     private func persist() {
         guard !clearing else { return }
         let snapshot = rows
@@ -234,7 +249,6 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
             } else {
                 storageFailure = await store.lastError
             }
-            dayIndex = await store.days(archive: true)
         }
     }
 

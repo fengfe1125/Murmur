@@ -189,14 +189,22 @@ final class MurmurSessionModel: ObservableObject {
         sendFailures = [:]
     }
 
+    /// Saves the whole in-memory window, so that once a save succeeds every row
+    /// in it is durable and the oldest may leave memory.
     private func persistTranscript() {
         guard !clearingTranscript else { return }
         let snapshot = messages
+        // The day index grows with the whole history, so it is only read again
+        // when the newest line starts a day the index does not have yet.
+        let newestDay = snapshot.last.map { MurmurDay.key($0.sentAt) }
+        let startsNewDay = newestDay.map { day in !transcriptDays.contains { $0.id == day } } ?? false
         transcriptWriter.enqueue { [weak self, transcriptStore] in
             let saved = await transcriptStore.save(snapshot)
             guard let self else { return }
             self.storageFailure = saved ? nil : await transcriptStore.lastError
-            self.transcriptDays = await transcriptStore.days()
+            if saved, startsNewDay {
+                self.transcriptDays = await transcriptStore.days()
+            }
             // Only evict durable settled rows from RAM. Pending sends and
             // failed writes keep their content for a visible retry.
             if saved && self.messages.count > 300 {
