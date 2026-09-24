@@ -159,5 +159,24 @@ struct MurmurShell: View {
                 await netease.refreshRoom()
             }
         }
+        // Reviews: one activation and one date poll per account, above the tabs
+        // like the room poll, and only in the foreground.  The key carries the
+        // scene phase, so going to the background (music may keep the process
+        // alive there) cancels the loop instead of leaving it running.
+        .task(id: MurmurReviewPollingKey(
+            userID: model.identity?.userID,
+            mayPoll: scenePhase == .active
+        )) {
+            guard let user = model.identity?.userID, scenePhase == .active else { return }
+            await model.reviews.activate(user: user)
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(30))
+                } catch {
+                    return
+                }
+                await model.reviews.refreshDates()
+            }
+        }
     }
 }

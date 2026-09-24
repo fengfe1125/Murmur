@@ -96,6 +96,22 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: store.imageURL(for: name)), bytes)
     }
 
+    /// An answer to a review question keeps its day through a save and a
+    /// reload, so a resend after a relaunch still goes up as that answer.
+    func testAnsweredQuestionDaySurvivesAReload() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let answer = MurmurMessage(
+            id: "answer", author: .you, text: "星期六上午",
+            delivery: .failed, idempotencyKey: "answer-key", dailyQuestionDay: "2026-09-21"
+        )
+        let saved = await store.save([answer])
+        XCTAssertTrue(saved)
+        let reloaded = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertEqual(reloaded.first?.dailyQuestionDay, "2026-09-21")
+    }
+
     func testSameTimestampPaginationPreservesInsertionOrder() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

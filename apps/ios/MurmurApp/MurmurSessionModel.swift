@@ -83,6 +83,11 @@ final class MurmurSessionModel: ObservableObject {
         playbackReporting: false
     )
 
+    /// Daily reviews; open only when the server advertises them for this account.
+    let reviews: MurmurReviewModel
+    /// The review question the next line answers.  Set from a review's
+    /// 在聊天中回答 and spent by the next line that goes out.
+    @Published var questionContext: MurmurQuestionContext?
     let transcriptStore: MurmurTranscriptStore
     /// 当年今日's own history, kept apart from the conversation.  Owned here
     /// because this is what hands it to a room; 当年今日's tab reads the same
@@ -139,6 +144,7 @@ final class MurmurSessionModel: ObservableObject {
         bubblePacing: MurmurBubblePacing = .human
     ) {
         self.api = api
+        self.reviews = MurmurReviewModel(api: api)
         self.photoLoader = photoLoader
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.uploadTimeoutSeconds = uploadTimeoutSeconds
@@ -648,12 +654,14 @@ final class MurmurSessionModel: ObservableObject {
         // The outgoing turn joins the transcript before anything is queued, so
         // the bubble is on screen the instant the send button is pressed.
         let key = UUID().uuidString.lowercased()
+        let answeredDay = questionContext?.day
         let outgoing = MurmurMessage(
             author: .you,
             text: note,
             sentAt: Date(),
             delivery: .sending,
-            idempotencyKey: key
+            idempotencyKey: key,
+            dailyQuestionDay: answeredDay
         )
         let submission = Submission(
             messageID: outgoing.id,
@@ -661,8 +669,10 @@ final class MurmurSessionModel: ObservableObject {
             photo: photo,
             musicTrack: nil,
             idempotencyKey: key,
-            replyToProactiveMomentID: note.isEmpty ? nil : proactiveMomentID
+            replyToProactiveMomentID: note.isEmpty ? nil : proactiveMomentID,
+            dailyQuestionDay: answeredDay
         )
+        questionContext = nil
         draftText = ""
         draftPhoto = nil
         draftFailure = nil
@@ -768,7 +778,8 @@ final class MurmurSessionModel: ObservableObject {
                 photo: photo,
                 musicTrack: row.musicTrack,
                 idempotencyKey: row.idempotencyKey ?? UUID().uuidString.lowercased(),
-                replyToProactiveMomentID: nil
+                replyToProactiveMomentID: nil,
+                dailyQuestionDay: row.dailyQuestionDay
             ))
         }
     }
@@ -952,11 +963,12 @@ final class MurmurSessionModel: ObservableObject {
         // enrolled — whatever happens to its local copies below.
         let chatCleared = await clearTranscript()
         let archiveCleared = await archive.clear()
+        let reviewsCleared = (try? reviews.reset()) != nil
         identity = nil
         devices = []
         connection = .needsEnrollment
         clearCurrent()
-        if !chatCleared || !archiveCleared {
+        if !chatCleared || !archiveCleared || !reviewsCleared {
             failure = MurmurFailure(
                 code: "local_clear_incomplete",
                 message: "账号已删除，但这台设备上的记录没有全部清空。删除 App 可以移除剩余记录。",
@@ -969,13 +981,23 @@ final class MurmurSessionModel: ObservableObject {
         settingsMessage = nil
         do {
             try await api.resetLocalIdentity()
-            identity = nil
-            devices = []
-            requiresDeviceReconnect = false
-            connection = .needsEnrollment
-            clearCurrent()
         } catch {
             settingsMessage = MurmurFailure.from(error).message
+            return
+        }
+        identity = nil
+        devices = []
+        requiresDeviceReconnect = false
+        connection = .needsEnrollment
+        clearCurrent()
+        // The identity is already gone; a review cache that will not delete
+        // is reported, not allowed to keep the device enrolled.
+        if (try? reviews.reset()) == nil {
+            failure = MurmurFailure(
+                code: "local_clear_incomplete",
+                message: "本机回顾缓存未能清除。删除 App 可以移除它。",
+                retryable: false
+            )
         }
     }
 
@@ -1069,7 +1091,9 @@ final class MurmurSessionModel: ObservableObject {
                     photo: submission.photo,
                     musicTrack: submission.musicTrack,
                     idempotencyKey: submission.idempotencyKey,
-                    intent: nil
+                    intent: nil,
+                    contextMomentIDs: [],
+                    dailyQuestionDay: submission.dailyQuestionDay
                 )
             }
             try Task.checkCancellation()
@@ -1335,6 +1359,8 @@ private struct Submission: Sendable {
     let musicTrack: MusicTrackAttachmentV1?
     let idempotencyKey: String
     let replyToProactiveMomentID: String?
+    /// The review question this line answers, if any.
+    var dailyQuestionDay: String? = nil
 }
 
 private extension MurmurStreamEvent {

@@ -1,6 +1,6 @@
 # 系统职责与契约边界
 
-> 状态：现行规范｜适用：应用与共享服务端｜核验：2026-08-28｜依据：PR #14 与仓库重组决策
+> 状态：现行规范｜适用：应用与共享服务端｜核验：2026-09-24｜依据：PR #14 与仓库重组决策；每日回顾客户端 PR
 
 ## 职责
 
@@ -52,5 +52,14 @@ OAuth 不在服务端：用户的 Audius 令牌只存在手机 Keychain，服务
 房间 ID、Cookie 和协议序号都不过这条边界，确认不了的命令只会是 `accepted` 或
 `failed`，绝不写成 `synchronized`。详见
 [一起听运行手册](../operations/netease-listen-together-poc-runbook.md)。
+
+每日回顾的 iOS 客户端已经实现，服务端尚未进入 main；客户端按下面的约定调用，服务端合入前以
+[日期聊天与每日回顾](daily-reviews.md) 为准。能力开关只来自认证后的 `GET /v1/reviews/config`，
+服务端没有这条路由或未开启时，客户端不显示入口。其余接口是 `PATCH /v1/reviews/preferences`、
+`GET /v1/reviews?before=`、`GET /v1/reviews/{day}`、`POST /v1/reviews/{day}/refresh` 和
+`PATCH`/`DELETE /v1/review-memories/{id}`，全部沿用现有请求认证；签名只覆盖路径，`before` 分页参数
+不在签名内。`POST /v1/moments` 多一个可选的 `daily_question_day` 字段，标明这一条回答的是哪一天的
+问题，不认识它的服务端忽略即可；SSE 事件格式不变。回顾详情附带核对记忆用的来源摘录（用户原话片段），
+属于回顾本身，不是聊天历史查询接口。
 
 现有存档与未来日记之间的领域区别见 [术语](../../CONTEXT.md)；数据流见 [数据生命周期](data-lifecycle.md)。

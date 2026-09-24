@@ -1,11 +1,11 @@
 # 文档导航
 
-> 状态：现行规范｜适用：全部文档｜核验：2026-08-28｜依据：产品重定位与仓库重组计划
+> 状态：现行规范｜适用：全部文档｜核验：2026-09-24｜依据：产品重定位与仓库重组计划；每日回顾接口约定
 
 | 要了解什么 | 入口 |
 |---|---|
 | 产品现在是什么、还缺什么 | [当前能力](product/current-state.md)、[路线](product/roadmap.md) |
-| 模块职责与数据边界 | [系统边界](architecture/system-boundaries.md)、[数据生命周期](architecture/data-lifecycle.md) |
+| 模块职责与数据边界 | [系统边界](architecture/system-boundaries.md)、[数据生命周期](architecture/data-lifecycle.md)、[日期聊天与每日回顾](architecture/daily-reviews.md) |
 | 文件放哪、如何开发 | [仓库地图](development/repository-layout.md)、[服务端](development/server.md) |
 | 分支与文档规则 | [协作规范](development/workflow.md) |
 | 遗留分支、worktree 与原件去向 | [处置清单](development/branch-disposition.md) |

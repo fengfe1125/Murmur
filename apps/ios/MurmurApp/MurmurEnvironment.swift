@@ -226,6 +226,79 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
     private let failsReading = ProcessInfo.processInfo.arguments.contains("--murmur-stub-reading-fails")
     private let arguments = ProcessInfo.processInfo.arguments
     private var listenTogetherRoom: ListenTogetherRoomSnapshotV1?
+    /// `--murmur-stub-diary` stands in for the review routes: one ready review
+    /// for today whose single memory can be corrected or forgotten.
+    private var reviewMemoryText = "想恢复周末散步的习惯。"
+    private var reviewMemoryForgotten = false
+    private var reviewMemoryEdited = false
+    private var answeredQuestionMoments: Set<String> = []
+
+    func dailyReviews(_ request: MurmurReviewRequest) async throws -> Data {
+        guard arguments.contains("--murmur-stub-diary") else { return Data("{\"available\":false}".utf8) }
+        let day = MurmurDay.key(Date())
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let version = reviewMemoryEdited ? 2 : 1
+        let preferences: [String: Any] = ["enabled": true, "local_time": "22:30", "first_day": day]
+        let result: [String: Any]
+        switch request.operation {
+        case .configuration:
+            result = ["available": true, "preferences": preferences]
+        case .preferences:
+            result = preferences
+        case .dates:
+            result = ["dates": [["day": day, "status": "ready", "version": version, "updated_at": stamp]]]
+        case .edit:
+            let body = try? JSONSerialization.jsonObject(with: request.body) as? [String: String]
+            reviewMemoryText = body?["text"] ?? reviewMemoryText
+            reviewMemoryEdited = true
+            result = ["id": "memory-walk", "text": reviewMemoryText, "forgotten": false]
+        case .forget:
+            reviewMemoryForgotten = true
+            result = ["id": "memory-walk", "forgotten": true]
+        case .detail, .refresh:
+            let memories: [[String: Any]] = reviewMemoryForgotten ? [] : [[
+                "id": "memory-walk", "text": reviewMemoryText, "evidence": "user_stated",
+                "source_ids": ["dated-today"], "edited": reviewMemoryEdited, "updated_at": stamp
+            ]]
+            result = [
+                "day": day,
+                "timezone": TimeZone.current.identifier,
+                "status": "ready",
+                "summary": reviewMemoryForgotten
+                    ? "相关记忆已撤销。"
+                    : "今天你回忆了前年的一次旅行，并提到想恢复周末散步。开始时间还没有确定。",
+                "question": "如果周末留出一段散步时间，你最需要先安排好什么？",
+                "version": version,
+                "updated_at": stamp,
+                "memories": memories,
+                "sources": [[
+                    "id": "dated-today", "occurred_at": stamp, "channel": "home",
+                    "user_text": "想恢复周末散步的习惯。", "observation": ""
+                ]]
+            ]
+        }
+        return try JSONSerialization.data(withJSONObject: result)
+    }
+
+    func createMoment(
+        note: String?,
+        photo: PhotoAttachment?,
+        musicTrack: MusicTrackAttachmentV1?,
+        idempotencyKey: String,
+        intent: MurmurMomentIntent?,
+        contextMomentIDs: [String],
+        dailyQuestionDay: String?
+    ) async throws -> MomentReceipt {
+        if let day = dailyQuestionDay, day != MurmurDay.key(Date()) {
+            throw MurmurFailure(code: "not_found", message: "问题日期不匹配。", retryable: false)
+        }
+        let receipt = try await createMoment(
+            note: note, photo: photo, idempotencyKey: idempotencyKey,
+            intent: intent, contextMomentIDs: contextMomentIDs
+        )
+        if dailyQuestionDay != nil { answeredQuestionMoments.insert(receipt.momentID) }
+        return receipt
+    }
 
     func storedIdentity() async throws -> MurmurIdentity? { identity }
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity { identity }
@@ -249,6 +322,7 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> {
         let isReading = readings.contains(momentID)
         let note = notesByMoment[momentID]
+        let answeredQuestion = answeredQuestionMoments.contains(momentID)
         // `--murmur-slow-reply` holds the answer back long enough for a test to
         // scroll the conversation while Murmur is still composing.
         let replyDelay: Duration? = arguments.contains("--murmur-slow-reply") ? .seconds(4) : nil
@@ -267,7 +341,7 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
                     case "日期续聊第二句": answer = "接住第二句"
                     default: answer = "这一刻，我收到了。"
                     }
-                    continuation.yield(.bubble(id: "2", text: answer))
+                    continuation.yield(.bubble(id: "2", text: answeredQuestion ? "已接上这一天的问题。" : answer))
                 }
                 continuation.yield(.done(id: "4", move: nil, scene: nil))
                 continuation.finish()

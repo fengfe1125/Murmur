@@ -24,10 +24,13 @@ enum MurmurDay {
     }
 }
 
-/// The chat's date entry and its local-storage failure line.
+/// The chat's date entry, its review entry when reviews are offered, and its
+/// local-storage failure line.
 struct MurmurChatNavigation: ViewModifier {
     @ObservedObject var session: MurmurSessionModel
+    @ObservedObject var reviews: MurmurReviewModel
     @State private var showsCalendar = false
+    @State private var reviewDay: String?
 
     func body(content: Content) -> some View {
         content
@@ -47,20 +50,44 @@ struct MurmurChatNavigation: ViewModifier {
                         .accessibilityValue(session.readingDate.formatted(.dateTime.year().month().day()))
                         .accessibilityIdentifier("chat-calendar")
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    MurmurReviewEntryButton(reviews: reviews) { reviewDay = $0 }
+                }
             }
             .sheet(isPresented: $showsCalendar) {
-                MurmurChatCalendar(session: session)
+                MurmurChatCalendar(session: session, reviews: reviews) { day in
+                    showsCalendar = false
+                    reviewDay = day
+                }
+            }
+            .sheet(item: Binding(
+                get: { reviewDay.map(MurmurReviewSelection.init) },
+                set: { reviewDay = $0?.id }
+            )) { selected in
+                NavigationStack {
+                    MurmurReviewDetailView(reviews: reviews, day: selected.id) { context in
+                        session.questionContext = context
+                        session.returnToLatest()
+                        reviewDay = nil
+                    }
+                }
             }
     }
 }
 
 struct MurmurChatCalendar: View {
     @ObservedObject var session: MurmurSessionModel
+    @ObservedObject var reviews: MurmurReviewModel
+    let openReview: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var selected: Date?
 
     private var chatDays: Set<String> {
         Set(session.transcriptDays.map(\.id))
+    }
+
+    private var reviewDays: Set<String> {
+        Set(reviews.dates.map(\.day))
     }
 
     var body: some View {
@@ -70,28 +97,38 @@ struct MurmurChatCalendar: View {
                     MurmurNativeCalendar(
                         selected: $selected,
                         markedDays: chatDays,
-                        markLabel: "有聊天"
+                        markLabel: "有聊天",
+                        secondaryDays: reviewDays,
+                        secondaryLabel: "有回顾"
                     )
                     .frame(maxWidth: 420)
                     .clipped()
-                    Text("• 聊天记录")
+                    Text(reviews.available ? "• 聊天记录　◇ 每日回顾" : "• 聊天记录")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if let selected {
+                        let key = MurmurDay.key(selected)
                         Divider()
                         Text(selected, format: .dateTime.month().day())
                             .font(MurmurTheme.display(.title3))
-                        if chatDays.contains(MurmurDay.key(selected)) {
+                        if chatDays.contains(key) {
                             Button("查看当天第一条消息") {
                                 Task { if await session.openChatDate(selected) { dismiss() } }
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.large)
+                            .reviewAction()
                             .accessibilityIdentifier("chat-jump-date")
                         } else {
-                            Text("暂无记录")
+                            Text(reviewDays.contains(key) ? "本机原记录不可用，仍可查看回顾。" : "暂无记录")
                                 .foregroundStyle(MurmurTheme.secondaryInk)
                         }
+                        if reviewDays.contains(key) {
+                            Button("打开每日回顾") { openReview(key) }
+                                .reviewAction()
+                        }
+                    }
+                    if reviews.hasOlder {
+                        Button("载入更早的回顾日期") { Task { await reviews.refreshDates(older: true) } }
+                            .reviewAction()
                     }
                 }
                 .padding(20)
@@ -117,6 +154,9 @@ struct MurmurNativeCalendar: UIViewRepresentable {
     var markedDays: Set<String>
     /// What VoiceOver reads for a marked day.
     var markLabel: String
+    /// A second kind of record, drawn as ◇ beside the first.
+    var secondaryDays: Set<String> = []
+    var secondaryLabel: String = ""
     /// When set, only these days can be selected.
     var selectableDays: Set<String>? = nil
 
@@ -141,8 +181,8 @@ struct MurmurNativeCalendar: UIViewRepresentable {
     func updateUIView(_ view: UICalendarView, context: Context) {
         let old = context.coordinator.parent
         context.coordinator.parent = self
-        if old.markedDays != markedDays {
-            let days = old.markedDays.union(markedDays)
+        if old.markedDays != markedDays || old.secondaryDays != secondaryDays {
+            let days = old.markedDays.union(old.secondaryDays).union(markedDays).union(secondaryDays)
             view.reloadDecorations(forDateComponents: days.compactMap { key in
                 let parts = key.split(separator: "-").compactMap { Int($0) }
                 guard parts.count == 3 else { return nil }
@@ -184,16 +224,21 @@ struct MurmurNativeCalendar: UIViewRepresentable {
         }
 
         func calendarView(_ calendarView: UICalendarView, decorationFor components: DateComponents) -> UICalendarView.Decoration? {
-            guard let date = calendarView.calendar.date(from: components),
-                  parent.markedDays.contains(MurmurDay.key(date))
-            else { return nil }
-            let markLabel = parent.markLabel
+            guard let date = calendarView.calendar.date(from: components) else { return nil }
+            let key = MurmurDay.key(date)
+            let marked = parent.markedDays.contains(key)
+            let secondary = parent.secondaryDays.contains(key)
+            guard marked || secondary else { return nil }
+            let text = [marked ? "•" : nil, secondary ? "◇" : nil].compactMap { $0 }.joined(separator: " ")
+            let spoken = [marked ? parent.markLabel : nil, secondary ? parent.secondaryLabel : nil]
+                .compactMap { $0 }
+                .joined(separator: "，")
             return .customView {
                 let label = UILabel()
-                label.text = "•"
+                label.text = text
                 label.font = .preferredFont(forTextStyle: .caption2)
                 label.textColor = .label
-                label.accessibilityLabel = markLabel
+                label.accessibilityLabel = spoken
                 return label
             }
         }
