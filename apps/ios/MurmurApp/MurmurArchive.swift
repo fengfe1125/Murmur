@@ -15,6 +15,9 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
     @Published private(set) var isLoaded = false
     @Published private(set) var dayIndex: [MurmurTranscriptDay] = []
     @Published private(set) var storageFailure: String?
+    /// Whether the day last opened with `load(day:)` is in memory from its
+    /// first row, so there is nothing older on it to load.
+    @Published private(set) var dayFullyLoaded = false
     private var hasInitialRows = false
     private let writer = MurmurSerialWriter()
     private var clearing = false
@@ -104,16 +107,25 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
         return Array(moments.suffix(limit))
     }
 
+    /// Reads one day's latest page, or with `earlier` the page before what is
+    /// already in memory for it.
     func load(day: Date, earlier: Bool = false) async {
-        guard !hasInitialRows else { return }
+        guard !hasInitialRows else {
+            dayFullyLoaded = true
+            return
+        }
         let anchor = earlier ? rows(on: day).first : nil
         let page = await store.page(before: anchor, day: day, archive: true, fromStart: false)
         storageFailure = await store.lastError
+        // A page that comes back short reached the start of the day.
+        let reachedStart = storageFailure == nil && page.count < MurmurTranscriptStore.pageSize
         if earlier {
             var seen = Set<String>()
             rows = Array((page + rows).filter { seen.insert($0.id).inserted }.prefix(400))
+            if reachedStart { dayFullyLoaded = true }
         } else {
             rows = page
+            dayFullyLoaded = reachedStart
         }
     }
 

@@ -1221,7 +1221,10 @@ private actor PreviewMurmurAPIClient: MurmurAPIClient {
 extension EnvironmentValues {
     var murmurReduceMotion: Bool {
 #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--murmur-ui-testing") && ProcessInfo.processInfo.arguments.contains("--murmur-ui-test-reduce-motion") { return true }
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--murmur-ui-testing"), arguments.contains("--murmur-ui-test-reduce-motion") {
+            return true
+        }
 #endif
         return accessibilityReduceMotion
     }

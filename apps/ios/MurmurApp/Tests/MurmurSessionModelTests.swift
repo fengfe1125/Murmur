@@ -243,9 +243,11 @@ final class MurmurSessionModelTests: XCTestCase {
         let model = MurmurSessionModel(api: FakeMurmurAPIClient(), transcriptStore: store, bubblePacing: .instant)
         await model.bootstrap()
         await model.loadTranscript()
+        XCTAssertFalse(model.reachedEarliestHistory)
         await model.loadHistory(earlier: true)
         XCTAssertEqual(model.visibleMessages.count, 120)
         XCTAssertTrue(model.historyFollowsLatest)
+        XCTAssertTrue(model.reachedEarliestHistory)
 
         model.draftText = "翻旧记录时说一句"
         model.submit()

@@ -377,10 +377,9 @@ struct MurmurTranscriptView: View {
         ScrollViewReader { proxy in
             ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        if !model.visibleMessages.isEmpty {
-                            Button { Task { await model.loadHistory(earlier: true) } } label: { Text("载入更早的记录").frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle()) }
-                                .font(.footnote).foregroundStyle(MurmurTheme.accentInk).frame(minHeight:44)
-                                .disabled(model.loadingHistory).accessibilityIdentifier("chat-load-earlier")
+                        if !model.visibleMessages.isEmpty && !model.reachedEarliestHistory {
+                            historyButton("载入更早的记录", earlier: true)
+                                .accessibilityIdentifier("chat-load-earlier")
                         }
                         // Not until the scrollback has been read back: that read
                         // is asynchronous, and shown before it lands the opening
@@ -418,13 +417,16 @@ struct MurmurTranscriptView: View {
                             .id(message.id)
                             .background {
                                 GeometryReader { geometry in
-                                    Color.clear.preference(key: ChatDateFrames.self, value: [message.id: geometry.frame(in: .named(Self.anchorSpace)).minY])
+                                    Color.clear.preference(
+                                        key: ChatDateFrames.self,
+                                        value: [message.id: geometry.frame(in: .named(Self.anchorSpace)).minY]
+                                    )
                                 }
                             }
                         }
                         if !model.historyFollowsLatest {
-                            Button { Task { await model.loadHistory(earlier: false) } } label: { Text("载入后面的记录").frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle()) }
-                                .font(.footnote).foregroundStyle(MurmurTheme.accentInk).frame(minHeight:44).disabled(model.loadingHistory)
+                            historyButton("载入后面的记录", earlier: false)
+                                .accessibilityIdentifier("chat-load-later")
                         }
                         if showsTyping && model.historyFollowsLatest {
                             HStack {
@@ -455,7 +457,10 @@ struct MurmurTranscriptView: View {
                     if let target = model.historyTarget {
                         isAtBottom = false
                         proxy.scrollTo(target, anchor: .top)
-                    } else { isAtBottom = true; scrollToBottom(settling: true) }
+                    } else {
+                        isAtBottom = true
+                        scrollToBottom(settling: true)
+                    }
                 }
                 .overlay(alignment: .bottomTrailing) {
                     if !model.historyFollowsLatest || !isAtBottom {
@@ -591,6 +596,20 @@ struct MurmurTranscriptView: View {
                 Text(prompt.reason)
             }
         }
+    }
+
+    /// A full-width 44pt row that pages the reading window one way.
+    private func historyButton(_ title: String, earlier: Bool) -> some View {
+        Button {
+            Task { await model.loadHistory(earlier: earlier) }
+        } label: {
+            Text(title)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .font(.footnote)
+        .foregroundStyle(MurmurTheme.accentInk)
+        .disabled(model.loadingHistory)
     }
 
     private static let bottomAnchor = "murmur-transcript-bottom"

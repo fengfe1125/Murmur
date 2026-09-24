@@ -47,6 +47,11 @@ final class MurmurSessionModel: ObservableObject {
         guard let historyPage else { return true }
         return historyPage.last?.id == messages.last?.id
     }
+    /// Whether what is on screen starts at the oldest line on this device, so
+    /// there is nothing earlier to load.
+    @Published private(set) var reachedEarliestHistory = false
+    /// The same for `messages` alone: true while it holds the whole history.
+    private var liveHoldsWholeHistory = false
     private static let historyWindowLimit = 400
 
     /// Why an outgoing row never landed, keyed by that row.
@@ -156,6 +161,9 @@ final class MurmurSessionModel: ObservableObject {
         transcriptDays = await transcriptStore.days()
         storageFailure = await transcriptStore.lastError
         readingDate = messages.last?.sentAt ?? Date()
+        // A first page that comes back short is the whole history.
+        liveHoldsWholeHistory = storageFailure == nil && messages.count < MurmurTranscriptStore.pageSize
+        reachedEarliestHistory = liveHoldsWholeHistory
     }
 
     /// Deletes the conversation on this device and reports whether it is gone.
@@ -184,6 +192,8 @@ final class MurmurSessionModel: ObservableObject {
         transcriptDays = []
         storageFailure = nil
         messages = []
+        liveHoldsWholeHistory = true
+        reachedEarliestHistory = true
         pendingMessageID = nil
         adoptTasks = [:]
         for photo in abandonedPhotos + Array(uncopiedPhotos.values) {
@@ -220,6 +230,8 @@ final class MurmurSessionModel: ObservableObject {
             if saved && self.messages.count > 300 {
                 let retained = Set(self.messages.suffix(300).map(\.id))
                 self.messages.removeAll { !retained.contains($0.id) && $0.delivery != .sending }
+                self.liveHoldsWholeHistory = false
+                if self.historyPage == nil { self.reachedEarliestHistory = false }
             }
         }
     }
@@ -257,6 +269,8 @@ final class MurmurSessionModel: ObservableObject {
         storageFailure = await transcriptStore.lastError
         guard let first = page.first else { return false }
         historyPage = page
+        // Older days may still come before this one.
+        reachedEarliestHistory = false
         readingDate = first.sentAt
         historyTarget = first.id
         navigationRevision += 1
@@ -275,6 +289,11 @@ final class MurmurSessionModel: ObservableObject {
         )
         var page = storedPage.map { stored in messages.first(where: { $0.id == stored.id }) ?? stored }
         storageFailure = await transcriptStore.lastError
+        if earlier, storageFailure == nil, storedPage.count < MurmurTranscriptStore.pageSize {
+            // Nothing older than this is on the device.
+            reachedEarliestHistory = true
+            if storedPage.isEmpty, historyPage == nil { liveHoldsWholeHistory = true }
+        }
         if !earlier, storedPage.count < MurmurTranscriptStore.pageSize {
             // Stored history has run out.  Anything newer — a save still queued,
             // a reply that just landed — so far lives only in memory.
@@ -286,15 +305,20 @@ final class MurmurSessionModel: ObservableObject {
         let current = visibleMessages
         var seen = Set<String>()
         let combined = (earlier ? page + current : current + page).filter { seen.insert($0.id).inserted }
-        historyPage = earlier
-            ? Array(combined.prefix(Self.historyWindowLimit))
-            : Array(combined.suffix(Self.historyWindowLimit))
+        if earlier {
+            historyPage = Array(combined.prefix(Self.historyWindowLimit))
+        } else {
+            historyPage = Array(combined.suffix(Self.historyWindowLimit))
+            // The window slid forward past rows it used to start with.
+            if combined.count > Self.historyWindowLimit { reachedEarliestHistory = false }
+        }
         historyTarget = anchor.id
         navigationRevision += 1
     }
 
     func returnToLatest() {
         historyPage = nil
+        reachedEarliestHistory = liveHoldsWholeHistory
         readingDate = messages.last?.sentAt ?? Date()
         historyTarget = nil
         navigationRevision += 1
@@ -307,6 +331,7 @@ final class MurmurSessionModel: ObservableObject {
             historyPage?.append(message)
             if let count = historyPage?.count, count > Self.historyWindowLimit {
                 historyPage?.removeFirst(count - Self.historyWindowLimit)
+                reachedEarliestHistory = false
             }
         }
         messages.append(message)

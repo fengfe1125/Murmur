@@ -24,12 +24,17 @@ struct ArchiveDayView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 10) {
-                        Button("载入更早的记录") { Task {
-                            let anchor = rows.first?.id
-                            await archive.load(day: day, earlier: true)
-                            if let anchor { proxy.scrollTo(anchor, anchor: .top) }
-                        } }.frame(minHeight:44)
-                        if let failure = archive.storageFailure { Text(failure).font(.footnote).foregroundStyle(MurmurTheme.coral); Button("重试本机保存") { Task { await archive.retryStorage() } }.frame(minHeight: 44) }
+                        if !archive.dayFullyLoaded {
+                            Button("载入更早的记录") {
+                                Task {
+                                    let anchor = rows.first?.id
+                                    await archive.load(day: day, earlier: true)
+                                    if let anchor { proxy.scrollTo(anchor, anchor: .top) }
+                                }
+                            }
+                            .frame(minHeight: 44)
+                            .accessibilityIdentifier("archive-load-earlier")
+                        }
                         ForEach(rows) { row in
                             ArchiveRowView(
                                 row: row,
@@ -83,6 +88,18 @@ struct ArchiveDayView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        // Where the chat puts its own: in view, whatever the scroll position.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let failure = archive.storageFailure {
+                Button { Task { await archive.retryStorage() } } label: {
+                    Label(failure, systemImage: "exclamationmark.circle")
+                        .font(.caption)
+                }
+                .padding(.horizontal)
+                .accessibilityHint("重试本机保存")
+                .accessibilityIdentifier("archive-storage-retry")
+            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         .background(MurmurTheme.paper.ignoresSafeArea())
