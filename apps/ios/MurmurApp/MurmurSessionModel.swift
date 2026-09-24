@@ -30,6 +30,8 @@ final class MurmurSessionModel: ObservableObject {
     /// back off disk were already there, so they must not animate in, and the
     /// opening line must not be shown over a history that is still being read.
     @Published private(set) var transcriptRestored = false
+    /// A reading window loaded from disk — a jump to a date, or older pages
+    /// pulled in above the newest lines.  Nil while the screen shows `messages`.
     @Published private(set) var historyPage: [MurmurMessage]?
     @Published private(set) var transcriptDays: [MurmurTranscriptDay] = []
     @Published private(set) var storageFailure: String?
@@ -38,6 +40,14 @@ final class MurmurSessionModel: ObservableObject {
     @Published private(set) var navigationRevision = 0
     @Published private(set) var loadingHistory = false
     var visibleMessages: [MurmurMessage] { historyPage ?? messages }
+    /// Whether what is on screen ends at the newest line, so a new row belongs
+    /// in it.  A window opened on an older day keeps still until the person
+    /// comes back to the latest.
+    var historyFollowsLatest: Bool {
+        guard let historyPage else { return true }
+        return historyPage.last?.id == messages.last?.id
+    }
+    private static let historyWindowLimit = 400
 
     /// Why an outgoing row never landed, keyed by that row.
     ///
@@ -230,24 +240,33 @@ final class MurmurSessionModel: ObservableObject {
     }
 
     func loadHistory(earlier: Bool) async {
-        guard !loadingHistory, let anchor = earlier ? visibleMessages.first : visibleMessages.last else { return }
+        guard !loadingHistory,
+              let anchor = earlier ? visibleMessages.first : visibleMessages.last
+        else { return }
         loadingHistory = true
         defer { loadingHistory = false }
-        let storedPage = await transcriptStore.page(before: earlier ? anchor : nil, after: earlier ? nil : anchor)
-        let page = storedPage.map { stored in messages.first(where: { $0.id == stored.id }) ?? stored }
+        let storedPage = await transcriptStore.page(
+            before: earlier ? anchor : nil,
+            after: earlier ? nil : anchor
+        )
+        var page = storedPage.map { stored in messages.first(where: { $0.id == stored.id }) ?? stored }
         storageFailure = await transcriptStore.lastError
+        if !earlier, storedPage.count < MurmurTranscriptStore.pageSize {
+            // Stored history has run out.  Anything newer — a save still queued,
+            // a reply that just landed — so far lives only in memory.
+            let shown = Set(visibleMessages.map(\.id)).union(page.map(\.id))
+            let since = (page.last ?? anchor).sentAt
+            page += messages.filter { !shown.contains($0.id) && $0.sentAt >= since }
+        }
         guard !page.isEmpty else { return }
         let current = visibleMessages
         var seen = Set<String>()
         let combined = (earlier ? page + current : current + page).filter { seen.insert($0.id).inserted }
-        historyPage = earlier ? Array(combined.prefix(400)) : Array(combined.suffix(400))
+        historyPage = earlier
+            ? Array(combined.prefix(Self.historyWindowLimit))
+            : Array(combined.suffix(Self.historyWindowLimit))
         historyTarget = anchor.id
         navigationRevision += 1
-    }
-
-    func beginHistoryReading() {
-        guard historyPage == nil, !messages.isEmpty else { return }
-        historyPage = messages
     }
 
     func returnToLatest() {
@@ -258,6 +277,14 @@ final class MurmurSessionModel: ObservableObject {
     }
 
     private func append(_ message: MurmurMessage) {
+        // A window that already reaches the newest line takes the new one as
+        // well; a window opened on an older day stays where the person put it.
+        if historyPage != nil, historyFollowsLatest {
+            historyPage?.append(message)
+            if let count = historyPage?.count, count > Self.historyWindowLimit {
+                historyPage?.removeFirst(count - Self.historyWindowLimit)
+            }
+        }
         messages.append(message)
         persistTranscript()
     }
@@ -266,7 +293,9 @@ final class MurmurSessionModel: ObservableObject {
         guard let id = pendingMessageID,
               let index = messages.firstIndex(where: { $0.id == id }) else { return }
         mutate(&messages[index])
-        if let historyIndex = historyPage?.firstIndex(where: { $0.id == id }) { historyPage?[historyIndex] = messages[index] }
+        if let historyIndex = historyPage?.firstIndex(where: { $0.id == id }) {
+            historyPage?[historyIndex] = messages[index]
+        }
         persistTranscript()
     }
 

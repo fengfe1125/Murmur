@@ -140,15 +140,78 @@ final class MurmurSessionModelTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = MurmurTranscriptStore(directory: directory)
         let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Date())!
-        await store.save([MurmurMessage(id: "old", author: .you, text: "旧记录", sentAt: yesterday)])
+        await store.save([
+            MurmurMessage(id: "old", author: .you, text: "旧记录", sentAt: yesterday),
+            MurmurMessage(id: "recent", author: .you, text: "今天早些时候", sentAt: Date().addingTimeInterval(-60))
+        ])
         let model = MurmurSessionModel(api: FakeMurmurAPIClient(), transcriptStore: store, bubblePacing: .instant)
-        await model.bootstrap(); await model.loadTranscript()
-        let opened = await model.openChatDate(yesterday); XCTAssertTrue(opened)
-        model.draftText = "今天的新消息"; model.submit()
+        await model.bootstrap()
+        await model.loadTranscript()
+        let opened = await model.openChatDate(yesterday)
+        XCTAssertTrue(opened)
+        XCTAssertFalse(model.historyFollowsLatest)
+        model.draftText = "今天的新消息"
+        model.submit()
         try await waitUntil { model.phase == .complete }
         XCTAssertEqual(model.visibleMessages.map(\.id), ["old"])
         model.returnToLatest()
         XCTAssertTrue(model.visibleMessages.contains { $0.text == "今天的新消息" })
+    }
+
+    /// Pulling older pages in above the newest lines is still the live
+    /// conversation: what Murmur says next has to land in that window.
+    func testRepliesStayVisibleAfterLoadingEarlierHistory() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let start = Date().addingTimeInterval(-3_600)
+        await store.save((0..<120).map {
+            MurmurMessage(
+                id: "row-\($0)", author: .you, text: "第 \($0) 条",
+                sentAt: start.addingTimeInterval(Double($0)), delivery: .answered
+            )
+        })
+        let model = MurmurSessionModel(api: FakeMurmurAPIClient(), transcriptStore: store, bubblePacing: .instant)
+        await model.bootstrap()
+        await model.loadTranscript()
+        await model.loadHistory(earlier: true)
+        XCTAssertEqual(model.visibleMessages.count, 120)
+        XCTAssertTrue(model.historyFollowsLatest)
+
+        model.draftText = "翻旧记录时说一句"
+        model.submit()
+        try await waitUntil { model.phase == .complete }
+
+        XCTAssertTrue(model.visibleMessages.contains { $0.text == "翻旧记录时说一句" })
+        XCTAssertTrue(model.visibleMessages.contains { $0.author == .murmur })
+    }
+
+    func testLoadingLaterHistoryReachesTheLiveTail() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+        let older = (0..<150).map {
+            MurmurMessage(id: "y-\($0)", author: .you, text: "昨天 \($0)", sentAt: yesterday.addingTimeInterval(Double($0 * 60)))
+        }
+        let newer = (0..<50).map {
+            MurmurMessage(id: "t-\($0)", author: .you, text: "今天 \($0)", sentAt: today.addingTimeInterval(Double($0)))
+        }
+        await store.save(older + newer)
+        let model = MurmurSessionModel(api: FakeMurmurAPIClient(), transcriptStore: store, bubblePacing: .instant)
+        await model.bootstrap()
+        await model.loadTranscript()
+
+        let opened = await model.openChatDate(yesterday)
+        XCTAssertTrue(opened)
+        XCTAssertEqual(model.visibleMessages.first?.id, "y-0")
+        XCTAssertFalse(model.historyFollowsLatest)
+
+        await model.loadHistory(earlier: false)
+        XCTAssertEqual(model.visibleMessages.last?.id, "t-49")
+        XCTAssertTrue(model.historyFollowsLatest)
     }
 
     func testTranscriptSurvivesAReloadAndMarksInterruptedSendsFailed() async throws {

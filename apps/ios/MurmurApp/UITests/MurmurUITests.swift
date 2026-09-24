@@ -79,6 +79,26 @@ final class MurmurUITests: XCTestCase {
         try captureDiaryScreenshot(app, name: "Calendar · Landscape")
     }
 
+    /// Glancing up while Murmur is still answering is not a date jump: the
+    /// answer has to be there when the reader comes back down, without being
+    /// asked for with 回到最新.
+    func testScrollingUpDuringReplyStillShowsReply() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-seed-long-transcript", "--murmur-slow-reply"])
+        let composer = app.textFields["moment-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        enterMoment(composer, "往上看一眼")
+        app.buttons["send-moment"].tap()
+        let transcript = app.scrollViews.firstMatch
+        transcript.swipeDown()
+        transcript.swipeDown()
+        XCTAssertFalse(line("这一刻，我收到了。", in: app).exists)
+        transcript.swipeUp()
+        transcript.swipeUp()
+        transcript.swipeUp()
+        XCTAssertTrue(line("这一刻，我收到了。", in: app).waitForExistence(timeout: 10))
+    }
+
     func testTheChatCardPausesAndSkipsWithoutLeavingTheConversation() throws {
         continueAfterFailure = false
         let app = launchApp(arguments: ["--murmur-stub-netease-playing"])

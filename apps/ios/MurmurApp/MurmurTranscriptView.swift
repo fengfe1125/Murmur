@@ -422,11 +422,11 @@ struct MurmurTranscriptView: View {
                                 }
                             }
                         }
-                        if model.historyPage != nil {
+                        if !model.historyFollowsLatest {
                             Button { Task { await model.loadHistory(earlier: false) } } label: { Text("载入后面的记录").frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle()) }
                                 .font(.footnote).foregroundStyle(MurmurTheme.accentInk).frame(minHeight:44).disabled(model.loadingHistory)
                         }
-                        if showsTyping && model.historyPage == nil {
+                        if showsTyping && model.historyFollowsLatest {
                             HStack {
                                 TypingIndicator()
                                 Spacer(minLength: 56)
@@ -458,7 +458,7 @@ struct MurmurTranscriptView: View {
                     } else { isAtBottom = true; scrollToBottom(settling: true) }
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    if model.historyPage != nil || !isAtBottom {
+                    if !model.historyFollowsLatest || !isAtBottom {
                         Button { model.returnToLatest() } label: {
                             Label("回到最新", systemImage: "arrow.down")
                                 .font(.footnote.weight(.medium))
@@ -474,7 +474,7 @@ struct MurmurTranscriptView: View {
                         .accessibilityIdentifier("chat-return-latest")
                     }
                 }
-                .animation(reduceMotion ? nil : MurmurMotion.content, value: model.historyPage != nil || !isAtBottom)
+                .animation(reduceMotion ? nil : MurmurMotion.content, value: !model.historyFollowsLatest || !isAtBottom)
                 // A chat grows downwards: pinning the anchor keeps the newest line
                 // against the composer when the keyboard changes the room's height,
                 // instead of leaving it hidden behind the keyboard.
@@ -514,7 +514,7 @@ struct MurmurTranscriptView: View {
                         pinToBottom()
                         return
                     }
-                    if isAtBottom && model.historyPage == nil { scrollToBottom() }
+                    if isAtBottom && model.historyFollowsLatest { scrollToBottom() }
                 }
                 .onChange(of: showsTyping) { _, _ in scrollToBottom() }
                 // One signal, one animation.  The re-pin below already carries
@@ -615,13 +615,14 @@ struct MurmurTranscriptView: View {
     /// obstacle either: every one of them is heading for the newest line
     /// already, so a re-pin only hurries them along.
     private func repin(distanceFromBottom: CGFloat) {
-        guard model.historyPage == nil else { return }
+        // A window opened on an older day is read where it is.  Scrolling in
+        // the live conversation only moves the reader; new lines keep landing.
+        guard model.historyFollowsLatest else { return }
         let fingerOwnsIt = scrollPhase == .tracking
             || scrollPhase == .interacting
             || scrollPhase == .decelerating
         guard !fingerOwnsIt else {
             isAtBottom = distanceFromBottom < 40
-            if !isAtBottom { model.beginHistoryReading() }
             return
         }
         // Past the end is always wrong — there is nothing to read there.
@@ -652,7 +653,7 @@ struct MurmurTranscriptView: View {
     /// Matched to the keyboard's own timing so the two move together rather
     /// than racing.  UIKit raises the keyboard over 0.25s with an ease-out.
     private func scrollToBottom(settling: Bool = false) {
-        guard model.historyPage == nil, isAtBottom, !model.visibleMessages.isEmpty else { return }
+        guard model.historyFollowsLatest, isAtBottom, !model.visibleMessages.isEmpty else { return }
 #if DEBUG
         MurmurDiagnostics.record("scrollToBottom settling=\(settling)")
 #endif
@@ -668,7 +669,7 @@ struct MurmurTranscriptView: View {
         guard settling else { return }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled, isAtBottom, model.historyPage == nil else { return }
+            guard !Task.isCancelled, isAtBottom, model.historyFollowsLatest else { return }
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
                 pinToBottom()
             }

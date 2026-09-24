@@ -249,27 +249,41 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> {
         let isReading = readings.contains(momentID)
         let note = notesByMoment[momentID]
+        // `--murmur-slow-reply` holds the answer back long enough for a test to
+        // scroll the conversation while Murmur is still composing.
+        let replyDelay: Duration? = arguments.contains("--murmur-slow-reply") ? .seconds(4) : nil
         return AsyncThrowingStream { continuation in
+            @Sendable func answer() {
+                if isReading {
+                    continuation.yield(.bubble(id: "2", text: "这是……刚下过雨？"))
+                    continuation.yield(.angles(
+                        id: "3",
+                        texts: ["那天的天气", "右边那个人", "上次说要再来"]
+                    ))
+                } else {
+                    let answer: String
+                    switch note {
+                    case "日期续聊第一句": answer = "接住第一句"
+                    case "日期续聊第二句": answer = "接住第二句"
+                    default: answer = "这一刻，我收到了。"
+                    }
+                    continuation.yield(.bubble(id: "2", text: answer))
+                }
+                continuation.yield(.done(id: "4", move: nil, scene: nil))
+                continuation.finish()
+            }
             // Production sequence numbers restart for every moment.  Keeping
             // that wire shape in UI tests guards the room-wide SwiftUI IDs.
             continuation.yield(.accepted(id: "1"))
-            if isReading {
-                continuation.yield(.bubble(id: "2", text: "这是……刚下过雨？"))
-                continuation.yield(.angles(
-                    id: "3",
-                    texts: ["那天的天气", "右边那个人", "上次说要再来"]
-                ))
-            } else {
-                let answer: String
-                switch note {
-                case "日期续聊第一句": answer = "接住第一句"
-                case "日期续聊第二句": answer = "接住第二句"
-                default: answer = "这一刻，我收到了。"
+            if let replyDelay {
+                let delayed = Task {
+                    try? await Task.sleep(for: replyDelay)
+                    answer()
                 }
-                continuation.yield(.bubble(id: "2", text: answer))
+                continuation.onTermination = { _ in delayed.cancel() }
+            } else {
+                answer()
             }
-            continuation.yield(.done(id: "4", move: nil, scene: nil))
-            continuation.finish()
         }
     }
     func currentProactive() async throws -> ProactiveMoment? { nil }
