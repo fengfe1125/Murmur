@@ -238,7 +238,13 @@ struct MusicPickerView: View {
             }
             .background(MurmurTheme.paper)
             .searchable(text: $model.query, prompt: "搜索 Audius")
-            .onSubmit(of: .search) { model.source = .search; model.reload() }
+            // Artist and track names, not prose: autocorrect would rewrite them.
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .onSubmit(of: .search) {
+                model.source = .search
+                model.reload()
+            }
             .navigationTitle("音乐")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

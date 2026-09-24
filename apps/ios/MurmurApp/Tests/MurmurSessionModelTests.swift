@@ -1001,6 +1001,71 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertNotNil(model.messages.first?.imageFile)
     }
 
+    func testDeletingTheAccountClearsThisDevicesHistory() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        await store.save([MurmurMessage(id: "kept", author: .you, text: "本机记录")])
+        let archive = MurmurArchive(store: MurmurTranscriptStore.archive(directory: directory.appendingPathComponent("archive")))
+        let model = MurmurSessionModel(
+            api: FakeMurmurAPIClient(), transcriptStore: store, archive: archive, bubblePacing: .instant
+        )
+        await model.bootstrap()
+        await model.loadTranscript()
+
+        await model.deleteAccount()
+
+        XCTAssertNil(model.identity)
+        XCTAssertEqual(model.connection, .needsEnrollment)
+        XCTAssertNil(model.failure)
+        let remaining = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    /// The server account is already gone by the time the local copies are
+    /// cleared, so a local failure must not leave the app enrolled to it.
+    func testDeletingTheAccountEndsEnrollmentEvenWhenLocalClearingFails() async throws {
+        let blocked = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data("blocked".utf8).write(to: blocked)
+        defer { try? FileManager.default.removeItem(at: blocked) }
+        let model = MurmurSessionModel(
+            api: FakeMurmurAPIClient(),
+            transcriptStore: MurmurTranscriptStore(directory: blocked),
+            archive: MurmurArchive(store: MurmurTranscriptStore.archive(directory: blocked)),
+            bubblePacing: .instant
+        )
+        await model.bootstrap()
+
+        await model.deleteAccount()
+
+        XCTAssertNil(model.identity)
+        XCTAssertEqual(model.connection, .needsEnrollment)
+        XCTAssertEqual(model.failure?.code, "local_clear_incomplete")
+    }
+
+    /// Quiet is Murmur choosing to say nothing.  A reply that is only a song
+    /// still said something, so the moment completes.
+    func testSongOnlyReplyCompletesRatherThanGoingQuiet() async throws {
+        let model = MurmurSessionModel(api: FakeMurmurAPIClient(mode: .songOnlyReply), bubblePacing: .instant)
+        await model.bootstrap()
+        model.draftText = "放首歌吧"
+        model.submit()
+        try await waitUntil {
+            model.messages.contains { $0.author == .murmur && $0.musicTrack != nil }
+                && model.phase == .complete
+        }
+        XCTAssertTrue(model.bubbles.isEmpty)
+    }
+
+    func testQuietEventWithNoBubblesEndsQuiet() async throws {
+        let model = MurmurSessionModel(api: FakeMurmurAPIClient(mode: .quietReply), bubblePacing: .instant)
+        await model.bootstrap()
+        model.draftText = "今天有点累"
+        model.submit()
+        try await waitUntil { model.phase == .quiet && !model.isAwaitingReply }
+        XCTAssertTrue(model.bubbles.isEmpty)
+    }
+
     func testBootstrapLoadsServerPreferences() async throws {
         let api = FakeMurmurAPIClient()
         let model = MurmurSessionModel(api: api, bubblePacing: .instant)
@@ -1221,7 +1286,18 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
         case idempotencyConflict, proactiveReply, attestationKeyUnknown, slowCreates, neverCreates, neverStreams
         case proactiveThreeBubbles
         case orderedBubbles
+        case songOnlyReply, quietReply
     }
+
+    private static let song = MusicTrackAttachmentV1(
+        trackID: "night-sail",
+        title: "夜航",
+        artists: ["林一", "小野"],
+        artworkURL: nil,
+        canonicalURL: URL(string: "https://audius.co/lin/night-sail")!,
+        durationSeconds: 201,
+        explicit: false
+    )
 
     private let mode: Mode
     private var createCount = 0
@@ -1292,6 +1368,16 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
                 continuation.yield(.accepted(id: "accepted-\(currentCreateCount)"))
                 continuation.yield(.bubble(id: "bubble-\(currentCreateCount)", text: "reply-\(currentCreateCount)"))
                 continuation.yield(.done(id: "done-\(currentCreateCount)", move: nil, scene: nil))
+                continuation.finish()
+            case .songOnlyReply:
+                continuation.yield(.accepted(id: "accepted-1"))
+                continuation.yield(.bubble(id: "song-1", text: "", musicTrack: Self.song))
+                continuation.yield(.done(id: "done-1", move: nil, scene: nil))
+                continuation.finish()
+            case .quietReply:
+                continuation.yield(.accepted(id: "accepted-1"))
+                continuation.yield(.quiet(id: "quiet-1"))
+                continuation.yield(.done(id: "done-1", move: nil, scene: nil))
                 continuation.finish()
             case .orderedBubbles:
                 continuation.yield(.accepted(id: "accepted-1"))

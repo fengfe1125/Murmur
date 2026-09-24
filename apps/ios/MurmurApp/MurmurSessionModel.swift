@@ -158,19 +158,28 @@ final class MurmurSessionModel: ObservableObject {
         readingDate = messages.last?.sentAt ?? Date()
     }
 
-    func clearTranscript() async {
-        guard !clearingTranscript else { return }
+    /// Deletes the conversation on this device and reports whether it is gone.
+    ///
+    /// Copies still landing and saves still queued finish first, so nothing
+    /// written after the wipe can bring a row or a photo back.  Sends in flight
+    /// are called off only once the wipe has succeeded: if it fails they carry
+    /// on, and the saves skipped in the meantime run again.
+    @discardableResult
+    func clearTranscript() async -> Bool {
+        guard !clearingTranscript else { return false }
         clearingTranscript = true
         defer { clearingTranscript = false }
-        // Sends about to be called off still hold their temporary originals.
-        let abandonedPhotos = queue.compactMap(\.photo) + [lastSubmission?.photo].compactMap { $0 }
-        cancelPump()
         for task in adoptTasks.values { await task.value }
         await transcriptWriter.drain()
         guard await transcriptStore.clear() else {
             storageFailure = await transcriptStore.lastError
-            return
+            clearingTranscript = false
+            persistTranscript()
+            return false
         }
+        // Sends about to be called off still hold their temporary originals.
+        let abandonedPhotos = queue.compactMap(\.photo) + [lastSubmission?.photo].compactMap { $0 }
+        cancelPump()
         historyPage = nil
         transcriptDays = []
         storageFailure = nil
@@ -187,6 +196,7 @@ final class MurmurSessionModel: ObservableObject {
         // rows were holding for a resend go with them.
         withdrawResendOffers()
         sendFailures = [:]
+        return true
     }
 
     /// Saves the whole in-memory window, so that once a save succeeds every row
@@ -903,18 +913,30 @@ final class MurmurSessionModel: ObservableObject {
         }
     }
 
+    /// Deletes the account and, with it, the conversation and photo-room
+    /// history kept on this device.
     func deleteAccount() async {
         settingsMessage = nil
         do {
             try await api.deleteAccount()
-            await clearTranscript()
-            await archive.clear()
-            identity = nil
-            devices = []
-            connection = .needsEnrollment
-            clearCurrent()
         } catch {
             recordSettingsFailure(error)
+            return
+        }
+        // The account is gone on the server, so this device is no longer
+        // enrolled — whatever happens to its local copies below.
+        let chatCleared = await clearTranscript()
+        let archiveCleared = await archive.clear()
+        identity = nil
+        devices = []
+        connection = .needsEnrollment
+        clearCurrent()
+        if !chatCleared || !archiveCleared {
+            failure = MurmurFailure(
+                code: "local_clear_incomplete",
+                message: "账号已删除，但这台设备上的记录没有全部清空。删除 App 可以移除剩余记录。",
+                retryable: false
+            )
         }
     }
 
@@ -1038,6 +1060,7 @@ final class MurmurSessionModel: ObservableObject {
             var lastEventID: String?
             var retries = 0
             var terminal = false
+            var wasQuiet = false
             var seenEventIDs = Set<String>()
             while !terminal {
                 let stream = await api.events(momentID: receipt.momentID, lastEventID: lastEventID)
@@ -1083,6 +1106,7 @@ final class MurmurSessionModel: ObservableObject {
                             // is not the place to show it.
                             break
                         case .quiet:
+                            wasQuiet = true
                             phase = .quiet
                         case let .done(_, nextMove, nextScene):
                             move = nextMove
@@ -1102,7 +1126,9 @@ final class MurmurSessionModel: ObservableObject {
                 }
             }
             await discardAfterTranscriptCopy(submission)
-            phase = bubbles.isEmpty ? .quiet : .complete
+            // Quiet is Murmur choosing to say nothing.  A reply that was only a
+            // song still said something.
+            phase = wasQuiet && bubbles.isEmpty ? .quiet : .complete
             pendingMessageID = nil
             if !bubbles.isEmpty && !didRequestNotificationPrompt {
                 didRequestNotificationPrompt = true

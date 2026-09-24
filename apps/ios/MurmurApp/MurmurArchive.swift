@@ -182,23 +182,26 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
         }
     }
 
-    func clear() async {
+    /// Deletes the archive on this device and reports whether it is gone.
+    @discardableResult
+    func clear() async -> Bool {
         clearing = true
         storageGeneration += 1
         defer { clearing = false }
         await writer.drain()
-        if await store.clear() {
-            rows = []
-            dayIndex = []
-            storageFailure = nil
-            for (id, pending) in pendingPhotoRows where ownedPendingOriginals.contains(id) {
-                try? FileManager.default.removeItem(at: pending.1)
-            }
-            pendingPhotoRows = [:]
-            ownedPendingOriginals = []
-        } else {
+        guard await store.clear() else {
             storageFailure = await store.lastError
+            return false
         }
+        rows = []
+        dayIndex = []
+        storageFailure = nil
+        for (id, pending) in pendingPhotoRows where ownedPendingOriginals.contains(id) {
+            try? FileManager.default.removeItem(at: pending.1)
+        }
+        pendingPhotoRows = [:]
+        ownedPendingOriginals = []
+        return true
     }
 
     func retryStorage() async {

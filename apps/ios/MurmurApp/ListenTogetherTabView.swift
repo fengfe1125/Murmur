@@ -463,6 +463,8 @@ struct NeteaseSearchSheet: View {
     let onPick: (MusicTrackAttachmentV1) -> Void
 
     @StateObject private var model: NeteaseSearchModel
+    /// The sheet exists to search, so the field is active from the start.
+    @State private var searchActive = false
     @Environment(\.dismiss) private var dismiss
 
     init(
@@ -484,8 +486,9 @@ struct NeteaseSearchSheet: View {
                 results
             }
             .background(MurmurTheme.paper.ignoresSafeArea())
-            .searchable(text: $model.query, prompt: "搜网易云的歌")
+            .searchable(text: $model.query, isPresented: $searchActive, prompt: "搜网易云的歌")
             .onSubmit(of: .search) { model.search() }
+            .onAppear { searchActive = true }
             .navigationTitle("选一首歌")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

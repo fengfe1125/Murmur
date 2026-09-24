@@ -709,7 +709,7 @@ struct MurmurSettingsView: View {
                             .foregroundStyle(MurmurTheme.coral)
                         Button("重新连接此设备", role: .destructive) { confirmReconnect = true }
                     }
-                    Text("每个账号最多可绑定 3 台设备。达到上限时请先移除旧设备。")
+                    Text("每个邀请用户最多可绑定 3 台设备。新增设备需要管理员签发设备码。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
