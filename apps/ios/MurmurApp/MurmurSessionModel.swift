@@ -162,6 +162,8 @@ final class MurmurSessionModel: ObservableObject {
         guard !clearingTranscript else { return }
         clearingTranscript = true
         defer { clearingTranscript = false }
+        // Sends about to be called off still hold their temporary originals.
+        let abandonedPhotos = queue.compactMap(\.photo) + [lastSubmission?.photo].compactMap { $0 }
         cancelPump()
         for task in adoptTasks.values { await task.value }
         await transcriptWriter.drain()
@@ -175,7 +177,9 @@ final class MurmurSessionModel: ObservableObject {
         messages = []
         pendingMessageID = nil
         adoptTasks = [:]
-        for photo in uncopiedPhotos.values { await photoLoader.discard(photo) }
+        for photo in abandonedPhotos + Array(uncopiedPhotos.values) {
+            await photoLoader.discard(photo)
+        }
         uncopiedPhotos = [:]
         for task in rebuildTasks.values { task.cancel() }
         rebuildTasks = [:]
@@ -211,13 +215,15 @@ final class MurmurSessionModel: ObservableObject {
                 guard storageFailure == nil else { return }
             }
             for (id, photo) in uncopiedPhotos {
-                if let name = await transcriptStore.adoptImage(at: photo.originalURL, id: id),
-                   let index = messages.firstIndex(where: { $0.id == id }) {
-                    messages[index].imageFile = name
-                    if await transcriptStore.save([messages[index]]) {
-                        uncopiedPhotos.removeValue(forKey: id)
-                        await photoLoader.discard(photo)
-                    }
+                guard let name = await transcriptStore.adoptImage(at: photo.originalURL, id: id),
+                      let index = messages.firstIndex(where: { $0.id == id })
+                else { continue }
+                messages[index].imageFile = name
+                uncopiedPhotos.removeValue(forKey: id)
+                // A send still uploading this photo, or holding it for a
+                // resend, deletes it on its own way out.
+                if !isStillSending(id), !isHeldForResend(photo) {
+                    await photoLoader.discard(photo)
                 }
             }
             persistTranscript()
@@ -620,15 +626,19 @@ final class MurmurSessionModel: ObservableObject {
         proactiveMomentID = nil
         append(outgoing)
         if let photo {
+            // Until the transcript has its own copy, the temporary original is
+            // the only one there is.
             uncopiedPhotos[outgoing.id] = photo
             adoptTasks[outgoing.id] = Task { [transcriptStore] in
                 let name = await transcriptStore.adoptImage(at: photo.originalURL, id: outgoing.id)
                 let copyFailure = await transcriptStore.lastError
                 await MainActor.run {
-                    if name == nil { self.storageFailure = copyFailure }
-                    guard let name,
-                          let index = self.messages.firstIndex(where: { $0.id == outgoing.id })
-                    else { return }
+                    guard let name else {
+                        self.storageFailure = copyFailure
+                        return
+                    }
+                    self.uncopiedPhotos.removeValue(forKey: outgoing.id)
+                    guard let index = self.messages.firstIndex(where: { $0.id == outgoing.id }) else { return }
                     self.messages[index].imageFile = name
                     self.persistTranscript()
                 }
@@ -1130,19 +1140,25 @@ final class MurmurSessionModel: ObservableObject {
     /// The upload's temporary file is also what the transcript copies from, so
     /// deleting it before that copy lands would leave a photo message with no
     /// photo in it.
+    ///
+    /// Once the copy exists the original goes, whether or not the row itself
+    /// has been saved yet: the next save that succeeds carries the row, and the
+    /// copy is already in transcript storage.  Only a photo whose copy failed
+    /// keeps its original — the one picture the row can still get — until the
+    /// copy is retried, the history is cleared, or the next cold start sweeps it.
     private func discardAfterTranscriptCopy(_ submission: Submission) async {
         await adoptTasks.removeValue(forKey: submission.messageID)?.value
         await transcriptWriter.drain()
-        if let photo = submission.photo {
-            guard let row = messages.first(where: { $0.id == submission.messageID }),
-                  row.imageFile != nil, await transcriptStore.save([row]) else {
-                uncopiedPhotos[submission.messageID] = photo
-                storageFailure = await transcriptStore.lastError ?? "图片尚未保存，请重试。"
-                return
-            }
-            uncopiedPhotos.removeValue(forKey: submission.messageID)
+        if submission.photo != nil, uncopiedPhotos[submission.messageID] != nil {
+            storageFailure = await transcriptStore.lastError ?? "图片尚未保存到本机，请重试。"
+            return
         }
         await photoLoader.discard(submission.photo)
+    }
+
+    /// Whether this row's send is queued or on the wire right now.
+    private func isStillSending(_ messageID: String) -> Bool {
+        pendingMessageID == messageID || queue.contains { $0.messageID == messageID }
     }
 
     private func refreshProactive(expectedMomentID: String?) async {

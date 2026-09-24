@@ -384,13 +384,15 @@ final class PhotoRoomModel: ObservableObject {
     func retryStorage() async {
         await transcript?.retryStorage()
         storageFailure = transcript?.storageFailure
-        if storageFailure == nil { discardAttachment() }
+        discardAttachment()
     }
 
     // ---- Leaving ------------------------------------------------------------
 
     /// Closing the room is a terminal path like any other, and it owns the same
-    /// cleanup: the turn in flight is cancelled and the original goes with it.
+    /// cleanup: the turn in flight is cancelled and the original goes with it —
+    /// unless the archive never got its copy of the photo, in which case the
+    /// archive takes the original over for its own retry.
     func close() {
         closed = true
         turn?.cancel()
@@ -401,11 +403,18 @@ final class PhotoRoomModel: ObservableObject {
         for rowID in unsentRows { transcript?.setDelivery(.failed, for: rowID) }
         unsentRows = []
         rowForLine = [:]
-        discardAttachment()
+        if let photoRowID, transcript?.holdsPendingPhoto(rowID: photoRowID) == true {
+            transcript?.takeOverPendingPhoto(rowID: photoRowID)
+            attachment = nil
+        } else {
+            discardAttachment()
+        }
     }
 
     private func discardAttachment() {
-        guard transcript?.storageFailure == nil else { return }
+        // While the archive still lacks its copy of this photo, the original is
+        // the one a retry copies from.
+        if let photoRowID, transcript?.holdsPendingPhoto(rowID: photoRowID) == true { return }
         let old = attachment
         attachment = nil
         guard old != nil else { return }

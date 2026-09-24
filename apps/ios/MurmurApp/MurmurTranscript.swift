@@ -86,11 +86,20 @@ protocol MurmurRoomRecorder: AnyObject {
     /// Takes a row back out.  For a line that never left: the room puts those
     /// words back in the field, and the history must not claim they were sent.
     func withdraw(_ messageID: String)
+    /// Whether this row's photo has yet to reach archive storage.  While it
+    /// has not, the temporary original is the only copy and must stay.
+    func holdsPendingPhoto(rowID: String) -> Bool
+    /// The room is closing with that photo still pending.  The recorder takes
+    /// the temporary original over and deletes it once its copy lands or the
+    /// history is cleared; the next cold start sweeps anything left.
+    func takeOverPendingPhoto(rowID: String)
 }
 
 extension MurmurRoomRecorder {
     var storageFailure: String? { nil }
     func retryStorage() async {}
+    func holdsPendingPhoto(rowID: String) -> Bool { false }
+    func takeOverPendingPhoto(rowID: String) {}
 }
 
 /// Runs persistence jobs one at a time, in the order they were asked for, so a

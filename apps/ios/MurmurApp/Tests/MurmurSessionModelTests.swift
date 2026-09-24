@@ -964,6 +964,43 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertNotNil(model.currentPhoto?.preview)
     }
 
+    /// The one exception to deleting the original when a send ends: its copy
+    /// never reached transcript storage, so the original is the only picture
+    /// the row can still get.  A retry copies it in and then deletes it.
+    func testOriginalStaysOnlyUntilAFailedCopyIsRetried() async throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-photo-test-\(UUID().uuidString).jpg")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { context in
+            UIColor.systemCoralForTest.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+        }
+        try XCTUnwrap(image.jpegData(compressionQuality: 0.8)).write(to: source)
+        // A file where the transcript directory should be: nothing can be stored.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data("blocked".utf8).write(to: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = MurmurSessionModel(
+            api: FakeMurmurAPIClient(),
+            transcriptStore: MurmurTranscriptStore(directory: directory),
+            bubblePacing: .instant
+        )
+        await model.bootstrap()
+
+        model.preparePhoto(at: source)
+        try await waitUntil { model.phase == .ready }
+        let original = try XCTUnwrap(model.draftPhoto?.originalURL)
+        model.submit()
+        try await waitUntil { model.phase == .complete }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertNotNil(model.storageFailure)
+
+        try FileManager.default.removeItem(at: directory)
+        model.retryTranscriptSave()
+        try await waitUntil { !FileManager.default.fileExists(atPath: original.path) }
+        XCTAssertNotNil(model.messages.first?.imageFile)
+    }
+
     func testBootstrapLoadsServerPreferences() async throws {
         let api = FakeMurmurAPIClient()
         let model = MurmurSessionModel(api: api, bubblePacing: .instant)

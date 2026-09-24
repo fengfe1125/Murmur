@@ -19,7 +19,12 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
     private let writer = MurmurSerialWriter()
     private var clearing = false
     private var storageGeneration = 0
+    /// Rows whose photo could not be copied in yet, with the temporary original
+    /// a retry copies from.
     private var pendingPhotoRows: [String: (MurmurMessage, URL)] = [:]
+    /// Pending rows whose room has closed: their originals are the archive's
+    /// to delete now.
+    private var ownedPendingOriginals: Set<String> = []
 
     let store: MurmurTranscriptStore
 
@@ -178,7 +183,11 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
             rows = []
             dayIndex = []
             storageFailure = nil
+            for (id, pending) in pendingPhotoRows where ownedPendingOriginals.contains(id) {
+                try? FileManager.default.removeItem(at: pending.1)
+            }
             pendingPhotoRows = [:]
+            ownedPendingOriginals = []
         } else {
             storageFailure = await store.lastError
         }
@@ -199,9 +208,21 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
             rows.removeAll { $0.id == id }
             rows.append(row)
             pendingPhotoRows.removeValue(forKey: id)
+            if ownedPendingOriginals.remove(id) != nil {
+                try? FileManager.default.removeItem(at: pending.1)
+            }
         }
         persist()
         await writer.drain()
+    }
+
+    func holdsPendingPhoto(rowID: String) -> Bool {
+        pendingPhotoRows[rowID] != nil
+    }
+
+    func takeOverPendingPhoto(rowID: String) {
+        guard pendingPhotoRows[rowID] != nil else { return }
+        ownedPendingOriginals.insert(rowID)
     }
 
     private func persist() {
