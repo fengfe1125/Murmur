@@ -84,7 +84,7 @@ final class MurmurSessionModel: ObservableObject {
     /// type the next line while Murmur is still answering the last one, and the
     /// server still sees one moment at a time.
     private var queue: [Submission] = []
-    private var persistenceTask: Task<Void, Never>?
+    private let transcriptWriter = MurmurSerialWriter()
     private var clearingTranscript = false
     private var uncopiedPhotos: [String: PhotoAttachment] = [:]
     private var pumpTask: Task<Void, Never>?
@@ -154,7 +154,7 @@ final class MurmurSessionModel: ObservableObject {
         defer { clearingTranscript = false }
         cancelPump()
         for task in adoptTasks.values { await task.value }
-        await persistenceTask?.value
+        await transcriptWriter.drain()
         guard await transcriptStore.clear() else {
             storageFailure = await transcriptStore.lastError
             return
@@ -178,9 +178,7 @@ final class MurmurSessionModel: ObservableObject {
     private func persistTranscript() {
         guard !clearingTranscript else { return }
         let snapshot = messages
-        let previous = persistenceTask
-        persistenceTask = Task { [weak self, transcriptStore] in
-            await previous?.value
+        transcriptWriter.enqueue { [weak self, transcriptStore] in
             let saved = await transcriptStore.save(snapshot)
             guard let self else { return }
             self.storageFailure = saved ? nil : await transcriptStore.lastError
@@ -1105,7 +1103,7 @@ final class MurmurSessionModel: ObservableObject {
     /// photo in it.
     private func discardAfterTranscriptCopy(_ submission: Submission) async {
         await adoptTasks.removeValue(forKey: submission.messageID)?.value
-        await persistenceTask?.value
+        await transcriptWriter.drain()
         if let photo = submission.photo {
             guard let row = messages.first(where: { $0.id == submission.messageID }),
                   row.imageFile != nil, await transcriptStore.save([row]) else {

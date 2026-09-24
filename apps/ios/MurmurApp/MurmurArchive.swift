@@ -16,7 +16,7 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
     @Published private(set) var dayIndex: [MurmurTranscriptDay] = []
     @Published private(set) var storageFailure: String?
     private var hasInitialRows = false
-    private var persistenceTask: Task<Void, Never>?
+    private let writer = MurmurSerialWriter()
     private var clearing = false
     private var storageGeneration = 0
     private var pendingPhotoRows: [String: (MurmurMessage, URL)] = [:]
@@ -66,7 +66,10 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
     /// How many photos that day carried.  The count the calendar's day row
     /// shows — rows without a picture are the talk about one, not another one.
     func photoCount(on day: Date) -> Int {
-        dayIndex.first(where: { calendar.isDate($0.date, inSameDayAs: day) })?.photos ?? rows(on: day).count { $0.imageFile != nil }
+        if let indexed = dayIndex.first(where: { calendar.isDate($0.date, inSameDayAs: day) }) {
+            return indexed.photos
+        }
+        return rows(on: day).count { $0.imageFile != nil }
     }
 
     /// The most recent days that have anything on them, newest first.
@@ -104,7 +107,9 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
         if earlier {
             var seen = Set<String>()
             rows = Array((page + rows).filter { seen.insert($0.id).inserted }.prefix(400))
-        } else { rows = page }
+        } else {
+            rows = page
+        }
     }
 
     // ---- Writing -------------------------------------------------------------
@@ -112,7 +117,7 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
     func record(_ message: MurmurMessage, photoURL: URL?) async {
         guard !clearing else { return }
         let generation = storageGeneration
-        await persistenceTask?.value
+        await writer.drain()
         guard generation == storageGeneration else { return }
         var row = message
         if let photoURL {
@@ -121,7 +126,9 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
             if row.imageFile == nil {
                 pendingPhotoRows[row.id] = (message, photoURL)
                 storageFailure = await store.lastError
-            } else { pendingPhotoRows.removeValue(forKey: row.id) }
+            } else {
+                pendingPhotoRows.removeValue(forKey: row.id)
+            }
         }
         guard generation == storageGeneration else { return }
         // A row with neither words nor a picture is an empty bubble; the copy
@@ -154,10 +161,10 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
     func withdraw(_ messageID: String) {
         guard rows.contains(where: { $0.id == messageID }) else { return }
         rows.removeAll { $0.id == messageID }
-        let previous = persistenceTask
-        persistenceTask = Task {
-            await previous?.value
-            if !(await store.remove(id: messageID)) { storageFailure = await store.lastError }
+        writer.enqueue { [self, store] in
+            if !(await store.remove(id: messageID)) {
+                storageFailure = await store.lastError
+            }
             dayIndex = await store.days(archive: true)
         }
     }
@@ -166,9 +173,15 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
         clearing = true
         storageGeneration += 1
         defer { clearing = false }
-        await persistenceTask?.value
-        if await store.clear() { rows = []; dayIndex = []; storageFailure = nil; pendingPhotoRows = [:] }
-        else { storageFailure = await store.lastError }
+        await writer.drain()
+        if await store.clear() {
+            rows = []
+            dayIndex = []
+            storageFailure = nil
+            pendingPhotoRows = [:]
+        } else {
+            storageFailure = await store.lastError
+        }
     }
 
     func retryStorage() async {
@@ -179,23 +192,27 @@ final class MurmurArchive: ObservableObject, MurmurRoomRecorder {
                 return
             }
             row.imageFile = image
-            guard await store.save([row]) else { storageFailure = await store.lastError; return }
-            rows.removeAll { $0.id == id }; rows.append(row)
+            guard await store.save([row]) else {
+                storageFailure = await store.lastError
+                return
+            }
+            rows.removeAll { $0.id == id }
+            rows.append(row)
             pendingPhotoRows.removeValue(forKey: id)
         }
         persist()
-        await persistenceTask?.value
+        await writer.drain()
     }
 
     private func persist() {
         guard !clearing else { return }
         let snapshot = rows
-        let previous = persistenceTask
-        persistenceTask = Task { [store] in
-            await previous?.value
-            let saved = await store.save(snapshot)
-            if !saved { storageFailure = await store.lastError }
-            else if pendingPhotoRows.isEmpty { storageFailure = nil }
+        writer.enqueue { [self, store] in
+            if await store.save(snapshot) {
+                if pendingPhotoRows.isEmpty { storageFailure = nil }
+            } else {
+                storageFailure = await store.lastError
+            }
             dayIndex = await store.days(archive: true)
         }
     }

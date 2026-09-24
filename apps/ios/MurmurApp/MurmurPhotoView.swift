@@ -224,7 +224,7 @@ struct MurmurPhotoLightbox: View {
                 } else if value.translation.height > 120 || value.predictedEndTranslation.height > 420 {
                     dismiss()
                 } else {
-                    withAnimation(reduceMotion ? nil : MurmurMotion.photo) {
+                    withAnimation(reduceMotion ? nil : MurmurMotion.content) {
                         offset = .zero
                     }
                 }
@@ -232,7 +232,7 @@ struct MurmurPhotoLightbox: View {
     }
 
     private func toggleZoom() {
-        withAnimation(reduceMotion ? nil : MurmurMotion.photo) {
+        withAnimation(reduceMotion ? nil : MurmurMotion.content) {
             if isZoomed {
                 reset()
             } else {

@@ -94,7 +94,6 @@ private struct SendFailureMark: View {
                 .buttonStyle(.automatic)
                 .accessibilityLabel("重新发送")
                 .accessibilityIdentifier("resend-moment")
-
         } else {
             // Nothing to press, and the row's own label already says it
             // failed — a second stop that only reads "感叹号" is noise.
@@ -173,7 +172,7 @@ private struct MessageRow: View {
                     if let sendFailure {
                         SendFailureMark(
                             failure: sendFailure,
-                                                        onAsk: onAsk
+                            onAsk: onAsk
                         )
                     }
                     VStack(alignment: isOutgoing ? .trailing : .leading, spacing: 7) {
@@ -376,222 +375,222 @@ struct MurmurTranscriptView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-        ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    if !model.visibleMessages.isEmpty {
-                        Button { Task { await model.loadHistory(earlier: true) } } label: { Text("载入更早的记录").frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle()) }
-                            .font(.footnote).foregroundStyle(MurmurTheme.accentInk).frame(minHeight:44)
-                            .disabled(model.loadingHistory).accessibilityIdentifier("chat-load-earlier")
-                    }
-                    // Not until the scrollback has been read back: that read
-                    // is asynchronous, and shown before it lands the opening
-                    // line is a screen-high view that the history then has to
-                    // shove out of the way — the first thing the app showed
-                    // was the wrong screen collapsing.
-                    if model.visibleMessages.isEmpty && !showsTyping && model.transcriptRestored {
-                        EmptyTranscript()
-                            // The transcript hangs from the bottom edge, so the
-                            // opening line needs a screen of its own to sit in
-                            // the middle of rather than crowding the composer.
-                            .containerRelativeFrame(.vertical)
-                    }
-                    ForEach(Array(model.visibleMessages.enumerated()), id: \.element.id) { index, message in
-                        if needsSeparator(at: index) {
-                            DaySeparator(date: message.sentAt)
+            ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if !model.visibleMessages.isEmpty {
+                            Button { Task { await model.loadHistory(earlier: true) } } label: { Text("载入更早的记录").frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle()) }
+                                .font(.footnote).foregroundStyle(MurmurTheme.accentInk).frame(minHeight:44)
+                                .disabled(model.loadingHistory).accessibilityIdentifier("chat-load-earlier")
                         }
-                        MessageRow(
-                            message: message,
-                            imageURL: message.imageFile.map { model.transcriptStore.imageURL(for: $0) },
-                            sendFailure: sendFailure(for: message),
-                            identifier: "murmur-message-\(index)",
-                            onOpenImage: onOpenImage,
-                            onAsk: {
-                                question = .init(
-                                    id: message.id,
-                                    reason: sendFailure(for: message)?.message ?? ""
-                                )
-                            },
-                            musicPlayback: message.musicTrack.map(nowPlaying.playback) ?? .stopped,
-                            onPlayMusic: onPlayMusic,
-                            onListenTogether: onListenTogether,
-                            listenTogetherRoom: listenTogetherRoom
-                        )
-                        .id(message.id)
-                        .background {
-                            GeometryReader { geometry in
-                                Color.clear.preference(key: ChatDateFrames.self, value: [message.id: geometry.frame(in: .named(Self.anchorSpace)).minY])
+                        // Not until the scrollback has been read back: that read
+                        // is asynchronous, and shown before it lands the opening
+                        // line is a screen-high view that the history then has to
+                        // shove out of the way — the first thing the app showed
+                        // was the wrong screen collapsing.
+                        if model.visibleMessages.isEmpty && !showsTyping && model.transcriptRestored {
+                            EmptyTranscript()
+                                // The transcript hangs from the bottom edge, so the
+                                // opening line needs a screen of its own to sit in
+                                // the middle of rather than crowding the composer.
+                                .containerRelativeFrame(.vertical)
+                        }
+                        ForEach(Array(model.visibleMessages.enumerated()), id: \.element.id) { index, message in
+                            if needsSeparator(at: index) {
+                                DaySeparator(date: message.sentAt)
+                            }
+                            MessageRow(
+                                message: message,
+                                imageURL: message.imageFile.map { model.transcriptStore.imageURL(for: $0) },
+                                sendFailure: sendFailure(for: message),
+                                identifier: "murmur-message-\(index)",
+                                onOpenImage: onOpenImage,
+                                onAsk: {
+                                    question = .init(
+                                        id: message.id,
+                                        reason: sendFailure(for: message)?.message ?? ""
+                                    )
+                                },
+                                musicPlayback: message.musicTrack.map(nowPlaying.playback) ?? .stopped,
+                                onPlayMusic: onPlayMusic,
+                                onListenTogether: onListenTogether,
+                                listenTogetherRoom: listenTogetherRoom
+                            )
+                            .id(message.id)
+                            .background {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(key: ChatDateFrames.self, value: [message.id: geometry.frame(in: .named(Self.anchorSpace)).minY])
+                                }
                             }
                         }
-                    }
-                    if model.historyPage != nil {
-                        Button { Task { await model.loadHistory(earlier: false) } } label: { Text("载入后面的记录").frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle()) }
-                            .font(.footnote).foregroundStyle(MurmurTheme.accentInk).frame(minHeight:44).disabled(model.loadingHistory)
-                    }
-                    if showsTyping && model.historyPage == nil {
-                        HStack {
-                            TypingIndicator()
-                            Spacer(minLength: 56)
+                        if model.historyPage != nil {
+                            Button { Task { await model.loadHistory(earlier: false) } } label: { Text("载入后面的记录").frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle()) }
+                                .font(.footnote).foregroundStyle(MurmurTheme.accentInk).frame(minHeight:44).disabled(model.loadingHistory)
                         }
-                        .id(Self.typingAnchor)
+                        if showsTyping && model.historyPage == nil {
+                            HStack {
+                                TypingIndicator()
+                                Spacer(minLength: 56)
+                            }
+                            .id(Self.typingAnchor)
+                            .transition(.opacity)
+                        }
+                        Color.clear.frame(height: 1).id(Self.bottomAnchor)
+                    }
+                    .frame(maxWidth: MurmurTheme.contentWidth)
+                    .padding(.horizontal, MurmurTheme.pageInset)
+                    .padding(.top, 8)
+                    .padding(.bottom, 12)
+                    .frame(maxWidth: .infinity)
+                }
+                .scrollPosition($scrollPosition)
+                .onPreferenceChange(ChatDateFrames.self) { frames in
+                    let top = frames.filter { $0.value <= 0 }.max { $0.value < $1.value }
+                        ?? frames.min { $0.value < $1.value }
+                    if let id = top?.key, let row = model.visibleMessages.first(where: { $0.id == id }),
+                       !Calendar.current.isDate(model.readingDate, inSameDayAs: row.sentAt) {
+                        model.readingDate = row.sentAt
+                    }
+                }
+                .onChange(of: model.navigationRevision) { _, _ in
+                    if let target = model.historyTarget {
+                        isAtBottom = false
+                        proxy.scrollTo(target, anchor: .top)
+                    } else { isAtBottom = true; scrollToBottom(settling: true) }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if model.historyPage != nil || !isAtBottom {
+                        Button { model.returnToLatest() } label: {
+                            Label("回到最新", systemImage: "arrow.down")
+                                .font(.footnote.weight(.medium))
+                                .padding(.horizontal, 14)
+                                .frame(minHeight: 44)
+                                .background(MurmurTheme.raisedPaper, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(MurmurTheme.accentInk)
+                        .padding(.trailing, 16)
+                        .padding(.bottom, 8)
                         .transition(.opacity)
+                        .accessibilityIdentifier("chat-return-latest")
                     }
-                    Color.clear.frame(height: 1).id(Self.bottomAnchor)
                 }
-                .frame(maxWidth: MurmurTheme.contentWidth)
-                .padding(.horizontal, MurmurTheme.pageInset)
-                .padding(.top, 8)
-                .padding(.bottom, 12)
-                .frame(maxWidth: .infinity)
-            }
-            .scrollPosition($scrollPosition)
-            .onPreferenceChange(ChatDateFrames.self) { frames in
-                let top = frames.filter { $0.value <= 0 }.max { $0.value < $1.value }
-                    ?? frames.min { $0.value < $1.value }
-                if let id = top?.key, let row = model.visibleMessages.first(where: { $0.id == id }),
-                   !Calendar.current.isDate(model.readingDate, inSameDayAs: row.sentAt) {
-                    model.readingDate = row.sentAt
-                }
-            }
-            .onChange(of: model.navigationRevision) { _, _ in
-                if let target = model.historyTarget {
-                    isAtBottom = false
-                    proxy.scrollTo(target, anchor: .top)
-                } else { isAtBottom = true; scrollToBottom(settling: true) }
-            }
-            .overlay(alignment: .bottomTrailing) {
-                if model.historyPage != nil || !isAtBottom {
-                    Button { model.returnToLatest() } label: {
-                        Label("回到最新", systemImage: "arrow.down")
-                            .font(.footnote.weight(.medium))
-                            .padding(.horizontal, 14)
-                            .frame(minHeight: 44)
-                            .background(MurmurTheme.raisedPaper, in: Capsule())
+                .animation(reduceMotion ? nil : MurmurMotion.content, value: model.historyPage != nil || !isAtBottom)
+                // A chat grows downwards: pinning the anchor keeps the newest line
+                // against the composer when the keyboard changes the room's height,
+                // instead of leaving it hidden behind the keyboard.
+                .defaultScrollAnchor(.bottom)
+                // A helper, no longer the pillar: it keeps the newest line
+                // pinned through some resizes, but a keyboard on a phone resizes
+                // the view more than once — it arrives, then a Pinyin candidate
+                // bar appears above it, then a toolbar — and on this screen the
+                // pin demonstrably comes loose mid-flight.  The re-pin below is
+                // what carries the keyboard now; this stays because rotation and
+                // smaller content changes still land on it for free.
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                // Automatic scroll-to-bottom must not be interpreted as an
+                // interactive keyboard dismissal. The shared surface releases the
+                // composer's FocusState only for a tap or an intentional downward
+                // drag, while leaving this ScrollView's own gesture active.
+                .murmurKeyboardDismissSurface(
+                    isFocused: keyboardIsFocused,
+                    dismiss: onDismissKeyboard
+                )
+                // The one clock the rows move on — each row's entrance transition
+                // runs under this.  Nothing at all while the scrollback is still
+                // being read back: what is on disk was already there.  Softer than
+                // the spring it replaces, because that overshoot sat on top of a
+                // row that was fading in at the same time.
+                .animation(
+                    isRestoring || reduceMotion ? nil : MurmurMotion.content,
+                    value: model.visibleMessages.count
+                )
+                .animation(reduceMotion ? nil : MurmurMotion.content, value: showsTyping)
+                .onChange(of: model.visibleMessages.count) { _, _ in
+                    // The restore is not a journey: the newest line is simply
+                    // where the transcript opens.  Animating the way down there
+                    // put a second clock on the pixels the insertion was already
+                    // moving, and those two fighting is what jerked.
+                    guard !isRestoring else {
+                        pinToBottom()
+                        return
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(MurmurTheme.accentInk)
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 8)
-                    .transition(.opacity)
-                    .accessibilityIdentifier("chat-return-latest")
+                    if isAtBottom && model.historyPage == nil { scrollToBottom() }
                 }
-            }
-            .animation(reduceMotion ? nil : MurmurMotion.content, value: model.historyPage != nil || !isAtBottom)
-            // A chat grows downwards: pinning the anchor keeps the newest line
-            // against the composer when the keyboard changes the room's height,
-            // instead of leaving it hidden behind the keyboard.
-            .defaultScrollAnchor(.bottom)
-            // A helper, no longer the pillar: it keeps the newest line
-            // pinned through some resizes, but a keyboard on a phone resizes
-            // the view more than once — it arrives, then a Pinyin candidate
-            // bar appears above it, then a toolbar — and on this screen the
-            // pin demonstrably comes loose mid-flight.  The re-pin below is
-            // what carries the keyboard now; this stays because rotation and
-            // smaller content changes still land on it for free.
-            .defaultScrollAnchor(.bottom, for: .sizeChanges)
-            // Automatic scroll-to-bottom must not be interpreted as an
-            // interactive keyboard dismissal. The shared surface releases the
-            // composer's FocusState only for a tap or an intentional downward
-            // drag, while leaving this ScrollView's own gesture active.
-            .murmurKeyboardDismissSurface(
-                isFocused: keyboardIsFocused,
-                dismiss: onDismissKeyboard
-            )
-            // The one clock the rows move on — each row's entrance transition
-            // runs under this.  Nothing at all while the scrollback is still
-            // being read back: what is on disk was already there.  Softer than
-            // the spring it replaces, because that overshoot sat on top of a
-            // row that was fading in at the same time.
-            .animation(
-                isRestoring || reduceMotion ? nil : MurmurMotion.content,
-                value: model.visibleMessages.count
-            )
-            .animation(reduceMotion ? nil : MurmurMotion.content, value: showsTyping)
-            .onChange(of: model.visibleMessages.count) { _, _ in
-                // The restore is not a journey: the newest line is simply
-                // where the transcript opens.  Animating the way down there
-                // put a second clock on the pixels the insertion was already
-                // moving, and those two fighting is what jerked.
-                guard !isRestoring else {
+                .onChange(of: showsTyping) { _, _ in scrollToBottom() }
+                // One signal, one animation.  The re-pin below already carries
+                // the conversation along as the keyboard changes the room, in
+                // step with the keyboard's own clock; the only thing it cannot
+                // do is come back from history, which is what this is for.
+                // Chasing the keyboard with extra timed scrolls on top of that
+                // is what made the motion stutter.
+                .onChange(of: focusPulse) { _, _ in
+                    if model.historyPage != nil {
+                        model.returnToLatest()
+                        return
+                    }
+                    isAtBottom = true
+                    scrollToBottom(settling: true)
+                }
+                // The bottom anchor pins the newest line while the keyboard
+                // changes the room's height — when it works.  On a phone the
+                // resize reaches the scroll view late, piecemeal, or not at all,
+                // and the line is left hanging over a band of bare paper the
+                // height of the keyboard that just left.  So the transcript keeps
+                // its own books: any geometry change that finds the window off
+                // the end it was resting on — while no finger owns the scroll
+                // view — walks the window back to the newest line, in the same
+                // display pass the resize arrived in.  That is what keeps the
+                // motion on the keyboard's own clock.
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.contentSize.height
+                        + geometry.contentInsets.bottom
+                        - geometry.contentOffset.y
+                        - geometry.containerSize.height
+                } action: { _, distanceFromBottom in
+    #if DEBUG
+                    MurmurDiagnostics.record("scroll dist=\(String(format: "%.1f", distanceFromBottom)) phase=\(scrollPhase) atBottom=\(isAtBottom)")
+    #endif
+                    repin(distanceFromBottom: distanceFromBottom)
+                }
+                .onScrollPhaseChange { _, phase in
+                    scrollPhase = phase
+                }
+                // Going live: one turn after the restored rows commit.  The pass
+                // that puts them on screen is the pass that must not animate, and
+                // a hop through the main actor lands after it — so the restore is
+                // silent and the very next thing to arrive is not.
+                .onChange(of: model.transcriptRestored, initial: true) { _, restored in
+                    guard restored, isRestoring else { return }
+                    // On a tab return restoration already finished before this view
+                    // existed. Reassert the retained edge before ending the silent
+                    // restore pass so later inset measurements cannot strand it.
                     pinToBottom()
-                    return
+                    Task { @MainActor in isRestoring = false }
                 }
-                if isAtBottom && model.historyPage == nil { scrollToBottom() }
-            }
-            .onChange(of: showsTyping) { _, _ in scrollToBottom() }
-            // One signal, one animation.  The re-pin below already carries
-            // the conversation along as the keyboard changes the room, in
-            // step with the keyboard's own clock; the only thing it cannot
-            // do is come back from history, which is what this is for.
-            // Chasing the keyboard with extra timed scrolls on top of that
-            // is what made the motion stutter.
-            .onChange(of: focusPulse) { _, _ in
-                if model.historyPage != nil {
-                    model.returnToLatest()
-                    return
+                .onAppear {
+    #if DEBUG
+                    MurmurDiagnostics.startRecordingKeyboard()
+    #endif
                 }
-                isAtBottom = true
-                scrollToBottom(settling: true)
+                .onChange(of: focusPulse) { _, _ in
+    #if DEBUG
+                    MurmurDiagnostics.record("tapped field")
+    #endif
+                }
+            .coordinateSpace(.named(Self.anchorSpace))
+            .confirmationDialog(
+                "重新发送这条消息？",
+                isPresented: Binding(get: { question != nil }, set: { if !$0 { question = nil } }),
+                titleVisibility: .visible,
+                presenting: question
+            ) { prompt in
+                Button("重新发送") { model.resend(prompt.id); question = nil }
+                    .accessibilityIdentifier("confirm-resend")
+                Button("取消", role: .cancel) { question = nil }
+            } message: { prompt in
+                Text(prompt.reason)
             }
-            // The bottom anchor pins the newest line while the keyboard
-            // changes the room's height — when it works.  On a phone the
-            // resize reaches the scroll view late, piecemeal, or not at all,
-            // and the line is left hanging over a band of bare paper the
-            // height of the keyboard that just left.  So the transcript keeps
-            // its own books: any geometry change that finds the window off
-            // the end it was resting on — while no finger owns the scroll
-            // view — walks the window back to the newest line, in the same
-            // display pass the resize arrived in.  That is what keeps the
-            // motion on the keyboard's own clock.
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                geometry.contentSize.height
-                    + geometry.contentInsets.bottom
-                    - geometry.contentOffset.y
-                    - geometry.containerSize.height
-            } action: { _, distanceFromBottom in
-#if DEBUG
-                MurmurDiagnostics.record("scroll dist=\(String(format: "%.1f", distanceFromBottom)) phase=\(scrollPhase) atBottom=\(isAtBottom)")
-#endif
-                repin(distanceFromBottom: distanceFromBottom)
-            }
-            .onScrollPhaseChange { _, phase in
-                scrollPhase = phase
-            }
-            // Going live: one turn after the restored rows commit.  The pass
-            // that puts them on screen is the pass that must not animate, and
-            // a hop through the main actor lands after it — so the restore is
-            // silent and the very next thing to arrive is not.
-            .onChange(of: model.transcriptRestored, initial: true) { _, restored in
-                guard restored, isRestoring else { return }
-                // On a tab return restoration already finished before this view
-                // existed. Reassert the retained edge before ending the silent
-                // restore pass so later inset measurements cannot strand it.
-                pinToBottom()
-                Task { @MainActor in isRestoring = false }
-            }
-            .onAppear {
-#if DEBUG
-                MurmurDiagnostics.startRecordingKeyboard()
-#endif
-            }
-            .onChange(of: focusPulse) { _, _ in
-#if DEBUG
-                MurmurDiagnostics.record("tapped field")
-#endif
-            }
-        .coordinateSpace(.named(Self.anchorSpace))
-        .confirmationDialog(
-            "重新发送这条消息？",
-            isPresented: Binding(get: { question != nil }, set: { if !$0 { question = nil } }),
-            titleVisibility: .visible,
-            presenting: question
-        ) { prompt in
-            Button("重新发送") { model.resend(prompt.id); question = nil }
-                .accessibilityIdentifier("confirm-resend")
-            Button("取消", role: .cancel) { question = nil }
-        } message: { prompt in
-            Text(prompt.reason)
         }
-    }
     }
 
     private static let bottomAnchor = "murmur-transcript-bottom"

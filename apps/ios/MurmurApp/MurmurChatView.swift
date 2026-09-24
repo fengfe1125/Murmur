@@ -1137,7 +1137,6 @@ private struct DraftFailureLine: View {
 /// Brief content changes; system navigation and keyboard own their motion.
 enum MurmurMotion {
     static let content = Animation.easeOut(duration: 0.15)
-    static let photo = Animation.easeOut(duration: 0.15)
 }
 
 private struct CameraPicker: UIViewControllerRepresentable {
