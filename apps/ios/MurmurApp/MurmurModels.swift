@@ -301,9 +301,6 @@ extension MurmurStreamEvent {
 }
 
 protocol MurmurAPIClient: Sendable {
-    func dailyReviews(_ request: MurmurReviewRequest) async throws -> Data
-    func createMoment(note: String?, photo: PhotoAttachment?, musicTrack: MusicTrackAttachmentV1?, idempotencyKey: String, intent: MurmurMomentIntent?, contextMomentIDs: [String], dailyQuestionDay: String?) async throws -> MomentReceipt
-
     func storedIdentity() async throws -> MurmurIdentity?
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity
     func createMoment(
@@ -358,15 +355,6 @@ protocol MurmurAPIClient: Sendable {
 }
 
 extension MurmurAPIClient {
-    func dailyReviews(_ request: MurmurReviewRequest) async throws -> Data {
-        if case .configuration = request.operation { return Data("{\"available\":false}".utf8) }
-        throw MurmurFailure(code: "not_found", message: "每日回顾尚未开启。", retryable: false)
-    }
-    func createMoment(note: String?, photo: PhotoAttachment?, musicTrack: MusicTrackAttachmentV1?, idempotencyKey: String, intent: MurmurMomentIntent?, contextMomentIDs: [String], dailyQuestionDay: String?) async throws -> MomentReceipt {
-        guard dailyQuestionDay == nil else { throw MurmurFailure(code: "unsupported", message: "当前服务不支持回答每日问题。", retryable: false) }
-        return try await createMoment(note:note,photo:photo,musicTrack:musicTrack,idempotencyKey:idempotencyKey,intent:intent,contextMomentIDs:contextMomentIDs)
-    }
-
     /// Old test doubles and offline clients stay safely feature-off until they
     /// opt into the authenticated server capability.
     func musicAvailability() async throws -> MusicFeatureAvailability {

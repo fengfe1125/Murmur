@@ -17,6 +17,10 @@ struct OnThisDayTabView: View {
 
     private let calendar = Calendar.murmur
 
+    private var archiveDays: Set<String> {
+        Set(archive.daysWithRooms.map { MurmurDay.key($0) })
+    }
+
     init(model: MurmurSessionModel, onThisDay: OnThisDayModel) {
         _model = ObservedObject(wrappedValue: model)
         _onThisDay = ObservedObject(wrappedValue: onThisDay)
@@ -36,9 +40,9 @@ struct OnThisDayTabView: View {
                         .accessibilityAddTraits(.isHeader)
                     MurmurNativeCalendar(
                         selected: $selectedDay,
-                        chatDays: Set(archive.daysWithRooms.map { MurmurDay.key($0) }),
-                        reviewDays: [],
-                        selectableDays: Set(archive.daysWithRooms.map { MurmurDay.key($0) })
+                        markedDays: archiveDays,
+                        markLabel: "有照片房间存档",
+                        selectableDays: archiveDays
                     )
                     .frame(maxWidth: 420)
                     .frame(maxWidth: .infinity)

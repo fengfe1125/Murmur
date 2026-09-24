@@ -26,27 +26,6 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         self.session = URLSession(configuration: configuration)
     }
 
-    func dailyReviews(_ payload: MurmurReviewRequest) async throws -> Data {
-        try await reviewRequest(path: payload.path, method: payload.method, body: payload.body)
-    }
-
-    private func reviewRequest(path: String, method: String, body: Data) async throws -> Data {
-        let parts = path.split(separator:"?",maxSplits:1).map(String.init)
-        await protectedRequestGate.acquire()
-        do {
-            var request = try await authorizedRequest(path:parts[0],method:method,bodyDigest:Data(SHA256.hash(data:body)))
-            if parts.count == 2, let original = request.url, var components = URLComponents(url:original,resolvingAgainstBaseURL:false) {
-                components.percentEncodedQuery = parts[1]; request.url = components.url
-            }
-            request.httpBody = body.isEmpty ? nil : body
-            request.setValue("application/json",forHTTPHeaderField:"Content-Type")
-            let (data,response) = try await session.data(for:request)
-            try validate(response:response,data:data,expected:200..<300)
-            await protectedRequestGate.release()
-            return data
-        } catch { await protectedRequestGate.release(); throw error }
-    }
-
     func storedIdentity() async throws -> MurmurIdentity? {
         try await authenticator.storedIdentity()
     }
@@ -122,10 +101,6 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         intent: MurmurMomentIntent?,
         contextMomentIDs: [String]
     ) async throws -> MomentReceipt {
-        try await createMoment(note:note,photo:photo,musicTrack:musicTrack,idempotencyKey:idempotencyKey,intent:intent,contextMomentIDs:contextMomentIDs,dailyQuestionDay:nil)
-    }
-
-    func createMoment(note: String?, photo: PhotoAttachment?, musicTrack: MusicTrackAttachmentV1?, idempotencyKey: String, intent: MurmurMomentIntent?, contextMomentIDs: [String], dailyQuestionDay: String?) async throws -> MomentReceipt {
         let boundary = "Murmur-\(UUID().uuidString)"
         let bodyURL = try makeMultipartBody(
             boundary: boundary,
@@ -134,8 +109,7 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             musicTrack: musicTrack,
             idempotencyKey: idempotencyKey,
             intent: intent,
-            contextMomentIDs: contextMomentIDs,
-            dailyQuestionDay: dailyQuestionDay
+            contextMomentIDs: contextMomentIDs
         )
         defer { try? FileManager.default.removeItem(at: bodyURL) }
         let digest = try sha256(fileURL: bodyURL)
@@ -669,8 +643,7 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         musicTrack: MusicTrackAttachmentV1? = nil,
         idempotencyKey: String,
         intent: MurmurMomentIntent?,
-        contextMomentIDs: [String],
-        dailyQuestionDay: String? = nil
+        contextMomentIDs: [String]
     ) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("murmur-multipart-\(UUID().uuidString)")
@@ -691,7 +664,6 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             try write("\(value)\r\n")
         }
         try field("idempotency_key", idempotencyKey)
-        if let dailyQuestionDay { try field("daily_question_day", dailyQuestionDay) }
         if let intent { try field("intent", intent.rawValue) }
         if !contextMomentIDs.isEmpty {
             let encoded = try JSONEncoder().encode(contextMomentIDs)

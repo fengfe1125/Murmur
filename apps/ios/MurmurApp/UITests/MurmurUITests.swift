@@ -32,90 +32,39 @@ final class MurmurUITests: XCTestCase {
         print("DiaryQA screenshot: \(url.path)")
     }
 
-    func testDailyReviewAccessibilityLabelsAndTargets() throws {
+    func testChatCalendarPassesAccessibilityAudit() throws {
         continueAfterFailure = false
-        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-diary"])
-        XCTAssertTrue(app.buttons["daily-review-entry"].waitForExistence(timeout: 10))
+        let app = launchApp(arguments: ["--murmur-seed-dated-chat"])
+        XCTAssertTrue(app.buttons["chat-calendar"].waitForExistence(timeout: 10))
         try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .trait])
         app.buttons["chat-calendar"].tap()
         XCTAssertTrue(app.buttons["完成"].waitForExistence(timeout: 5))
         try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .trait])
-        app.buttons["完成"].tap()
-        app.buttons["daily-review-entry"].tap()
-        XCTAssertTrue(app.buttons["answer-daily-question"].waitForExistence(timeout: 20))
-        try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .trait])
-    }
-
-    func testDailyReviewQuestionAndMemoryCorrection() throws {
-        continueAfterFailure = false
-        let app = launchApp(arguments:["--murmur-stub-diary","--murmur-seed-diary"])
-        XCTAssertTrue(app.buttons["daily-review-entry"].waitForExistence(timeout:10))
-        app.buttons["daily-review-entry"].tap()
-        XCTAssertTrue(app.buttons["answer-daily-question"].waitForExistence(timeout:20))
-        try captureDiaryScreenshot(app, name: "Daily review · Light")
-        app.buttons["answer-daily-question"].tap()
-        XCTAssertTrue(app.staticTexts["如果周末留出一段散步时间，你最需要先安排好什么？"].waitForExistence(timeout:5))
-        XCTAssertTrue(app.textFields["moment-composer"].exists)
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-        let dateHeader = settled(app.buttons["chat-calendar"])
-        if app.statusBars.firstMatch.exists {
-            XCTAssertGreaterThanOrEqual(dateHeader.frame.minY, app.statusBars.firstMatch.frame.maxY - 1)
-        }
-        try captureDiaryScreenshot(app, name: "Question context · Keyboard")
-        enterMoment(app.textFields["moment-composer"], "星期六上午")
-        app.buttons["send-moment"].tap()
-        XCTAssertTrue(line("已接上这一天的问题。", in: app).waitForExistence(timeout: 5))
-        app.buttons["daily-review-entry"].tap()
-        let memory = app.buttons.containing(.staticText,identifier:"查看来源与纠正  ›").firstMatch
-        if !memory.isHittable { app.scrollViews.firstMatch.swipeUp() }
-        XCTAssertTrue(memory.waitForExistence(timeout:5)); memory.tap()
-        XCTAssertTrue(app.textFields["memory-editor"].exists || app.textViews["memory-editor"].exists)
-        let editor = app.textFields["memory-editor"]
-        editor.tap(); editor.typeText(" 我更愿意在晴天去。")
-        app.buttons["memory-save"].tap()
-        XCTAssertTrue(app.staticTexts["memory-result"].waitForExistence(timeout:5))
-        try captureDiaryScreenshot(app, name: "Memory · Corrected")
     }
 
     func testChatCalendarJumpsAndReturnsToLatest() throws {
         continueAfterFailure = false
-        let app = launchApp(arguments:["--murmur-stub-diary","--murmur-seed-diary"])
-        XCTAssertTrue(app.buttons["chat-calendar"].waitForExistence(timeout:10))
+        let app = launchApp(arguments: ["--murmur-seed-dated-chat"])
+        XCTAssertTrue(app.buttons["chat-calendar"].waitForExistence(timeout: 10))
         app.buttons["chat-calendar"].tap()
         let cell = nativeCalendarDay(in: app, daysAgo: 1)
         if !cell.exists { app.buttons["DatePicker.PreviousMonth"].firstMatch.tap() }
-        XCTAssertTrue(cell.waitForExistence(timeout:5)); cell.tap()
+        XCTAssertTrue(cell.waitForExistence(timeout: 5))
+        cell.tap()
         try captureDiaryScreenshot(app, name: "Calendar · Selected day")
         app.buttons["chat-jump-date"].tap()
-        XCTAssertTrue(app.staticTexts["你说：昨天整理了旅行照片。"].waitForExistence(timeout:5))
+        XCTAssertTrue(app.staticTexts["你说：昨天整理了旅行照片。"].waitForExistence(timeout: 5))
         try captureDiaryScreenshot(app, name: "Chat · Historical date")
         app.buttons["chat-return-latest"].tap()
-        XCTAssertTrue(app.staticTexts["Murmur 说：开始的时间还没有确定。"].waitForExistence(timeout:5))
+        XCTAssertTrue(app.staticTexts["Murmur 说：开始的时间还没有确定。"].waitForExistence(timeout: 5))
     }
 
-    func testDailyReviewDarkLargeTextAndForget() throws {
+    func testChatCalendarLandscapeAccessibility() throws {
         continueAfterFailure = false
-        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-diary", "--murmur-ui-test-dark", "--murmur-ui-test-large-type", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])
-        XCTAssertTrue(app.buttons["daily-review-entry"].waitForExistence(timeout: 10))
-        app.buttons["daily-review-entry"].tap()
-        XCTAssertTrue(app.staticTexts["daily-review-title"].waitForExistence(timeout: 20))
-        try captureDiaryScreenshot(app, name: "Daily review · Dark XXXL")
-        let memory = app.buttons.containing(.staticText, identifier: "查看来源与纠正  ›").firstMatch
-        for _ in 0..<8 where !memory.isHittable { app.scrollViews.firstMatch.swipeUp() }
-        XCTAssertTrue(memory.isHittable); memory.tap()
-        let forget = app.buttons["memory-forget"]
-        for _ in 0..<8 where !forget.isHittable { app.scrollViews.firstMatch.swipeUp() }
-        XCTAssertTrue(forget.isHittable); forget.tap()
-        app.buttons["memory-forget-confirm"].firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["memory-result"].waitForExistence(timeout: 5))
-        try captureDiaryScreenshot(app, name: "Memory · Forgotten")
-    }
-
-    func testDailyReviewLandscapeAndCalendarAccessibility() throws {
-        continueAfterFailure = false
-        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-diary"])
+        let app = launchApp(arguments: ["--murmur-seed-dated-chat"])
         let date = app.buttons["chat-calendar"]
-        XCTAssertTrue(date.waitForExistence(timeout: 10)); XCTAssertEqual(date.label, "查看日期日历")
+        XCTAssertTrue(date.waitForExistence(timeout: 10))
+        XCTAssertEqual(date.label, "查看日期日历")
         XCUIDevice.shared.orientation = .landscapeLeft
         defer { XCUIDevice.shared.orientation = .portrait }
         let landscape = NSPredicate { _, _ in
@@ -128,11 +77,6 @@ final class MurmurUITests: XCTestCase {
         XCTAssertTrue(app.buttons["DatePicker.NextMonth"].firstMatch.isHittable)
         XCTAssertLessThanOrEqual(app.buttons["DatePicker.NextMonth"].firstMatch.frame.maxX, app.windows.firstMatch.frame.maxX)
         try captureDiaryScreenshot(app, name: "Calendar · Landscape")
-        app.buttons["完成"].tap()
-        app.buttons["daily-review-entry"].tap()
-        let answer = app.buttons["answer-daily-question"]
-        for _ in 0..<5 where !answer.isHittable { app.scrollViews.firstMatch.swipeUp() }
-        XCTAssertTrue(answer.isHittable); assertMinimumHitArea(answer)
     }
 
     func testTheChatCardPausesAndSkipsWithoutLeavingTheConversation() throws {
@@ -1447,7 +1391,7 @@ final class MurmurUITests: XCTestCase {
     }
 
     func testNativeCalendarMarksAndSelectsRecordedDate() throws {
-        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-diary"])
+        let app = launchApp(arguments: ["--murmur-seed-dated-chat"])
         XCTAssertTrue(app.buttons["chat-calendar"].waitForExistence(timeout: 10))
         app.buttons["chat-calendar"].tap()
         let day = nativeCalendarDay(in: app, daysAgo: 1)

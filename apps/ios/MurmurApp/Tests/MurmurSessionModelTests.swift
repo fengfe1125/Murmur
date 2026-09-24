@@ -96,19 +96,18 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: store.imageURL(for: name)), bytes)
     }
 
-    func testSameTimestampPaginationPreservesOrderAndQuestionReference() async throws {
+    func testSameTimestampPaginationPreservesInsertionOrder() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = MurmurTranscriptStore(directory: directory)
         let date = Date(timeIntervalSince1970: 1_790_000_000)
-        let rows = ["z", "a", "b"].map { MurmurMessage(id: $0, author: .you, text: $0, sentAt: date, dailyQuestionDay: "2026-09-21") }
+        let rows = ["z", "a", "b"].map { MurmurMessage(id: $0, author: .you, text: $0, sentAt: date) }
         let saved = await store.save(rows)
         XCTAssertTrue(saved)
         let newest = await store.page(limit: 1)
         XCTAssertEqual(newest.first?.id, "b")
         let earlier = await store.page(before: newest.first, limit: 2)
         XCTAssertEqual(earlier.map(\.id), ["z", "a"])
-        XCTAssertEqual(earlier.first?.dailyQuestionDay, "2026-09-21")
     }
 
     func testInterruptedMigrationRollsBackBeforeRetry() async throws {

@@ -59,7 +59,7 @@ struct MurmurChatView: View {
                     onOpenTab: { selectTab(.listenTogether) }
                 )
             }
-            .modifier(MurmurReviewNavigation(session: model, reviews: model.reviews))
+            .modifier(MurmurChatNavigation(session: model))
             .background(MurmurTheme.paper.ignoresSafeArea())
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
@@ -391,7 +391,6 @@ private struct MomentWorkbench: View {
             } : nil,
             listenTogetherRoom: netease.room
         )
-            .onChange(of: model.questionContext) { _, context in if context != nil { composerFocused = true } }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     if model.draftPhoto != nil || model.isPreparingPhoto {
@@ -405,16 +404,6 @@ private struct MomentWorkbench: View {
                         .frame(maxWidth: MurmurTheme.contentWidth, alignment: .leading)
                         .padding(.horizontal, MurmurTheme.pageInset)
                         .padding(.top, 8)
-                    }
-                    if let context = model.questionContext {
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("回答 \(context.day) 的问题").font(.caption).foregroundStyle(MurmurTheme.secondaryInk)
-                                Text(context.question).font(.footnote).lineLimit(3)
-                            }
-                            Spacer()
-                            Button("取消", systemImage: "xmark") { model.questionContext = nil }.labelStyle(.iconOnly).frame(minWidth:44,minHeight:44)
-                        }.padding(12).background(MurmurTheme.raisedPaper).padding(.horizontal,20)
                     }
                     if let draftFailure = model.draftFailure {
                         DraftFailureLine(message: draftFailure)
@@ -731,8 +720,6 @@ struct MurmurSettingsView: View {
                 if music.isAvailable {
                     AudiusSection(music: music)
                 }
-
-                MurmurReviewSettingsEntry(reviews: model.reviews)
 
                 Section("设备") {
                     if !model.devicesLoaded {

@@ -1,5 +1,4 @@
 import Foundation
-import SwiftUI
 import UIKit
 
 @MainActor
@@ -69,8 +68,6 @@ final class MurmurSessionModel: ObservableObject {
         playbackReporting: false
     )
 
-    let reviews: MurmurReviewModel
-    @Published var questionContext: MurmurQuestionContext?
     let transcriptStore: MurmurTranscriptStore
     /// 当年今日's own history, kept apart from the conversation.  Owned here
     /// because this is what hands it to a room; 当年今日's tab reads the same
@@ -127,7 +124,6 @@ final class MurmurSessionModel: ObservableObject {
         bubblePacing: MurmurBubblePacing = .human
     ) {
         self.api = api
-        self.reviews = MurmurReviewModel(api: api)
         self.photoLoader = photoLoader
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.uploadTimeoutSeconds = uploadTimeoutSeconds
@@ -581,10 +577,9 @@ final class MurmurSessionModel: ObservableObject {
             text: note,
             sentAt: Date(),
             delivery: .sending,
-            idempotencyKey: key,
-            dailyQuestionDay: questionContext?.day
+            idempotencyKey: key
         )
-        var submission = Submission(
+        let submission = Submission(
             messageID: outgoing.id,
             note: note.isEmpty ? nil : note,
             photo: photo,
@@ -592,8 +587,6 @@ final class MurmurSessionModel: ObservableObject {
             idempotencyKey: key,
             replyToProactiveMomentID: note.isEmpty ? nil : proactiveMomentID
         )
-        submission.dailyQuestionDay = questionContext?.day
-        questionContext = nil
         draftText = ""
         draftPhoto = nil
         draftFailure = nil
@@ -695,8 +688,7 @@ final class MurmurSessionModel: ObservableObject {
                 photo: photo,
                 musicTrack: row.musicTrack,
                 idempotencyKey: row.idempotencyKey ?? UUID().uuidString.lowercased(),
-                replyToProactiveMomentID: nil,
-                dailyQuestionDay: row.dailyQuestionDay
+                replyToProactiveMomentID: nil
             ))
         }
     }
@@ -872,7 +864,6 @@ final class MurmurSessionModel: ObservableObject {
             try await api.deleteAccount()
             await clearTranscript()
             await archive.clear()
-            try reviews.reset()
             identity = nil
             devices = []
             connection = .needsEnrollment
@@ -886,7 +877,6 @@ final class MurmurSessionModel: ObservableObject {
         settingsMessage = nil
         do {
             try await api.resetLocalIdentity()
-            try reviews.reset()
             identity = nil
             devices = []
             requiresDeviceReconnect = false
@@ -987,9 +977,7 @@ final class MurmurSessionModel: ObservableObject {
                     photo: submission.photo,
                     musicTrack: submission.musicTrack,
                     idempotencyKey: submission.idempotencyKey,
-                    intent: nil,
-                    contextMomentIDs: [],
-                    dailyQuestionDay: submission.dailyQuestionDay
+                    intent: nil
                 )
             }
             try Task.checkCancellation()
@@ -1245,7 +1233,6 @@ private struct Submission: Sendable {
     let musicTrack: MusicTrackAttachmentV1?
     let idempotencyKey: String
     let replyToProactiveMomentID: String?
-    var dailyQuestionDay: String? = nil
 }
 
 private extension MurmurStreamEvent {
