@@ -812,8 +812,14 @@ struct MurmurSettingsView: View {
                 Section("聊天记录") {
                     Button("清空这一刻") { model.clearCurrent() }
                         .disabled(!model.hasCurrentMoment && model.draftPhoto == nil && model.draftText.isEmpty)
+                    // Also offered when the history could not be read: clearing
+                    // is the way out of a store that keeps failing.
                     Button("清空聊天记录", role: .destructive) { confirmClearTranscript = true }
-                        .disabled(model.messages.isEmpty)
+                        .disabled(
+                            model.messages.isEmpty
+                                && model.transcriptDays.isEmpty
+                                && model.storageFailure == nil
+                        )
                         .accessibilityIdentifier("clear-transcript")
                     Text("聊天记录连同其中的照片只存在这台设备上，删除 App 就一并消失。服务端保存的是私有记忆，不是对话本身。")
                         .font(.footnote)
@@ -825,7 +831,11 @@ struct MurmurSettingsView: View {
                 Section("当年今日") {
                     LabeledContent("留下的日子", value: "\(model.archive.daysWithRooms.count) 天")
                     Button("清空当年今日的记录", role: .destructive) { confirmClearArchive = true }
-                        .disabled(model.archive.rows.isEmpty)
+                        .disabled(
+                            model.archive.rows.isEmpty
+                                && model.archive.dayIndex.isEmpty
+                                && model.archive.storageFailure == nil
+                        )
                         .accessibilityIdentifier("clear-archive")
                     Text("照片房间记录独立保存在这台设备上。清空不会删除服务端记忆。")
                         .font(.footnote)

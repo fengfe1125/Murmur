@@ -199,9 +199,9 @@ actor MurmurTranscriptStore {
         }
     }
 
-    /// Opens the database for one piece of work.  The first open imports the
-    /// legacy JSON history before any work runs.
-    private func withDatabase<T>(_ work: (OpaquePointer) throws -> T) throws -> T {
+    /// Opens the database for one piece of work.  Unless told otherwise, the
+    /// first open imports the legacy JSON history before any work runs.
+    private func withDatabase<T>(migrating: Bool = true, _ work: (OpaquePointer) throws -> T) throws -> T {
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true,
@@ -215,7 +215,7 @@ actor MurmurTranscriptStore {
         defer { sqlite3_close(db) }
         sqlite3_busy_timeout(db, 5000)
         try execute(db, Self.schema)
-        if !migrated {
+        if migrating, !migrated {
             try importLegacyJSON(db)
             migrated = true
         }
@@ -230,8 +230,13 @@ actor MurmurTranscriptStore {
     }
 
     /// Moves `transcript.json` into the database, once.  Every row is read back
-    /// and compared before the marker is written; a failure rolls the import
-    /// back and leaves the JSON file where it was.
+    /// and compared before the marker is written.  A storage failure rolls the
+    /// import back and leaves the JSON file where it was, for the next open.
+    ///
+    /// Content problems do not block the store: rows repeated under one id
+    /// keep their last copy, and a file that does not decode — the old reader
+    /// showed an empty history for it — is set aside unread rather than
+    /// deleted, so the history can still be written to and cleared.
     private func importLegacyJSON(_ db: OpaquePointer) throws {
         let marker = try statement(db, "SELECT value FROM metadata WHERE key='json_migrated'")
         let done = sqlite3_step(marker) == SQLITE_ROW
@@ -239,10 +244,14 @@ actor MurmurTranscriptStore {
         guard !done else { return }
         var legacy: [MurmurMessage] = []
         if FileManager.default.fileExists(atPath: fileURL.path) {
+            let data = try Data(contentsOf: fileURL)
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            legacy = try decoder.decode([MurmurMessage].self, from: Data(contentsOf: fileURL))
-            guard Set(legacy.map(\.id)).count == legacy.count else { throw StorageFailure() }
+            if let rows = try? decoder.decode([MurmurMessage].self, from: data) {
+                legacy = Self.lastCopyOfEachRow(rows)
+            } else {
+                try setAsideUnreadableLegacyFile()
+            }
         }
         try execute(db, "BEGIN IMMEDIATE")
         do {
@@ -250,10 +259,39 @@ actor MurmurTranscriptStore {
             for row in legacy {
                 guard try storedRow(id: row.id, db: db) == row else { throw StorageFailure() }
             }
-            try execute(db, "INSERT INTO metadata VALUES('json_migrated','1'); COMMIT")
+            try execute(db, "INSERT OR REPLACE INTO metadata VALUES('json_migrated','1'); COMMIT")
         } catch {
             try? execute(db, "ROLLBACK")
             throw error
+        }
+    }
+
+    /// Earlier builds appended rows without checking their ids, so a reply
+    /// replayed by a retried stream can appear twice.  The later copy wins,
+    /// the way an upsert would have had it.
+    private static func lastCopyOfEachRow(_ rows: [MurmurMessage]) -> [MurmurMessage] {
+        var seen = Set<String>()
+        return Array(rows.reversed().filter { seen.insert($0.id).inserted }.reversed())
+    }
+
+    private func setAsideUnreadableLegacyFile() throws {
+        var destination = directory.appendingPathComponent("transcript.unreadable.json")
+        if FileManager.default.fileExists(atPath: destination.path) {
+            destination = directory.appendingPathComponent("transcript.unreadable-\(UUID().uuidString).json")
+        }
+        try FileManager.default.moveItem(at: fileURL, to: destination)
+#if DEBUG
+        Task { @MainActor in
+            MurmurDiagnostics.record("legacy transcript did not decode; set aside as \(destination.lastPathComponent)")
+        }
+#endif
+    }
+
+    /// The JSON history and anything set aside from it.
+    private func removeLegacyFiles() throws {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        for name in names where name == "transcript.json" || name.hasPrefix("transcript.unreadable") {
+            try FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
     }
 
@@ -444,15 +482,28 @@ actor MurmurTranscriptStore {
         }
     }
 
+    /// Deletes the whole history.  Never waits on the legacy import: a history
+    /// that cannot be read still has to be possible to delete.
     @discardableResult
     func clear() -> Bool {
         do {
-            try withDatabase { db in try execute(db, "DELETE FROM messages") }
-            // The migration marker keeps an old JSON copy from bringing cleared
-            // rows back; the copy itself goes only on this explicit deletion.
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                try FileManager.default.removeItem(at: fileURL)
+            try withDatabase(migrating: false) { db in
+                try execute(db, "BEGIN IMMEDIATE")
+                do {
+                    try execute(db, """
+                        DELETE FROM messages;
+                        INSERT OR REPLACE INTO metadata VALUES('json_migrated','1');
+                        COMMIT
+                        """)
+                } catch {
+                    try? execute(db, "ROLLBACK")
+                    throw error
+                }
             }
+            migrated = true
+            // With the marker written, no JSON copy can bring cleared rows
+            // back; the copies themselves go only on this explicit deletion.
+            try removeLegacyFiles()
             pendingAdoptions = []
             try pruneUnreferencedImages()
             lastError = nil

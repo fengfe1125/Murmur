@@ -135,6 +135,75 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
     }
 
+    /// Earlier builds appended archive rows without checking ids, and a photo
+    /// room's 再试一次 replays the same moment's events, so one reply could be
+    /// written twice.  The import keeps the later copy instead of refusing the
+    /// whole history — which used to leave the archive unreadable, unwritable
+    /// and impossible to clear.
+    func testDuplicateLegacyIDsMigrateKeepingLastCopy() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let photoRow = MurmurMessage(
+            id: "photo", author: .you, text: "",
+            sentAt: Date(timeIntervalSince1970: 1_790_000_000), momentID: "moment-1"
+        )
+        let first = MurmurMessage(
+            id: "moment-1-2", author: .murmur, text: "接住了",
+            sentAt: Date(timeIntervalSince1970: 1_790_000_010), momentID: "moment-1"
+        )
+        let replay = MurmurMessage(
+            id: "moment-1-2", author: .murmur, text: "接住了",
+            sentAt: Date(timeIntervalSince1970: 1_790_000_060), momentID: "moment-1"
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([photoRow, first, replay]).write(to: directory.appendingPathComponent("transcript.json"))
+        let store = MurmurTranscriptStore.archive(directory: directory)
+
+        let loaded = await store.load()
+        XCTAssertEqual(loaded.map(\.id), ["photo", "moment-1-2"])
+        XCTAssertEqual(loaded.last?.sentAt, replay.sentAt)
+        let saved = await store.save([MurmurMessage(id: "new", author: .you, text: "新的一句")])
+        XCTAssertTrue(saved)
+        let cleared = await store.clear()
+        XCTAssertTrue(cleared)
+        let afterClear = await MurmurTranscriptStore.archive(directory: directory).load()
+        XCTAssertTrue(afterClear.isEmpty)
+    }
+
+    func testClearSucceedsWhileMigrationIsFailing() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let legacy = directory.appendingPathComponent("transcript.json")
+        try encoder.encode([MurmurMessage(id: "blocked", author: .you, text: "导不进去")]).write(to: legacy)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("transcript.sqlite").path, &db), SQLITE_OK)
+        let schema = """
+            CREATE TABLE messages(id TEXT PRIMARY KEY, sent_at REAL NOT NULL, filing_at REAL NOT NULL,
+                image_file TEXT, payload TEXT NOT NULL);
+            CREATE TRIGGER block_import BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'blocked'); END;
+            """
+        XCTAssertEqual(sqlite3_exec(db, schema, nil, nil, nil), SQLITE_OK)
+        let store = MurmurTranscriptStore(directory: directory)
+        let failed = await store.load()
+        XCTAssertTrue(failed.isEmpty)
+        let failure = await store.lastError
+        XCTAssertNotNil(failure)
+
+        let cleared = await store.clear()
+        XCTAssertTrue(cleared)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+
+        XCTAssertEqual(sqlite3_exec(db, "DROP TRIGGER block_import", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        let afterClear = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertTrue(afterClear.isEmpty)
+    }
+
     func testNewReplyDoesNotReplaceTheHistoricalReadingWindow() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -371,27 +440,57 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertEqual(index.reduce(0) { $0 + $1.count },6_100)
     }
 
-    func testMigrationFailureCanRetryWithoutReplacingLegacyFile() async throws {
-        let directory = URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at:directory) }
-        try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
+    func testLegacyJSONImportsUnchangedAndStaysUntilCleared() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let legacy = directory.appendingPathComponent("transcript.json")
-        try Data("[incomplete".utf8).write(to:legacy)
-        let store = MurmurTranscriptStore(directory:directory)
-        let failed = await store.load()
-        XCTAssertTrue(failed.isEmpty)
-        let error = await store.lastError
-        XCTAssertNotNil(error)
-        XCTAssertEqual(try String(contentsOf:legacy,encoding:.utf8),"[incomplete")
-        let original = MurmurMessage(id:"migrated",author:.you,text:"保留我",sentAt:Date(timeIntervalSince1970:1_700_000_000),delivery:.answered,idempotencyKey:"stable-key")
-        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode([original]).write(to:legacy)
+        let original = MurmurMessage(
+            id: "migrated", author: .you, text: "保留我",
+            sentAt: Date(timeIntervalSince1970: 1_700_000_000), delivery: .answered, idempotencyKey: "stable-key"
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([original]).write(to: legacy)
+        let store = MurmurTranscriptStore(directory: directory)
+
         let restored = await store.load()
-        XCTAssertEqual(restored,[original])
-        XCTAssertTrue(FileManager.default.fileExists(atPath:legacy.path))
+        XCTAssertEqual(restored, [original])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
+
         await store.clear()
-        let afterClear = await MurmurTranscriptStore(directory:directory).load()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+        let afterClear = await MurmurTranscriptStore(directory: directory).load()
         XCTAssertTrue(afterClear.isEmpty)
+    }
+
+    /// Content that does not decode never will.  The old reader showed an empty
+    /// history for it; the bytes are now set aside unread and the store keeps
+    /// working, instead of failing every read, write and clear from then on.
+    func testUnreadableLegacyJSONIsSetAsideAndStoreStaysWritable() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacy = directory.appendingPathComponent("transcript.json")
+        let setAside = directory.appendingPathComponent("transcript.unreadable.json")
+        try Data("[incomplete".utf8).write(to: legacy)
+        let store = MurmurTranscriptStore(directory: directory)
+
+        let loaded = await store.load()
+        XCTAssertTrue(loaded.isEmpty)
+        let error = await store.lastError
+        XCTAssertNil(error)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+        XCTAssertEqual(try String(contentsOf: setAside, encoding: .utf8), "[incomplete")
+
+        let saved = await store.save([MurmurMessage(id: "after", author: .you, text: "之后的一句")])
+        XCTAssertTrue(saved)
+        let reloaded = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertEqual(reloaded.map(\.id), ["after"])
+
+        let cleared = await store.clear()
+        XCTAssertTrue(cleared)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: setAside.path))
     }
 
     func testPersistenceFailureIsVisible() async throws {
