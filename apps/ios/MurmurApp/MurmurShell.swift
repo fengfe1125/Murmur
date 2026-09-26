@@ -100,30 +100,36 @@ struct MurmurShell: View {
     }
 
     private var tabs: some View {
+        // Identifiers go on each Tab.  Set on a `.tabItem` label, they reached
+        // the tab bar button on some launches and not on others.
         TabView(selection: $tab) {
-            NavigationStack {
-                MurmurChatView(model: model, music: music)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
-            .tabItem { Label("聊天", systemImage: MurmurTab.chat.symbol).accessibilityIdentifier("tab-chat") }
-            .tag(MurmurTab.chat)
-
-            NavigationStack {
-                ListenTogetherTabView(model: model, music: music)
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
-            .tabItem { Label("一起听", systemImage: MurmurTab.listenTogether.symbol).accessibilityIdentifier("tab-listenTogether") }
-            .tag(MurmurTab.listenTogether)
-
-            OnThisDayTabView(model: model, onThisDay: onThisDay)
+            Tab("聊天", systemImage: MurmurTab.chat.symbol, value: MurmurTab.chat) {
+                NavigationStack {
+                    MurmurChatView(model: model, music: music)
+                }
                 .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
-                .tabItem { Label("当年今日", systemImage: MurmurTab.onThisDay.symbol).accessibilityIdentifier("tab-onThisDay") }
-                .tag(MurmurTab.onThisDay)
+            }
+            .accessibilityIdentifier("tab-chat")
 
-            MurmurSettingsView(model: model, music: music)
+            Tab("一起听", systemImage: MurmurTab.listenTogether.symbol, value: MurmurTab.listenTogether) {
+                NavigationStack {
+                    ListenTogetherTabView(model: model, music: music)
+                }
                 .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
-                .tabItem { Label("我的", systemImage: MurmurTab.me.symbol).accessibilityIdentifier("tab-me") }
-                .tag(MurmurTab.me)
+            }
+            .accessibilityIdentifier("tab-listenTogether")
+
+            Tab("当年今日", systemImage: MurmurTab.onThisDay.symbol, value: MurmurTab.onThisDay) {
+                OnThisDayTabView(model: model, onThisDay: onThisDay)
+                    .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
+            }
+            .accessibilityIdentifier("tab-onThisDay")
+
+            Tab("我的", systemImage: MurmurTab.me.symbol, value: MurmurTab.me) {
+                MurmurSettingsView(model: model, music: music)
+                    .safeAreaInset(edge: .bottom, spacing: 0) { miniPlayer }
+            }
+            .accessibilityIdentifier("tab-me")
         }
         .environment(\.murmurSelectTab) { tab = $0 }
         .sheet(isPresented: $showPlayer) {
