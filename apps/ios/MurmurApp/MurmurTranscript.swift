@@ -41,6 +41,9 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
     /// Optional because transcripts written before this existed decode without
     /// it; those rows fall back to a fresh key.
     var idempotencyKey: String?
+    /// The review day whose question this line answers, so a resend after a
+    /// relaunch still goes up as that answer.  Absent on every other row.
+    var dailyQuestionDay: String?
 
     init(
         id: String = UUID().uuidString,
@@ -52,7 +55,8 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
         archiveDay: Date? = nil,
         delivery: MurmurDeliveryState = .sent,
         momentID: String? = nil,
-        idempotencyKey: String? = nil
+        idempotencyKey: String? = nil,
+        dailyQuestionDay: String? = nil
     ) {
         self.id = id
         self.author = author
@@ -64,6 +68,7 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
         self.delivery = delivery
         self.momentID = momentID
         self.idempotencyKey = idempotencyKey
+        self.dailyQuestionDay = dailyQuestionDay
     }
 }
 

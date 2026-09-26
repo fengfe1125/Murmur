@@ -59,7 +59,7 @@ struct MurmurChatView: View {
                     onOpenTab: { selectTab(.listenTogether) }
                 )
             }
-            .modifier(MurmurChatNavigation(session: model))
+            .modifier(MurmurChatNavigation(session: model, reviews: model.reviews))
             .background(MurmurTheme.paper.ignoresSafeArea())
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
@@ -391,6 +391,10 @@ private struct MomentWorkbench: View {
             } : nil,
             listenTogetherRoom: netease.room
         )
+            // Answering a review's question starts in the composer.
+            .onChange(of: model.questionContext) { _, context in
+                if context != nil { composerFocused = true }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     if model.draftPhoto != nil || model.isPreparingPhoto {
@@ -404,6 +408,9 @@ private struct MomentWorkbench: View {
                         .frame(maxWidth: MurmurTheme.contentWidth, alignment: .leading)
                         .padding(.horizontal, MurmurTheme.pageInset)
                         .padding(.top, 8)
+                    }
+                    if let context = model.questionContext {
+                        QuestionContextLine(context: context) { model.questionContext = nil }
                     }
                     if let draftFailure = model.draftFailure {
                         DraftFailureLine(message: draftFailure)
@@ -720,6 +727,8 @@ struct MurmurSettingsView: View {
                 if music.isAvailable {
                     AudiusSection(music: music)
                 }
+
+                MurmurReviewSettingsEntry(reviews: model.reviews)
 
                 Section("设备") {
                     if !model.devicesLoaded {
@@ -1119,6 +1128,32 @@ private struct AudiusSection: View {
             }
         }
         .disabled(working)
+    }
+}
+
+/// Which review question the next line answers, with a way to drop it.
+private struct QuestionContextLine: View {
+    let context: MurmurQuestionContext
+    let onCancel: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("回答 \(context.day) 的问题")
+                    .font(.caption)
+                    .foregroundStyle(MurmurTheme.secondaryInk)
+                Text(context.question)
+                    .font(.footnote)
+                    .lineLimit(3)
+            }
+            Spacer()
+            Button("取消", systemImage: "xmark", action: onCancel)
+                .labelStyle(.iconOnly)
+                .frame(minWidth: 44, minHeight: 44)
+        }
+        .padding(12)
+        .background(MurmurTheme.raisedPaper)
+        .padding(.horizontal, MurmurTheme.pageInset)
     }
 }
 

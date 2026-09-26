@@ -53,6 +53,7 @@
 		B10000000000000000000002 /* SharedMusicDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000318 /* SharedMusicDraft.swift */; };
 		B10000000000000000000003 /* MurmurShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* MurmurShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		D10000000000000000000001 /* MurmurChatCalendar.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000002 /* MurmurChatCalendar.swift */; };
+		D10000000000000000000003 /* MurmurDailyReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000004 /* MurmurDailyReview.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -150,6 +151,7 @@
 		B10000000000000000000013 /* MurmurShareExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MurmurShareExtension.entitlements; sourceTree = "<group>"; };
 		B10000000000000000000014 /* MurmurShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MurmurShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		D10000000000000000000002 /* MurmurChatCalendar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurChatCalendar.swift; sourceTree = "<group>"; };
+		D10000000000000000000004 /* MurmurDailyReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MurmurDailyReview.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -207,6 +209,7 @@
 				A10000000000000000000019 /* MurmurEnvironment.swift */,
 				A10000000000000000000029 /* MurmurTranscript.swift */,
 				D10000000000000000000002 /* MurmurChatCalendar.swift */,
+				D10000000000000000000004 /* MurmurDailyReview.swift */,
 				A1000000000000000000002A /* MurmurTranscriptView.swift */,
 				A100000000000000000000B2 /* MurmurPhotoView.swift */,
 				A100000000000000000000F2 /* MurmurOnThisDay.swift */,
@@ -466,6 +469,7 @@
 				A10000000000000000000008 /* MurmurEnvironment.swift in Sources */,
 				A1000000000000000000000F /* MurmurTranscript.swift in Sources */,
 				D10000000000000000000001 /* MurmurChatCalendar.swift in Sources */,
+				D10000000000000000000003 /* MurmurDailyReview.swift in Sources */,
 				A10000000000000000000010 /* MurmurTranscriptView.swift in Sources */,
 				A100000000000000000000B1 /* MurmurPhotoView.swift in Sources */,
 				A100000000000000000000F1 /* MurmurOnThisDay.swift in Sources */,

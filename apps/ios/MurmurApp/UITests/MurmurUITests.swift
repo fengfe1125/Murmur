@@ -79,6 +79,86 @@ final class MurmurUITests: XCTestCase {
         try captureDiaryScreenshot(app, name: "Calendar · Landscape")
     }
 
+    func testDailyReviewAccessibilityLabelsAndTargets() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-dated-chat"])
+        XCTAssertTrue(app.buttons["daily-review-entry"].waitForExistence(timeout: 10))
+        try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .trait])
+        app.buttons["daily-review-entry"].tap()
+        XCTAssertTrue(app.buttons["answer-daily-question"].waitForExistence(timeout: 20))
+        try app.performAccessibilityAudit(for: [.sufficientElementDescription, .hitRegion, .trait])
+    }
+
+    func testDailyReviewQuestionAndMemoryCorrection() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-dated-chat"])
+        XCTAssertTrue(app.buttons["daily-review-entry"].waitForExistence(timeout: 10))
+        app.buttons["daily-review-entry"].tap()
+        XCTAssertTrue(app.buttons["answer-daily-question"].waitForExistence(timeout: 20))
+        try captureDiaryScreenshot(app, name: "Daily review · Light")
+        app.buttons["answer-daily-question"].tap()
+        XCTAssertTrue(app.staticTexts["如果周末留出一段散步时间，你最需要先安排好什么？"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textFields["moment-composer"].exists)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        try captureDiaryScreenshot(app, name: "Question context · Keyboard")
+        enterMoment(app.textFields["moment-composer"], "星期六上午")
+        app.buttons["send-moment"].tap()
+        XCTAssertTrue(line("已接上这一天的问题。", in: app).waitForExistence(timeout: 5))
+        app.buttons["daily-review-entry"].tap()
+        let memory = app.buttons.containing(.staticText, identifier: "查看来源与纠正  ›").firstMatch
+        if !memory.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(memory.waitForExistence(timeout: 5))
+        memory.tap()
+        let editor = app.textFields["memory-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        editor.typeText(" 我更愿意在晴天去。")
+        app.buttons["memory-save"].tap()
+        XCTAssertTrue(app.staticTexts["memory-result"].waitForExistence(timeout: 5))
+        try captureDiaryScreenshot(app, name: "Memory · Corrected")
+    }
+
+    func testDailyReviewDarkLargeTextAndForget() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: [
+            "--murmur-stub-diary", "--murmur-seed-dated-chat", "--murmur-ui-test-dark", "--murmur-ui-test-large-type",
+            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"
+        ])
+        XCTAssertTrue(app.buttons["daily-review-entry"].waitForExistence(timeout: 10))
+        app.buttons["daily-review-entry"].tap()
+        XCTAssertTrue(app.staticTexts["daily-review-title"].waitForExistence(timeout: 20))
+        try captureDiaryScreenshot(app, name: "Daily review · Dark XXXL")
+        let memory = app.buttons.containing(.staticText, identifier: "查看来源与纠正  ›").firstMatch
+        for _ in 0..<8 where !memory.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(memory.isHittable)
+        memory.tap()
+        let forget = app.buttons["memory-forget"]
+        for _ in 0..<8 where !forget.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(forget.isHittable)
+        forget.tap()
+        app.buttons["memory-forget-confirm"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["memory-result"].waitForExistence(timeout: 5))
+        try captureDiaryScreenshot(app, name: "Memory · Forgotten")
+    }
+
+    func testDailyReviewAnswerTargetInLandscape() throws {
+        continueAfterFailure = false
+        let app = launchApp(arguments: ["--murmur-stub-diary", "--murmur-seed-dated-chat"])
+        XCTAssertTrue(app.buttons["daily-review-entry"].waitForExistence(timeout: 10))
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let landscape = NSPredicate { _, _ in
+            app.windows.firstMatch.frame.width > app.windows.firstMatch.frame.height
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: landscape, object: app)], timeout: 10), .completed)
+        app.buttons["daily-review-entry"].tap()
+        let answer = app.buttons["answer-daily-question"]
+        XCTAssertTrue(answer.waitForExistence(timeout: 20))
+        for _ in 0..<5 where !answer.isHittable { app.scrollViews.firstMatch.swipeUp() }
+        XCTAssertTrue(answer.isHittable)
+        assertMinimumHitArea(answer)
+    }
+
     /// Glancing up while Murmur is still answering is not a date jump: the
     /// answer has to be there when the reader comes back down, without being
     /// asked for with 回到最新.
