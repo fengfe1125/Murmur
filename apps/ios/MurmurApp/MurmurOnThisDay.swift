@@ -85,7 +85,7 @@ protocol OnThisDayLibrary: Sendable {
     func candidates(around date: Date, yearsBack: Int) async -> [OnThisDayCandidate]
     /// Photos from anywhere in the library, for when this day is blank in
     /// every earlier year or its photos have all been swiped past.  The shelf
-    /// carries on rather than looping, so 下滑 always has somewhere to go.
+    /// carries on rather than looping, so paging forward can continue.
     /// Returns fewer than asked — or none — when the library has no more.
     func randomCandidates(count: Int, excluding: Set<String>) async -> [OnThisDayCandidate]
     /// Memory only.  Browsing pixels never touch the disk: they live in an
@@ -326,25 +326,18 @@ final class OnThisDayModel: ObservableObject {
     @Published private(set) var authorization: OnThisDayAuthorization = .notDetermined
     @Published private(set) var candidates: [OnThisDayCandidate] = []
     @Published private(set) var isLoading = false
-    /// Index into `candidates`; the viewer is one card, not a grid.
     @Published private(set) var index = 0
     @Published private(set) var currentImage: UIImage?
-    /// The card those pixels came from, published in the same pass as them.
-    ///
-    /// Held rather than derived from `index`, because the two move on different
-    /// clocks: 下滑 advances the index at once and the library hands over the
-    /// image whenever it is ready.  A candidate derived from the index would,
-    /// for the width of that gap, describe a photo other than the one on
-    /// screen — and a send landing inside it would file one person's picture
-    /// under another day and another place.
     @Published private(set) var currentCandidate: OnThisDayCandidate?
-    /// Swipe-up is not an offer until there is actually a photo to send.
-    var canSend: Bool { currentImage != nil && !candidates.isEmpty }
+    @Published private(set) var imageFailed = false
+    @Published private(set) var cachedImages: [String: UIImage] = [:]
 
-    /// The entry disc hides itself under .limited: with a hand-picked slice
-    /// of the library the feature cannot tell the truth, so it does not knock.
-    /// How many photos stay queued behind the one on screen.  The shelf tops
-    /// itself up from that far out so that 下滑 never waits on a fetch.
+    var selectedID: String? { candidates.indices.contains(index) ? candidates[index].id : nil }
+    var canSend: Bool { currentImage != nil && currentCandidate?.id == selectedID }
+    var canGoBack: Bool { index > 0 }
+    var canAdvance: Bool { index + 1 < candidates.count || !libraryExhausted }
+
+    /// Keep a few candidates ready without decoding the entire library.
     private static let reserve = 3
     /// One top-up.  Small enough that a person who swipes twice and leaves has
     /// not made the library do work for nothing.
@@ -380,6 +373,9 @@ final class OnThisDayModel: ObservableObject {
         isLoading = true
         imageGeneration += 1
         libraryExhausted = false
+        cachedImages = [:]
+        currentImage = nil
+        currentCandidate = nil
         candidates = await library.candidates(around: Date(), yearsBack: 5)
         index = 0
         // A blank day is not a dead end.  With nothing from this day in any
@@ -390,18 +386,43 @@ final class OnThisDayModel: ObservableObject {
         await showCurrent()
     }
 
-    /// 下滑换一张.  The shelf runs forward and never wraps: past the last photo
-    /// from this day it carries on with the album, so 下滑 always has somewhere
-    /// to go until the library itself runs out.
-    func advance() {
-        guard !candidates.isEmpty else { return }
+    func select(id: String) {
+        guard let target = candidates.firstIndex(where: { $0.id == id }), target != index else { return }
+        index = target
+        // Invalidate immediately, before an older request can resume.
+        imageGeneration += 1
+        currentImage = nil
+        currentCandidate = nil
+        imageFailed = false
         Task {
-            if index + 1 >= candidates.count { await topUp() }
-            guard index + 1 < candidates.count else { return }
-            index += 1
             await showCurrent()
             await topUpIfNeeded()
         }
+    }
+
+    func previous() {
+        guard canGoBack else { return }
+        select(id: candidates[index - 1].id)
+    }
+
+    func advance() {
+        guard !candidates.isEmpty else { return }
+        if index + 1 < candidates.count {
+            select(id: candidates[index + 1].id)
+        } else {
+            let origin = selectedID
+            Task {
+                await topUp()
+                guard selectedID == origin, index + 1 < candidates.count else { return }
+                select(id: candidates[index + 1].id)
+            }
+        }
+    }
+
+    func retryImage() {
+        guard imageFailed else { return }
+        imageFailed = false
+        Task { await showCurrent() }
     }
 
     private func topUpIfNeeded() async {
@@ -445,10 +466,21 @@ final class OnThisDayModel: ObservableObject {
         imageGeneration += 1
         let generation = imageGeneration
         let candidate = candidates[index]
-        let image = await library.image(for: candidate, targetPixels: MurmurImageCache.fullScreenPixels)
-        guard generation == imageGeneration else { return }
+        let image: UIImage?
+        if let cached = cachedImages[candidate.id] {
+            image = cached
+        } else {
+            image = await library.image(for: candidate, targetPixels: MurmurImageCache.fullScreenPixels)
+        }
+        guard generation == imageGeneration, candidate.id == selectedID else { return }
         currentImage = image
-        currentCandidate = candidate
+        currentCandidate = image == nil ? nil : candidate
+        imageFailed = image == nil
+        if let image {
+            let nearby = Set(candidates[max(0, index - 1)...min(candidates.count - 1, index + 1)].map(\.id))
+            cachedImages = cachedImages.filter { nearby.contains($0.key) }
+            cachedImages[candidate.id] = image
+        }
     }
 }
 
@@ -543,31 +575,40 @@ enum OnThisDayLibraryResolver {
 
 // MARK: - Flow
 
-/// 当年今日, both halves, inside one presentation.
-///
-/// The browser and the room are not two screens that happen to follow each
-/// other: the card comes apart into particles in the first and the same
-/// particles come back together at the top of the second.  Presenting the room
-/// as a second cover would put a system transition through the middle of that
-/// motion, so the two live in one cover and cross-fade under the photo.
+/// One navigation container owns the close action throughout the photo flow.
 struct OnThisDayFlowView: View {
     @ObservedObject var model: OnThisDayModel
     let makeRoom: (UIImage, PhotoProvenance?) -> PhotoRoomModel
+    @Environment(\.murmurReduceMotion) private var reduceMotion
     @Environment(\.dismiss) private var dismiss
     @State private var room: PhotoRoomModel?
 
     var body: some View {
-        ZStack {
-            if let room {
-                PhotoRoomView(model: room) { dismiss() }
-                    .transition(.opacity)
-            } else {
-                OnThisDayView(model: model) { image, provenance in
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        room = makeRoom(image, provenance)
+        NavigationStack {
+            ZStack {
+                if let room {
+                    PhotoRoomView(model: room)
+                        .transition(.opacity)
+                } else {
+                    OnThisDayView(model: model) { image, provenance in
+                        guard room == nil else { return }
+                        withAnimation(reduceMotion ? nil : MurmurMotion.content) {
+                            room = makeRoom(image, provenance)
+                        }
                     }
+                    .transition(.opacity)
                 }
-                .transition(.opacity)
+            }
+            .navigationTitle(room.map { room in
+                room.photoDate.map { $0.formatted(.dateTime.year().month().day().locale(Locale(identifier: "zh_Hans_CN"))) } ?? "照片房间"
+            } ?? "当年今日")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("完成") { dismiss() }
+                        .accessibilityLabel(room == nil ? "关闭当年今日" : "离开这张照片")
+                        .accessibilityIdentifier(room == nil ? "close-onthisday" : "close-photo-room")
+                }
             }
         }
     }
@@ -575,55 +616,15 @@ struct OnThisDayFlowView: View {
 
 // MARK: - View
 
-/// 当年今日: one old photo at a time.  Down for the next one, up to send it
-/// into the conversation.  Deliberately not the lightbox: the lightbox owns
-/// pull-down-to-dismiss, and stacking "up to send" on top of it would put
-/// three vertical gestures on one photo.  This sheet has exactly one vertical
-/// gesture with an explicit direction-and-distance gate, attached as a
-/// high-priority gesture so nothing else in the tree can outbid it.
+/// Native horizontal browsing; only an explicit button creates a photo room.
 struct OnThisDayView: View {
 
     @ObservedObject var model: OnThisDayModel
     let onSend: (UIImage, PhotoProvenance?) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.murmurReduceMotion) private var reduceMotion
 
-    @State private var dragOffset: CGFloat = 0
-    /// Set while the sent card is dissolving; the plain-fade fallback for when
-    /// the shader is unavailable or Reduce Motion is on.
-    @State private var isDissolving = false
-    /// Starts the bounded dissolve.  A trigger, not a timeline: the shader's
-    /// progress never goes through a resident per-frame redraw.
-    @State private var dissolveTrigger = false
-    /// The send already under way, held so that leaving can call it off.  The
-    /// dissolve runs for most of a second and the close button stays live for
-    /// all of it: with the wait floating in a detached task, closing the sheet
-    /// dismissed it and the photo left anyway — the person believed they had
-    /// cancelled, and a moment was created behind them.
-    @State private var sendTask: Task<Void, Never>?
-    /// Set from the swipe until the photo has actually left.  While it holds,
-    /// the card takes no further gestures: a second swipe during the dissolve
-    /// would change the picture on screen while the first one was still on its
-    /// way out, and the photo that left would not be the one last seen.
+    @State private var dateHeaderHeight: CGFloat = 76
     @State private var isSending = false
-
-    /// Grid edge, in points.  Under ~4 the cells read as noise, over ~14 as
-    /// mosaic redaction; 8 is inside the particle window.
-    private static let dissolveCell: CGFloat = 8
-    /// The farthest a particle travels; also feeds maxSampleOffset, which must
-    /// cover quantization (up to a cell) plus drift or the edges clip hard.
-    private static let dissolveDrift: CGFloat = 90
-    /// Matches the KeyframeTrack below, plus a beat of slack.
-    private static let dissolveDuration: TimeInterval = {
-#if DEBUG
-        // The window between the swipe and the send is what the close button
-        // has to interrupt, and at 0.85s a UI test tapping into it is a race.
-        // Widening it — the track and the wait together, so they stay one
-        // number — makes the cancel path assertable instead of flaky.
-        if ProcessInfo.processInfo.arguments.contains("--murmur-slow-dissolve") { return 3 }
-#endif
-        return 0.85
-    }()
 
     var body: some View {
         ZStack {
@@ -665,41 +666,13 @@ struct OnThisDayView: View {
                 content
             }
         }
-        .overlay(alignment: .topLeading) {
-            Button {
-                // The cancel happens here, in the same event as the tap.
-                // Not in .onDisappear: measured on a Simulator, that arrives
-                // once SwiftUI has finished tearing the cover down — five
-                // seconds after the wait had already fired and sent the photo.
-                cancelSend()
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(MurmurTheme.ink)
-                    .frame(width: 34, height: 34)
-                    .background(MurmurTheme.raisedPaper, in: Circle())
-                    .overlay { Circle().stroke(MurmurTheme.rule, lineWidth: 1) }
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(MurmurPressStyle())
-            .padding(.leading, 12)
-            .padding(.top, 10)
-            .accessibilityLabel("关闭当年今日")
-            .accessibilityIdentifier("close-onthisday")
-        }
         .task {
             await model.refreshAuthorization()
             if model.authorization == .authorized, model.candidates.isEmpty {
                 await model.load()
             }
         }
-        // Leaving cancels the send.  On the ordinary path onSend has already
-        // run by the time this fires and the cancel is a no-op; on the path
-        // where the person closes the sheet mid-dissolve, this is what keeps
-        // the photo at home.
-        .onDisappear { cancelSend() }
+
     }
 
     @ViewBuilder
@@ -727,171 +700,130 @@ struct OnThisDayView: View {
     }
 
     private var viewer: some View {
-        let candidate = model.candidates[model.index]
-        return VStack(spacing: 0) {
-            Text(caption(for: candidate))
-                .font(MurmurTheme.display(.title3))
-                .foregroundStyle(MurmurTheme.ink)
-                .padding(.top, 64)
-            Text(dateLine(for: candidate))
-                .font(MurmurTheme.body(.footnote))
-                .foregroundStyle(MurmurTheme.secondaryInk)
-                .padding(.top, 4)
-            Spacer(minLength: 20)
-            dissolvingCard
-                .shadow(color: MurmurTheme.ink.opacity(0.12), radius: 18, y: 8)
-                .offset(y: dragOffset)
-                .opacity(1 - min(abs(dragOffset) / 700, 0.45))
-                .highPriorityGesture(fling)
-                // The card is on screen before its pixels are, and until they
-                // arrive there is no photo to describe and nothing to send.
-                // Saying so is both the honest label and the only signal
-                // anything outside can wait on.
-                .accessibilityLabel(
-                    model.canSend
-                        ? "\(caption(for: candidate))的照片"
-                        : "\(caption(for: candidate))的照片，正在载入"
-                )
-                .accessibilityIdentifier("onthisday-photo")
-                .accessibilityAction(named: "下一张") { model.advance() }
-                .accessibilityAction(named: "发给 Murmur") { send() }
-            Spacer(minLength: 20)
-            Text("上滑跟 Murmur 说说这张 · 下滑换一张")
-                .font(MurmurTheme.body(.footnote))
-                .foregroundStyle(MurmurTheme.secondaryInk)
-                .padding(.bottom, 34)
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 16) {
+                    if let candidate = model.candidates.first(where: { $0.id == model.selectedID }) {
+                        VStack(spacing: 6) {
+                            Text(dateLine(for: candidate))
+                                .font(.title2.weight(.semibold))
+                                .accessibilityIdentifier("onthisday-date")
+                            Text(caption(for: candidate))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 8)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { dateHeaderHeight = $0 }
+                        .accessibilityElement(children: .contain)
+                    }
+                    TabView(selection: Binding(
+                        get: { model.selectedID ?? "" },
+                        set: { model.select(id: $0) }
+                    )) {
+                        ForEach(model.candidates) { candidate in
+                            photoPage(candidate)
+                                .tag(candidate.id)
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .frame(height: max(160, geometry.size.height - dateHeaderHeight - 24))
+                    .accessibilityIdentifier("onthisday-pager")
+                }
+                .padding(.bottom, 8)
+                .frame(maxWidth: 720)
+                .frame(maxWidth: .infinity)
+            }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) { photoActions }
     }
 
-    /// The photo card alone.  The layer effect is scoped to exactly this view:
-    /// .layerEffect forces an offscreen rasterization of everything it covers,
-    /// so over the card it is one bounded pass, while over the whole sheet it
-    /// would be a full-screen redraw at every frame of the dissolve.
-    private var photoCard: some View {
+    private var photoActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                previousButton
+                startRoomButton.fixedSize()
+                nextButton
+            }
+            VStack(spacing: 8) {
+                startRoomButton
+                HStack {
+                    previousButton
+                    Spacer()
+                    nextButton
+                }
+            }
+        }
+        .frame(maxWidth: 600)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(MurmurTheme.paper)
+    }
+
+    private var previousButton: some View {
+        Button("上一张", systemImage: "chevron.left") { model.previous() }
+            .labelStyle(.iconOnly)
+            .frame(minWidth: 44, minHeight: 44)
+            .disabled(!model.canGoBack || isSending)
+            .accessibilityIdentifier("onthisday-previous")
+    }
+
+    private var nextButton: some View {
+        Button("下一张", systemImage: "chevron.right") { model.advance() }
+            .labelStyle(.iconOnly)
+            .frame(minWidth: 44, minHeight: 44)
+            .disabled(!model.canAdvance || isSending)
+            .accessibilityIdentifier("onthisday-next")
+    }
+
+    private var startRoomButton: some View {
+        Button("聊聊这张", systemImage: "bubble.left") { send() }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!model.canSend || isSending)
+            .accessibilityIdentifier("onthisday-send")
+    }
+
+    private func photoPage(_ candidate: OnThisDayCandidate) -> some View {
         ZStack {
-            MurmurTheme.raisedPaper
-            if let image = model.currentImage {
+            if let image = model.cachedImages[candidate.id] {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .transition(.opacity)
+            } else if candidate.id == model.selectedID && model.imageFailed {
+                ContentUnavailableView {
+                    Label("照片暂时载入不了", systemImage: "photo")
+                } description: {
+                    Text("可以重试，或换一张照片。")
+                } actions: {
+                    Button("重试") { model.retryImage() }
+                        .accessibilityIdentifier("onthisday-retry")
+                }
             } else {
-                ProgressView().tint(MurmurTheme.accentInk)
+                ProgressView("正在载入照片")
             }
         }
-        .aspectRatio(3 / 4, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: MurmurTheme.corner))
-        .overlay {
-            RoundedRectangle(cornerRadius: MurmurTheme.corner)
-                .stroke(MurmurTheme.rule, lineWidth: 1)
-        }
-        .padding(.horizontal, MurmurTheme.pageInset)
-    }
-
-    /// The card, with the particle dissolve armed when the shader is proven
-    /// available (see MurmurShaderSupport) and motion is welcome — a plain
-    /// fade otherwise.  KeyframeAnimator, not TimelineView(.animation): this
-    /// is a gesture-triggered, bounded animation, and only the bounded kind is
-    /// allowed to redraw every frame.
-    @ViewBuilder
-    private var dissolvingCard: some View {
-        if MurmurShaderSupport.particleDissolve, !reduceMotion {
-            KeyframeAnimator(initialValue: 0.0, trigger: dissolveTrigger) { progress in
-                photoCard
-                    .layerEffect(
-                        ShaderLibrary.default.onThisDayDissolve(
-                            .float(Self.dissolveCell),
-                            .float(progress),
-                            .float(Self.dissolveDrift)
-                        ),
-                        maxSampleOffset: CGSize(
-                            width: Self.dissolveCell + Self.dissolveDrift,
-                            height: Self.dissolveCell + Self.dissolveDrift
-                        )
-                    )
-            } keyframes: { _ in
-                KeyframeTrack(\.self) {
-                    LinearKeyframe(1.0, duration: Self.dissolveDuration)
-                }
-            }
-        } else {
-            photoCard.opacity(isDissolving ? 0 : 1)
-        }
-    }
-
-    /// The one gesture, with both gates explicit: vertical wins only when it
-    /// is clearly vertical (|dy| > 2|dx|) and clearly meant (|dy| > 60pt).
-    /// Anything weaker springs home instead of half-firing.
-    private var fling: some Gesture {
-        DragGesture(minimumDistance: 12)
-            .onChanged { value in
-                // A photo already on its way out does not take instructions.
-                guard !isSending else { return }
-                let dy = value.translation.height
-                let dx = value.translation.width
-                guard abs(dy) > 2 * abs(dx) else {
-                    dragOffset = 0
-                    return
-                }
-                dragOffset = dy * 0.55
-            }
-            .onEnded { value in
-                guard !isSending else { return }
-                let dy = value.translation.height
-                let dx = value.translation.width
-                let vertical = abs(dy) > 2 * abs(dx)
-                if vertical, dy <= -60, model.canSend {
-                    send()
-                } else if vertical, dy >= 60 {
-                    withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.86)) {
-                        dragOffset = 0
-                    }
-                    model.advance()
-                } else {
-                    withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.8)) {
-                        dragOffset = 0
-                    }
-                }
-            }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 20)
+        .animation(reduceMotion ? nil : MurmurMotion.content, value: model.cachedImages[candidate.id] != nil)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(model.cachedImages[candidate.id] != nil
+            ? "\(caption(for: candidate))的照片"
+            : "\(caption(for: candidate))的照片，\(candidate.id == model.selectedID && model.imageFailed ? "载入失败" : "正在载入")")
+        .accessibilityIdentifier(candidate.id == model.selectedID ? "onthisday-photo" : "onthisday-neighbor")
+        .accessibilityAction(named: "下一张") { model.advance() }
+        .accessibilityAction(named: "上一张") { model.previous() }
+        .accessibilityAction(named: "聊聊这张") { send() }
     }
 
     private func send() {
-        guard let image = model.currentImage else { return }
-        // Captured here, next to the image, not read again after the dissolve:
-        // the photo that leaves must be the one last seen, and so must the
-        // facts that travel with it.
-        let provenance = model.currentCandidate?.provenance
-        let settle: Duration
-        if MurmurShaderSupport.particleDissolve, !reduceMotion {
-            // KeyframeAnimator reports no completion; the send leaves a beat
-            // after the last keyframe instead.
-            dissolveTrigger.toggle()
-            settle = .milliseconds(Int(Self.dissolveDuration * 1000) + 120)
-        } else {
-            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.3)) {
-                isDissolving = true
-            }
-            settle = .milliseconds(reduceMotion ? 0 : 300)
-        }
-        sendTask?.cancel()
+        guard !isSending, model.canSend, let image = model.currentImage else { return }
         isSending = true
-        sendTask = Task {
-            // Not `try?`.  That form swallows the cancellation and then sends
-            // regardless, which is the exact outcome holding the task is meant
-            // to prevent: leaving has to be able to stop the photo.
-            do {
-                try await Task.sleep(for: settle)
-            } catch {
-                return
-            }
-            onSend(image, provenance)
-        }
-    }
-
-    /// Calls off a send that has not left yet.  Safe when there is none.
-    private func cancelSend() {
-        sendTask?.cancel()
-        sendTask = nil
-        isSending = false
+        onSend(image, model.currentCandidate?.provenance)
     }
 
     private func gate(
@@ -918,7 +850,7 @@ struct OnThisDayView: View {
                     .foregroundStyle(MurmurTheme.paper)
                     .background(MurmurTheme.ink, in: RoundedRectangle(cornerRadius: 12))
             }
-            .buttonStyle(MurmurPressStyle())
+            .buttonStyle(.automatic)
             .accessibilityIdentifier(identifier)
             Spacer()
             Spacer()

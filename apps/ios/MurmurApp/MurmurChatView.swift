@@ -1,170 +1,44 @@
-// Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V4
-// Hallmark · native app · genre: editorial · macrostructure: Workbench · theme: Garden · chrome: N9 · status: Ft2
 import PhotosUI
 import SwiftUI
 import UIKit
 
+/// System semantic surfaces with Murmur's readable cyan accent.
 @MainActor
-/// Paper and ink, with one cyan accent.
-///
-/// Every colour is one `UIColor { traits in ... }` so light and dark resolve
-/// from a single declaration.  The names here are the same names the Figma
-/// `Murmur` collection uses — see `.claude/skills/murmur-figma`.
 enum MurmurTheme {
-    // Every colour is one inline `UIColor { traits in ... }`, and stays that
-    // way.  Factored into a helper that takes the two values, the closure
-    // captures them and inherits the enclosing actor isolation — and UIKit
-    // resolves dynamic colours off the main thread, which trapped in
-    // `swift_task_checkIsolated` the moment a colour was first drawn.
-
-    /// #FCF9E8 — the page.
-    static let paper = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.078, green: 0.078, blue: 0.059, alpha: 1)
-            : UIColor(red: 0.988, green: 0.976, blue: 0.910, alpha: 1)
-    })
-    /// #FFFDF3 — anything sitting on the page.
-    static let raisedPaper = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.118, green: 0.118, blue: 0.090, alpha: 1)
-            : UIColor(red: 1.000, green: 0.992, blue: 0.953, alpha: 1)
-    })
-    static let ink = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.922, green: 0.914, blue: 0.878, alpha: 1)
-            : UIColor(red: 0.118, green: 0.118, blue: 0.098, alpha: 1)
-    })
-    static let secondaryInk = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.620, green: 0.612, blue: 0.573, alpha: 1)
-            : UIColor(red: 0.380, green: 0.376, blue: 0.353, alpha: 1)
-    })
-    static let rule = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.200, green: 0.200, blue: 0.165, alpha: 1)
-            : UIColor(red: 0.886, green: 0.871, blue: 0.784, alpha: 1)
-    })
-
-    /// #00B7C7 — fills, bubbles, selected states.  **Not small text on paper:**
-    /// it reaches only 2.2:1 there, which is why `accentInk` exists.
-    static let accent = Color(red: 0.000, green: 0.718, blue: 0.780)
-    /// The accent when it has to be read rather than seen: deepened to #00707A
-    /// in light (5.4:1 on paper) and left at the brand cyan in dark, where the
-    /// page is dark enough for it to clear 7:1 already.
+    static let paper = Color(uiColor: .systemBackground)
+    static let raisedPaper = Color(uiColor: .secondarySystemBackground)
+    static let ink = Color.primary
+    static let secondaryInk = Color.secondary
+    static let rule = Color(uiColor: .separator)
+    static let accent = Color(red: 0, green: 0.718, blue: 0.780)
     static let accentInk = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.000, green: 0.718, blue: 0.780, alpha: 1)
-            : UIColor(red: 0.000, green: 0.439, blue: 0.478, alpha: 1)
+            ? UIColor(red: 0, green: 0.718, blue: 0.780, alpha: 1)
+            : UIColor(red: 0, green: 0.439, blue: 0.478, alpha: 1)
     })
-    /// #0B2124 — what rides on top of `accent`.  White would be 2.4:1; this is
-    /// 6.9:1, which is the whole reason outgoing bubbles carry dark text.
     static let onAccent = Color(red: 0.043, green: 0.129, blue: 0.141)
-    static let coral = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.941, green: 0.541, blue: 0.447, alpha: 1)
-            : UIColor(red: 0.769, green: 0.271, blue: 0.180, alpha: 1)
-    })
-
-    /// Outgoing chat bubbles.  Kept a separate name from `accent` so softening
-    /// the bubble later does not wash out every control with it.
+    static let coral = Color(uiColor: .systemRed)
     static let outgoingBubble = accent
-
-    /// The tint carried on top of the system material.  Low alpha on purpose —
-    /// the blur underneath is doing the work; this only warms it back towards
-    /// paper so glass does not read as grey.
-    static let glassTint = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.137, green: 0.137, blue: 0.106, alpha: 0.44)
-            : UIColor(red: 1.000, green: 0.992, blue: 0.953, alpha: 0.44)
-    })
-    /// The hairline of light along a glass edge.
-    static let glassEdge = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(white: 1, alpha: 0.16)
-            : UIColor(white: 1, alpha: 0.55)
-    })
-    static let glassShadow = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(white: 0, alpha: 0.34)
-            : UIColor(red: 0.110, green: 0.110, blue: 0.090, alpha: 0.12)
-    })
-
-    /// One diameter for every standalone icon control, so the chrome reads
-    /// as one family: the toolbar mark, the gear, add-photo and send.
     static let disc: CGFloat = 36
-    /// The free-standing discs at the top of the screen.  They carry their own
-    /// background, so the drawn circle and the tap target are the same box and
-    /// it has to clear 44pt on its own.
     static let floatingDisc: CGFloat = 44
     static let pageInset: CGFloat = 20
     static let contentWidth: CGFloat = 1_080
     static let corner: CGFloat = 18
-    /// Glass panels are rounder than cards: the header, the composer and the
-    /// tab bar all float, and a floating pane with a card's radius reads stuck.
-    static let glassCorner: CGFloat = 26
-    static let tabBarCorner: CGFloat = 28
-
     static func display(_ style: Font.TextStyle) -> Font {
-        .system(style, design: .serif, weight: .semibold)
+        .system(style, weight: .semibold)
     }
-
     static func body(_ style: Font.TextStyle = .body, weight: Font.Weight = .regular) -> Font {
-        .system(style, design: .default, weight: weight)
+        .system(style, weight: weight)
     }
 }
 
-/// The one glass recipe, so the header, the composer and the tab bar cannot
-/// drift apart.
-///
-/// On iOS 26 the system's own glass draws it — the same call the floating discs
-/// make.  That is not only for the look: the tab bar's selected pill morphs
-/// between stops through `glassEffectID`, and a glass shape can only flow into
-/// another glass shape.  Hand-rolled material under a native pill would be two
-/// blurs stacked, and the pane it travels over would not be part of the motion.
-///
-/// Before iOS 26 it is drawn by hand: system material for the blur, a
-/// paper-warm tint on top of it, a hairline edge, and a soft shadow that lifts
-/// the pane off the page.
-struct MurmurGlass: ViewModifier {
-    var radius: CGFloat = MurmurTheme.glassCorner
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        if #available(iOS 26.0, *) {
-            content.glassEffect(.regular, in: shape)
-        } else {
-            content.background {
-                shape
-                    .fill(.ultraThinMaterial)
-                    .overlay { shape.fill(MurmurTheme.glassTint) }
-                    .overlay { shape.strokeBorder(MurmurTheme.glassEdge, lineWidth: 1) }
-                    .shadow(color: MurmurTheme.glassShadow, radius: 14, y: 6)
-            }
-        }
-    }
-}
-
-extension View {
-    func murmurGlass(radius: CGFloat = MurmurTheme.glassCorner) -> some View {
-        modifier(MurmurGlass(radius: radius))
-    }
-}
-
-/// The 聊天 tab.  The gates around it — checking, enrolment, reconnect — moved
-/// up to `MurmurRootView`, which owns whether this screen is on at all; 当年今日
-/// and 设置 moved out sideways into tabs of their own.  What is left here is the
-/// conversation and the one disc that says whether the wire is good.
 struct MurmurChatView: View {
     @ObservedObject var model: MurmurSessionModel
     @ObservedObject var music: MusicModule
     @ObservedObject private var netease: NeteaseMusicModel
-    @EnvironmentObject private var notifications: MurmurNotificationBridge
     @Environment(\.openURL) private var openURL
     @Environment(\.murmurSelectTab) private var selectTab
     @State private var showCamera = false
-    @State private var topChromeHeight: CGFloat = 0
-    @State private var topFadeHeight: CGFloat = 0
 
     init(model: MurmurSessionModel, music: MusicModule) {
         self.model = model
@@ -173,60 +47,23 @@ struct MurmurChatView: View {
     }
 
     var body: some View {
-        // The chrome floats: the conversation owns the whole screen and the
-        // mark sits on top of it, rather than a band that pushes the chat down.
-        // `safeAreaPadding` is what keeps that honest — the content is inset by
-        // exactly the height of the disc, so at rest nothing is behind it.
-        // The VStack is load-bearing: left to itself a ScrollView at the root
-        // of the scene draws all the way up behind the status bar, and the
-        // conversation ends up tangled in the clock.
-        VStack(spacing: 0) {
-            MomentWorkbench(model: model, showCamera: $showCamera, music: music)
-                .safeAreaPadding(.top, topChromeHeight)
-        }
-        // A scroll view draws all the way up behind the status bar whatever
-        // frame it is given, and a bubble tangled in the clock is worse than
-        // either problem this is trying to solve.  Fading is the way to keep
-        // the conversation full-height without laying anything over it.
-        // A scroll view draws all the way up behind the status bar whatever
-        // frame it is given, and a bubble tangled in the clock is worse than
-        // either problem this is trying to solve.  Fading is the way to keep
-        // the conversation full-height without laying anything over it.
-        .mask(alignment: .top) {
-            VStack(spacing: 0) {
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0),
-                        .init(color: .clear, location: 0.42),
-                        .init(color: .black, location: 1)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
+        MomentWorkbench(model: model, showCamera: $showCamera, music: music)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                MurmurTopChrome(
+                    connection: model.connection,
+                    room: netease.room,
+                    track: netease.displayTrack,
+                    presentation: netease.presentationState(connection: model.connection),
+                    onPrimary: performPrimaryRoomAction,
+                    onNext: { Task { await netease.command(.next) } },
+                    onOpenTab: { selectTab(.listenTogether) }
                 )
-                .frame(height: max(topFadeHeight, 1))
-                Rectangle().fill(.black)
             }
-            .ignoresSafeArea()
-        }
-        .overlay(alignment: .top) {
-            MurmurTopChrome(
-                connection: model.connection,
-                room: netease.room,
-                track: netease.displayTrack,
-                presentation: netease.presentationState(connection: model.connection),
-                onPrimary: performPrimaryRoomAction,
-                onNext: { Task { await netease.command(.next) } },
-                onOpenTab: { selectTab(.listenTogether) }
-            )
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-                topChromeHeight = frame.height
-                // Where the disc ends in the window is where the chat
-                // becomes fully legible again.
-                topFadeHeight = frame.maxY
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        }
-        .background(MurmurTheme.paper.ignoresSafeArea())
+            .modifier(MurmurChatNavigation(session: model))
+            .background(MurmurTheme.paper.ignoresSafeArea())
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
         .sheet(isPresented: $showCamera) {
             CameraPicker(
                 onCaptureFile: { model.preparePhoto(at: $0) },
@@ -270,14 +107,7 @@ struct MurmurChatView: View {
     }
 }
 
-/// 浮在对话上方的东西：那颗 Murmur 标记，以及房间活着时它长成的那张卡片。
-///
-/// 这里以前是一条 90pt 的全宽玻璃条，占掉聊天页整个顶部，把标记也顶没了；
-/// 上一首、下一首和结束还得再点开一个省略号弹层。现在那些都在「一起听」那一
-/// 整屏里，这里只剩一张能暂停、能切下一首、能点进去的小卡片。
-///
-/// 这个 view 本身留着不动是有原因的：它的 `.onGeometryChange` 是聊天内容顶部
-/// 内边距和 transcript 渐隐遮罩的唯一数据源。
+/// Optional connection and active-room status; no space when connected and idle.
 private struct MurmurTopChrome: View {
     let connection: MurmurConnectionState
     let room: ListenTogetherRoomSnapshotV1?
@@ -288,33 +118,33 @@ private struct MurmurTopChrome: View {
     let onOpenTab: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            ListenTogetherCard(
-                room: room,
-                track: track,
-                presentation: presentation,
-                onPrimary: onPrimary,
-                onNext: onNext,
-                onOpen: onOpenTab
-            )
-            Spacer(minLength: 0)
-            // 房间活着的时候不再单独挂连接胶囊：卡片的 offline 态说的是同一件
-            // 事，两个都留下会在 44pt 的高度里挤两条状态。
-            if connection != .connected, presentation == .inactive {
-                Text(connection.label)
-                    .font(MurmurTheme.body(.caption2, weight: .medium))
-                    .foregroundStyle(connectionCaptionColor)
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .background(MurmurTheme.raisedPaper, in: Capsule())
-                    .overlay { Capsule().stroke(MurmurTheme.rule, lineWidth: 1) }
+        if presentation != .inactive || connection != .connected {
+            HStack(alignment: .top, spacing: 8) {
+                ListenTogetherCard(
+                    room: room,
+                    track: track,
+                    presentation: presentation,
+                    onPrimary: onPrimary,
+                    onNext: onNext,
+                    onOpen: onOpenTab
+                )
+                Spacer(minLength: 0)
+                // An active room already presents its own connection state.
+                if connection != .connected, presentation == .inactive {
+                    Text(connection.label)
+                        .font(MurmurTheme.body(.caption2, weight: .medium))
+                        .foregroundStyle(connectionCaptionColor)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(MurmurTheme.raisedPaper, in: Capsule())
+                }
             }
+            .frame(maxWidth: MurmurTheme.contentWidth)
+            .padding(.horizontal, MurmurTheme.pageInset)
+            .padding(.top, 6)
+            .padding(.bottom, 8)
+            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: MurmurTheme.contentWidth)
-        .padding(.horizontal, MurmurTheme.pageInset)
-        .padding(.top, 6)
-        .padding(.bottom, 8)
-        .frame(maxWidth: .infinity)
     }
 
     private var connectionCaptionColor: Color {
@@ -450,7 +280,9 @@ struct EnrollmentView: View {
                 }
 
                 if let failure = model.failure {
-                    MurmurNotice(message: failure.message, identifier: "enrollment-error")
+                    Text(failure.message)
+                        .foregroundStyle(MurmurTheme.coral)
+                        .accessibilityIdentifier("enrollment-error")
                 }
 
                 Button(action: connect) {
@@ -463,7 +295,7 @@ struct EnrollmentView: View {
                     .foregroundStyle(MurmurTheme.paper)
                     .background(MurmurTheme.ink, in: RoundedRectangle(cornerRadius: 12))
                 }
-                .buttonStyle(MurmurPressStyle())
+                .buttonStyle(.automatic)
                 .disabled(inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.phase.isBusy)
                 .opacity(inviteCode.isEmpty ? 0.55 : 1)
                 .accessibilityIdentifier("enroll-button")
@@ -500,7 +332,6 @@ private struct MomentWorkbench: View {
     @Binding var showCamera: Bool
     @ObservedObject var music: MusicModule
     @ObservedObject private var netease: NeteaseMusicModel
-    @State private var showPhotoSource = false
     @State private var showMusicPicker = false
     @State private var openPhoto: MurmurPhotoPreview?
     /// Bumped whenever the field takes focus.  The keyboard notification alone
@@ -525,10 +356,8 @@ private struct MomentWorkbench: View {
     /// the composer never leaving its resting position.  One piece of shared
     /// focus state has no such gap.
     @FocusState private var composerFocused: Bool
-    @EnvironmentObject private var keyboard: MurmurKeyboardState
-    @Environment(\.murmurTabBarClearance) private var tabBarClearance
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.murmurReduceMotion) private var reduceMotion
     @Environment(\.openURL) private var openURL
     @ScaledMetric(relativeTo: .body) private var neteaseShareHeightLimit: CGFloat = 360
 
@@ -537,19 +366,6 @@ private struct MomentWorkbench: View {
         self._showCamera = showCamera
         self.music = music
         self.netease = music.netease
-    }
-
-    private var keyboardSupplement: CGFloat {
-        MurmurKeyboardClearance.supplemental(
-            overlap: keyboard.overlap,
-            resting: tabBarClearance
-        )
-    }
-
-    private func closePhotoSource() {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-            showPhotoSource = false
-        }
     }
 
     var body: some View {
@@ -575,53 +391,20 @@ private struct MomentWorkbench: View {
             } : nil,
             listenTogetherRoom: netease.room
         )
-            // A tap anywhere off the menu closes it, the way a popover does.
-            // The catcher covers the transcript and nothing else: over the
-            // whole screen it would sit on top of the menu it is meant to be
-            // outside of and eat the taps meant for it.
-            .overlay {
-                if showPhotoSource {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture { closePhotoSource() }
-                        .accessibilityLabel("关闭添加照片菜单")
-                }
-            }
-            // The photo waits here, pinned over the conversation just above
-            // the field, at the size of a thing you are about to send.  It is
-            // not part of the strip below: whatever grows the inset bar joins
-            // the safe-area accounting the keyboard lift lives in, and past a
-            // point SwiftUI adds the overflow back on top of that lift — the
-            // field ended up a band of paper above the keyboard.  A floating
-            // tile is not part of that accounting.  The transcript keeps a
-            // spacer of the same height at its foot so nothing hides under it.
-            .overlay(alignment: .bottom) {
-                if model.draftPhoto != nil || model.isPreparingPhoto {
-                    DraftPhotoTile(
-                        photo: model.draftPhoto,
-                        onOpen: { photo in
-                            openPhoto = .init(id: photo.id.uuidString, url: photo.originalURL)
-                        },
-                        onRemove: { model.removeDraftPhoto() }
-                    )
-                    .frame(maxWidth: MurmurTheme.contentWidth, alignment: .leading)
-                    .padding(.leading, MurmurTheme.pageInset)
-                    .padding(.bottom, 2)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-                }
-            }
-            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.draftPhoto?.id)
-            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: model.isPreparingPhoto)
-            // The strip carries no paper of its own — only the rounded field,
-            // and above it a single line when the draft itself is the problem.
-            // A failed *send* is not shown here at all: it belongs to its own
-            // bubble up in the conversation, where the person can see which
-            // line it was and press the mark to send it again.  The inset is
-            // what reserves the room, so at rest nothing is hidden, and the
-            // padding at its foot is what moves the field when the keyboard
-            // arrives — on the keyboard's own curve, not SwiftUI's.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
+                    if model.draftPhoto != nil || model.isPreparingPhoto {
+                        DraftPhotoTile(
+                            photo: model.draftPhoto,
+                            onOpen: { photo in
+                                openPhoto = .init(id: photo.id.uuidString, url: photo.originalURL)
+                            },
+                            onRemove: { model.removeDraftPhoto() }
+                        )
+                        .frame(maxWidth: MurmurTheme.contentWidth, alignment: .leading)
+                        .padding(.horizontal, MurmurTheme.pageInset)
+                        .padding(.top, 8)
+                    }
                     if let draftFailure = model.draftFailure {
                         DraftFailureLine(message: draftFailure)
                             .transition(.opacity)
@@ -629,7 +412,6 @@ private struct MomentWorkbench: View {
                     MomentComposer(
                         model: model,
                         showCamera: $showCamera,
-                        showPhotoSource: $showPhotoSource,
                         onFocus: { focusPulse += 1 },
                         onPickFromLibrary: { showLibrary = true },
                         // Two gates, and both have to be open: this build has
@@ -647,10 +429,7 @@ private struct MomentWorkbench: View {
                         focused: $composerFocused
                     )
                 }
-                // The shell always reserves the measured tab-bar height. Only
-                // the part of the keyboard beyond that stable base is added,
-                // so crossing the show/hide boundary cannot jump the field.
-                .padding(.bottom, keyboardSupplement)
+                .background(MurmurTheme.paper)
                 .animation(
                     reduceMotion ? nil : .easeInOut(duration: 0.18),
                     value: model.draftFailure
@@ -742,13 +521,8 @@ private struct MomentWorkbench: View {
             stubPhotoIfAsked()
 #endif
         }
-        // The keyboard is loaded before it is wanted, not when the field is
-        // tapped.  Once on arrival, and again on the way back from the
-        // background, where iOS may have reclaimed it while we were away.
-        .onAppear { warmKeyboard() }
         .onChange(of: scenePhase, initial: false) { _, phase in
             guard phase == .active else { return }
-            warmKeyboard()
             Task {
                 await model.checkProactive()
                 if music.isNeteaseCatalogAvailable {
@@ -791,34 +565,15 @@ private struct MomentWorkbench: View {
         } message: {
             Text(netease.failureMessage ?? "")
         }
-        .onChange(of: composerFocused, initial: true) { _, focused in
-            keyboard.focusDidChange(focused)
-        }
+        .toolbar(composerFocused ? .hidden : .visible, for: .tabBar)
         .onDisappear {
             composerFocused = false
-            keyboard.focusDidChange(false)
         }
 #if DEBUG
         .onChange(of: composerFocused, initial: true) { _, focused in
             MurmurDiagnostics.recordKeyboardFocus(source: "chat", focused: focused)
         }
-        .onChange(of: keyboardSupplement, initial: true) { _, clearance in
-            MurmurDiagnostics.recordKeyboardClearance(
-                source: "chat",
-                overlap: keyboard.overlap,
-                clearance: clearance
-            )
-        }
 #endif
-    }
-
-    /// Warming borrows first responder for a turn, which is fine on an idle
-    /// screen and not fine over a half-written sentence: coming back from the
-    /// background with the field still focused, that turn would take away the
-    /// keyboard iOS is in the middle of restoring.
-    private func warmKeyboard() {
-        guard !composerFocused else { return }
-        keyboard.warm()
     }
 
 #if DEBUG
@@ -846,7 +601,6 @@ private struct MomentWorkbench: View {
 private struct MomentComposer: View {
     @ObservedObject var model: MurmurSessionModel
     @Binding var showCamera: Bool
-    @Binding var showPhotoSource: Bool
     let onFocus: () -> Void
     let onPickFromLibrary: () -> Void
     var onPickMusic: (() -> Void)?
@@ -856,130 +610,43 @@ private struct MomentComposer: View {
     /// Owned by the workbench, so tapping the conversation can drop focus in the
     /// same turn the tap is seen rather than a pass later.
     @FocusState.Binding var focused: Bool
-    @State private var menuHeight: CGFloat = 0
     /// A box rather than plain `@State`: the two paths that see a reach for the
     /// field fire in the same update pass, and a `@State` write is not visible
     /// to the second one, so both signalled and two scrolls fought each other.
     @State private var focusClock = FocusClock()
 
     var body: some View {
-        // Both controls live inside the field as equal discs, so the row is
-        // one container instead of a square button beside a taller pill.
-        HStack(alignment: .bottom, spacing: 6) {
-                Button {
-                    focused = false
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
-                        showPhotoSource.toggle()
-                    }
-                } label: {
-                    Image(systemName: "plus")
-                        .rotationEffect(.degrees(showPhotoSource ? 45 : 0))
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(MurmurTheme.ink)
-                        .frame(width: MurmurTheme.disc, height: MurmurTheme.disc)
-                        .background(MurmurTheme.paper, in: Circle())
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+        MurmurComposer(
+            text: $model.draftText,
+            focused: $focused,
+            placeholder: "发一张图，或说点什么",
+            fieldLabel: "这一刻的文字",
+            fieldIdentifier: "moment-composer",
+            sendIdentifier: "send-moment",
+            canSend: model.canSubmit,
+            onSend: submit,
+            sendLabel: "发送这一刻",
+            onFocus: signalFocus
+        ) {
+            Menu {
+                Button("从照片中选择", systemImage: "photo.on.rectangle", action: onPickFromLibrary)
+                if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                    Button("拍照", systemImage: "camera") { showCamera = true }
                 }
-                .buttonStyle(MurmurPressStyle())
-                .disabled(model.isPreparingPhoto)
-                .accessibilityLabel("添加照片")
-
-                    // Never disabled: a reply still arriving is no reason to
-                    // take the keyboard away mid-thought.
-                    TextField("发一张图，或说点什么", text: $model.draftText, axis: .vertical)
-                        .font(MurmurTheme.body(.body))
-                        .foregroundStyle(MurmurTheme.ink)
-                        .lineLimit(1...4)
-                        .focused($focused)
-                        .submitLabel(.send)
-                        .onSubmit(submit)
-                        .onChange(of: model.draftText, initial: false) { _, newValue in
-                            guard newValue.contains("\n") else { return }
-                            model.draftText = newValue.replacingOccurrences(of: "\n", with: "")
-                            submit()
-                        }
-                        .padding(.leading, 8)
-                        .padding(.vertical, 12)
-                        // Both paths are needed and neither is enough alone:
-                        // the gesture catches a tap on a field that is already
-                        // first responder (coming back from history), the focus
-                        // change catches focus arriving any other way.  They
-                        // overlap on the ordinary tap, so the signal is
-                        // coalesced — two scrolls milliseconds apart fought
-                        // over the same position.
-                        .simultaneousGesture(TapGesture().onEnded {
-#if DEBUG
-                            MurmurDiagnostics.record("field tap gesture")
-#endif
-                            signalFocus()
-                        })
-                        .accessibilityLabel("这一刻的文字")
-                        .accessibilityIdentifier("moment-composer")
-
-                    Button(action: submit) {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(model.canSubmit ? MurmurTheme.paper : MurmurTheme.secondaryInk)
-                            // Inset from the 44pt hit area so the disc sits
-                            // inside the field; the tap target keeps its size.
-                            .frame(width: MurmurTheme.disc, height: MurmurTheme.disc)
-                            .background(
-                                model.canSubmit ? MurmurTheme.ink : MurmurTheme.rule,
-                                in: Circle()
-                            )
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(MurmurPressStyle())
-                    .disabled(!model.canSubmit)
-                    .accessibilityLabel("发送这一刻")
-                    .accessibilityIdentifier("send-moment")
-            }
-            .padding(.horizontal, 5)
-            .padding(.vertical, 4)
-            .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 26))
-            .overlay { RoundedRectangle(cornerRadius: 26).stroke(MurmurTheme.rule, lineWidth: 1) }
-            // Rising out of the field rather than dropping over it: the menu's
-            // own bottom is pinned just above the pill, so it grows upward from
-            // the button that opened it.
-            .overlay(alignment: .topLeading) {
-                if showPhotoSource {
-                    PhotoSourceMenu(
-                        onLibrary: onPickFromLibrary,
-                        onCamera: { showCamera = true },
-                        onMusic: onPickMusic,
-                        onDismiss: { closePhotoSource() }
-                    )
-                    // Lift by its own measured height so the card's bottom
-                    // rests just above the pill, whatever rows it ends up with.
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
-                        menuHeight = $0
-                    }
-                    .offset(y: -(menuHeight + 10))
-                    .transition(
-                        .scale(scale: 0.86, anchor: .bottomLeading)
-                        .combined(with: .opacity)
-                    )
+                if let onPickMusic {
+                    Button("音乐", systemImage: "music.note", action: onPickMusic)
                 }
+            } label: {
+                Image(systemName: "plus").frame(width: 44, height: 44)
             }
-        .frame(maxWidth: MurmurTheme.contentWidth)
-        .padding(.horizontal, MurmurTheme.pageInset)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
-        .frame(maxWidth: .infinity)
-        .accessibilitySortPriority(3)
+            .disabled(model.isPreparingPhoto)
+            .accessibilityLabel("添加照片")
+        }
 #if DEBUG
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: {
             MurmurDiagnostics.composerTop = $0
         }
 #endif
-        .onChange(of: focused, initial: false) { _, isFocused in
-#if DEBUG
-            MurmurDiagnostics.record("field focus -> \(isFocused)")
-#endif
-            if isFocused { signalFocus() }
-        }
     }
 
     /// One scroll per reach for the field, however many ways the tap is seen.
@@ -995,12 +662,6 @@ private struct MomentComposer: View {
         guard now.timeIntervalSince(focusClock.last) > 0.5 else { return }
         focusClock.last = now
         onFocus()
-    }
-
-    private func closePhotoSource() {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-            showPhotoSource = false
-        }
     }
 
     /// The keyboard stays up.  Sending a line is not the end of the thought —
@@ -1151,8 +812,14 @@ struct MurmurSettingsView: View {
                 Section("聊天记录") {
                     Button("清空这一刻") { model.clearCurrent() }
                         .disabled(!model.hasCurrentMoment && model.draftPhoto == nil && model.draftText.isEmpty)
+                    // Also offered when the history could not be read: clearing
+                    // is the way out of a store that keeps failing.
                     Button("清空聊天记录", role: .destructive) { confirmClearTranscript = true }
-                        .disabled(model.messages.isEmpty)
+                        .disabled(
+                            model.messages.isEmpty
+                                && model.transcriptDays.isEmpty
+                                && model.storageFailure == nil
+                        )
                         .accessibilityIdentifier("clear-transcript")
                     Text("聊天记录连同其中的照片只存在这台设备上，删除 App 就一并消失。服务端保存的是私有记忆，不是对话本身。")
                         .font(.footnote)
@@ -1164,9 +831,13 @@ struct MurmurSettingsView: View {
                 Section("当年今日") {
                     LabeledContent("留下的日子", value: "\(model.archive.daysWithRooms.count) 天")
                     Button("清空当年今日的记录", role: .destructive) { confirmClearArchive = true }
-                        .disabled(model.archive.rows.isEmpty)
+                        .disabled(
+                            model.archive.rows.isEmpty
+                                && model.archive.dayIndex.isEmpty
+                                && model.archive.storageFailure == nil
+                        )
                         .accessibilityIdentifier("clear-archive")
-                    Text("日历上的每一天，连同那天聊过的照片，都只存在这台设备上。清空之后日历会空掉，服务端的记忆不受影响。")
+                    Text("照片房间记录独立保存在这台设备上。清空不会删除服务端记忆。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -1181,16 +852,12 @@ struct MurmurSettingsView: View {
                     Section { Text(message).foregroundStyle(.secondary) }
                 }
             }
-            .scrollContentBackground(.hidden)
-            .background(MurmurTheme.paper)
             .task {
                 await model.loadPreferences()
                 await model.refreshDevices()
             }
             .navigationTitle("我的")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-            }
             .alert("删除账号与全部记忆？", isPresented: $confirmDelete) {
                 Button("取消", role: .cancel) {}
                 Button("确认删除", role: .destructive) {
@@ -1350,7 +1017,7 @@ private struct DraftPhotoTile: View {
                             .clipShape(RoundedRectangle(cornerRadius: 14))
                             .contentShape(RoundedRectangle(cornerRadius: 14))
                     }
-                    .buttonStyle(MurmurPressStyle())
+                    .buttonStyle(.automatic)
                     .accessibilityLabel("待发送的照片，轻点放大")
                     .accessibilityIdentifier("draft-photo")
                 } else {
@@ -1380,7 +1047,7 @@ private struct DraftPhotoTile: View {
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(MurmurPressStyle())
+                .buttonStyle(.automatic)
                 .offset(x: 13, y: -13)
                 .accessibilityLabel("移除待发送照片")
                 .accessibilityIdentifier("remove-draft-photo")
@@ -1392,8 +1059,6 @@ private struct DraftPhotoTile: View {
     }
 }
 
-/// The add-photo menu, drawn in the app's own paper instead of system chrome
-/// so it belongs to the composer it rises out of.
 /// The Audius account, in 我的.
 ///
 /// Connecting is what unlocks 收藏 and 歌单 in the picker; public search works
@@ -1457,76 +1122,6 @@ private struct AudiusSection: View {
     }
 }
 
-private struct PhotoSourceMenu: View {
-    let onLibrary: () -> Void
-    let onCamera: () -> Void
-    /// nil when music is off for this build or this account, in which case the
-    /// menu is exactly what it was before songs existed.
-    var onMusic: (() -> Void)?
-    let onDismiss: () -> Void
-
-    private var hasCamera: Bool {
-        UIImagePickerController.isSourceTypeAvailable(.camera)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            row("从照片中选择", icon: "photo.on.rectangle") {
-                onDismiss()
-                onLibrary()
-            }
-            if hasCamera {
-                Rectangle()
-                    .fill(MurmurTheme.rule)
-                    .frame(height: 1)
-                    .padding(.leading, 48)
-                row("拍照", icon: "camera") {
-                    onDismiss()
-                    onCamera()
-                }
-            }
-            if let onMusic {
-                Rectangle()
-                    .fill(MurmurTheme.rule)
-                    .frame(height: 1)
-                    .padding(.leading, 48)
-                row("音乐", icon: "music.note") {
-                    onDismiss()
-                    onMusic()
-                }
-            }
-        }
-        .frame(width: 210)
-        .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 16))
-        .overlay { RoundedRectangle(cornerRadius: 16).stroke(MurmurTheme.rule, lineWidth: 1) }
-        .shadow(color: MurmurTheme.ink.opacity(0.10), radius: 10, y: 4)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("photo-source-menu")
-    }
-
-    private func row(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 15, weight: .medium))
-                    .frame(width: 20)
-                Text(title)
-                    .font(MurmurTheme.body(.subheadline))
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(MurmurTheme.ink)
-            .padding(.horizontal, 14)
-            .frame(height: 48)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(MurmurPressStyle())
-    }
-}
-
-/// Something wrong with what is still in the composer — a photo that could not
-/// be read.  One coral line, not a card: the draft is right there under it, so
-/// the line only has to name the problem, and a box the height of a paragraph
-/// would push the whole conversation up to say one sentence.
 private struct DraftFailureLine: View {
     let message: String
 
@@ -1549,41 +1144,9 @@ private struct DraftFailureLine: View {
     }
 }
 
-/// The failure block on a screen that has nothing else on it — enrolment.  A
-/// screen with a conversation or a composer says it smaller and closer to the
-/// thing that failed; this is the one place where the failure *is* the content.
-private struct MurmurNotice: View {
-    let message: String
-    var identifier: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Rectangle()
-                .fill(MurmurTheme.coral)
-                .frame(width: 2)
-                .accessibilityHidden(true)
-            Text(message)
-                .font(MurmurTheme.body(.body))
-                .foregroundStyle(MurmurTheme.ink)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier(identifier)
-        }
-        .accessibilityElement(children: .contain)
-    }
-}
-
-/// The app's press feedback, shared by every control that is not a floating
-/// disc — including the failure mark in the transcript, which is why this is
-/// not file-private.
-struct MurmurPressStyle: ButtonStyle {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .opacity(configuration.isPressed ? 0.72 : 1)
-            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.98 : 1)
-            .animation(.easeOut(duration: reduceMotion ? 0.1 : 0.14), value: configuration.isPressed)
-    }
+/// Brief content changes; system navigation and keyboard own their motion.
+enum MurmurMotion {
+    static let content = Animation.easeOut(duration: 0.15)
 }
 
 private struct CameraPicker: UIViewControllerRepresentable {
@@ -1634,7 +1197,6 @@ private struct CameraPicker: UIViewControllerRepresentable {
     )
         .environmentObject(MurmurNotificationBridge.shared)
         .environmentObject(MurmurKeyboardState())
-        .environment(\.murmurTabBarClearance, 72)
 }
 
 private actor PreviewMurmurAPIClient: MurmurAPIClient {
@@ -1653,3 +1215,17 @@ private actor PreviewMurmurAPIClient: MurmurAPIClient {
     func deleteAccount() async throws {}
 }
 #endif
+
+// The system preference remains authoritative; the extra branch only lets
+// isolated UI tests exercise the same paths without changing simulator settings.
+extension EnvironmentValues {
+    var murmurReduceMotion: Bool {
+#if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--murmur-ui-testing"), arguments.contains("--murmur-ui-test-reduce-motion") {
+            return true
+        }
+#endif
+        return accessibilityReduceMotion
+    }
+}

@@ -30,6 +30,30 @@ final class MurmurSessionModel: ObservableObject {
     /// back off disk were already there, so they must not animate in, and the
     /// opening line must not be shown over a history that is still being read.
     @Published private(set) var transcriptRestored = false
+    /// A reading window loaded from disk — a jump to a date, or older pages
+    /// pulled in above the newest lines.  Nil while the screen shows `messages`.
+    @Published private(set) var historyPage: [MurmurMessage]?
+    @Published private(set) var transcriptDays: [MurmurTranscriptDay] = []
+    @Published private(set) var storageFailure: String?
+    @Published var readingDate = Date()
+    @Published private(set) var historyTarget: String?
+    @Published private(set) var navigationRevision = 0
+    @Published private(set) var loadingHistory = false
+    var visibleMessages: [MurmurMessage] { historyPage ?? messages }
+    /// Whether what is on screen ends at the newest line, so a new row belongs
+    /// in it.  A window opened on an older day keeps still until the person
+    /// comes back to the latest.
+    var historyFollowsLatest: Bool {
+        guard let historyPage else { return true }
+        return historyPage.last?.id == messages.last?.id
+    }
+    /// Whether what is on screen starts at the oldest line on this device, so
+    /// there is nothing earlier to load.
+    @Published private(set) var reachedEarliestHistory = false
+    /// The same for `messages` alone: true while it holds the whole history.
+    private var liveHoldsWholeHistory = false
+    private static let historyWindowLimit = 400
+
     /// Why an outgoing row never landed, keyed by that row.
     ///
     /// A send that failed belongs to the line the person wrote, not to the
@@ -75,6 +99,9 @@ final class MurmurSessionModel: ObservableObject {
     /// type the next line while Murmur is still answering the last one, and the
     /// server still sees one moment at a time.
     private var queue: [Submission] = []
+    private let transcriptWriter = MurmurSerialWriter()
+    private var clearingTranscript = false
+    private var uncopiedPhotos: [String: PhotoAttachment] = [:]
     private var pumpTask: Task<Void, Never>?
     private var pumpGeneration = 0
     private var isRunning = false
@@ -131,27 +158,182 @@ final class MurmurSessionModel: ObservableObject {
         defer { transcriptRestored = true }
         guard messages.isEmpty else { return }
         messages = await transcriptStore.load()
+        transcriptDays = await transcriptStore.days()
+        storageFailure = await transcriptStore.lastError
+        readingDate = messages.last?.sentAt ?? Date()
+        // A first page that comes back short is the whole history.
+        liveHoldsWholeHistory = storageFailure == nil && messages.count < MurmurTranscriptStore.pageSize
+        reachedEarliestHistory = liveHoldsWholeHistory
     }
 
-    func clearTranscript() async {
+    /// Deletes the conversation on this device and reports whether it is gone.
+    ///
+    /// Copies still landing and saves still queued finish first, so nothing
+    /// written after the wipe can bring a row or a photo back.  Sends in flight
+    /// are called off only once the wipe has succeeded: if it fails they carry
+    /// on, and the saves skipped in the meantime run again.
+    @discardableResult
+    func clearTranscript() async -> Bool {
+        guard !clearingTranscript else { return false }
+        clearingTranscript = true
+        defer { clearingTranscript = false }
+        for task in adoptTasks.values { await task.value }
+        await transcriptWriter.drain()
+        guard await transcriptStore.clear() else {
+            storageFailure = await transcriptStore.lastError
+            clearingTranscript = false
+            persistTranscript()
+            return false
+        }
+        // Sends about to be called off still hold their temporary originals.
+        let abandonedPhotos = queue.compactMap(\.photo) + [lastSubmission?.photo].compactMap { $0 }
+        cancelPump()
+        historyPage = nil
+        transcriptDays = []
+        storageFailure = nil
         messages = []
+        liveHoldsWholeHistory = true
+        reachedEarliestHistory = true
         pendingMessageID = nil
         adoptTasks = [:]
+        for photo in abandonedPhotos + Array(uncopiedPhotos.values) {
+            await photoLoader.discard(photo)
+        }
+        uncopiedPhotos = [:]
         for task in rebuildTasks.values { task.cancel() }
         rebuildTasks = [:]
         // The marks belonged to rows that no longer exist; the originals those
         // rows were holding for a resend go with them.
         withdrawResendOffers()
         sendFailures = [:]
-        await transcriptStore.clear()
+        return true
     }
 
+    /// Saves the whole in-memory window, so that once a save succeeds every row
+    /// in it is durable and the oldest may leave memory.
     private func persistTranscript() {
+        guard !clearingTranscript else { return }
         let snapshot = messages
-        Task { [transcriptStore] in await transcriptStore.save(snapshot) }
+        // The day index grows with the whole history, so it is only read again
+        // when the newest line starts a day the index does not have yet.
+        let newestDay = snapshot.last.map { MurmurDay.key($0.sentAt) }
+        let startsNewDay = newestDay.map { day in !transcriptDays.contains { $0.id == day } } ?? false
+        transcriptWriter.enqueue { [weak self, transcriptStore] in
+            let saved = await transcriptStore.save(snapshot)
+            guard let self else { return }
+            self.storageFailure = saved ? nil : await transcriptStore.lastError
+            if saved, startsNewDay {
+                self.transcriptDays = await transcriptStore.days()
+            }
+            // Only evict durable settled rows from RAM. Pending sends and
+            // failed writes keep their content for a visible retry.
+            if saved && self.messages.count > 300 {
+                let retained = Set(self.messages.suffix(300).map(\.id))
+                self.messages.removeAll { !retained.contains($0.id) && $0.delivery != .sending }
+                self.liveHoldsWholeHistory = false
+                if self.historyPage == nil { self.reachedEarliestHistory = false }
+            }
+        }
+    }
+
+    func retryTranscriptSave() {
+        Task {
+            // A failed initial read must be retried before an empty UI is
+            // treated as the user's current transcript. Saving never restores it.
+            if messages.isEmpty {
+                await loadTranscript()
+                guard storageFailure == nil else { return }
+            }
+            for (id, photo) in uncopiedPhotos {
+                guard let name = await transcriptStore.adoptImage(at: photo.originalURL, id: id),
+                      let index = messages.firstIndex(where: { $0.id == id })
+                else { continue }
+                messages[index].imageFile = name
+                uncopiedPhotos.removeValue(forKey: id)
+                // A send still uploading this photo, or holding it for a
+                // resend, deletes it on its own way out.
+                if !isStillSending(id), !isHeldForResend(photo) {
+                    await photoLoader.discard(photo)
+                }
+            }
+            persistTranscript()
+        }
+    }
+
+    func openChatDate(_ day: Date) async -> Bool {
+        guard !loadingHistory else { return false }
+        loadingHistory = true
+        defer { loadingHistory = false }
+        let storedPage = await transcriptStore.page(day: day)
+        let page = storedPage.map { stored in messages.first(where: { $0.id == stored.id }) ?? stored }
+        storageFailure = await transcriptStore.lastError
+        guard let first = page.first else { return false }
+        historyPage = page
+        // Older days may still come before this one.
+        reachedEarliestHistory = false
+        readingDate = first.sentAt
+        historyTarget = first.id
+        navigationRevision += 1
+        return true
+    }
+
+    func loadHistory(earlier: Bool) async {
+        guard !loadingHistory,
+              let anchor = earlier ? visibleMessages.first : visibleMessages.last
+        else { return }
+        loadingHistory = true
+        defer { loadingHistory = false }
+        let storedPage = await transcriptStore.page(
+            before: earlier ? anchor : nil,
+            after: earlier ? nil : anchor
+        )
+        var page = storedPage.map { stored in messages.first(where: { $0.id == stored.id }) ?? stored }
+        storageFailure = await transcriptStore.lastError
+        if earlier, storageFailure == nil, storedPage.count < MurmurTranscriptStore.pageSize {
+            // Nothing older than this is on the device.
+            reachedEarliestHistory = true
+            if storedPage.isEmpty, historyPage == nil { liveHoldsWholeHistory = true }
+        }
+        if !earlier, storedPage.count < MurmurTranscriptStore.pageSize {
+            // Stored history has run out.  Anything newer — a save still queued,
+            // a reply that just landed — so far lives only in memory.
+            let shown = Set(visibleMessages.map(\.id)).union(page.map(\.id))
+            let since = (page.last ?? anchor).sentAt
+            page += messages.filter { !shown.contains($0.id) && $0.sentAt >= since }
+        }
+        guard !page.isEmpty else { return }
+        let current = visibleMessages
+        var seen = Set<String>()
+        let combined = (earlier ? page + current : current + page).filter { seen.insert($0.id).inserted }
+        if earlier {
+            historyPage = Array(combined.prefix(Self.historyWindowLimit))
+        } else {
+            historyPage = Array(combined.suffix(Self.historyWindowLimit))
+            // The window slid forward past rows it used to start with.
+            if combined.count > Self.historyWindowLimit { reachedEarliestHistory = false }
+        }
+        historyTarget = anchor.id
+        navigationRevision += 1
+    }
+
+    func returnToLatest() {
+        historyPage = nil
+        reachedEarliestHistory = liveHoldsWholeHistory
+        readingDate = messages.last?.sentAt ?? Date()
+        historyTarget = nil
+        navigationRevision += 1
     }
 
     private func append(_ message: MurmurMessage) {
+        // A window that already reaches the newest line takes the new one as
+        // well; a window opened on an older day stays where the person put it.
+        if historyPage != nil, historyFollowsLatest {
+            historyPage?.append(message)
+            if let count = historyPage?.count, count > Self.historyWindowLimit {
+                historyPage?.removeFirst(count - Self.historyWindowLimit)
+                reachedEarliestHistory = false
+            }
+        }
         messages.append(message)
         persistTranscript()
     }
@@ -160,6 +342,9 @@ final class MurmurSessionModel: ObservableObject {
         guard let id = pendingMessageID,
               let index = messages.firstIndex(where: { $0.id == id }) else { return }
         mutate(&messages[index])
+        if let historyIndex = historyPage?.firstIndex(where: { $0.id == id }) {
+            historyPage?[historyIndex] = messages[index]
+        }
         persistTranscript()
     }
 
@@ -484,12 +669,19 @@ final class MurmurSessionModel: ObservableObject {
         proactiveMomentID = nil
         append(outgoing)
         if let photo {
+            // Until the transcript has its own copy, the temporary original is
+            // the only one there is.
+            uncopiedPhotos[outgoing.id] = photo
             adoptTasks[outgoing.id] = Task { [transcriptStore] in
                 let name = await transcriptStore.adoptImage(at: photo.originalURL, id: outgoing.id)
+                let copyFailure = await transcriptStore.lastError
                 await MainActor.run {
-                    guard let name,
-                          let index = self.messages.firstIndex(where: { $0.id == outgoing.id })
-                    else { return }
+                    guard let name else {
+                        self.storageFailure = copyFailure
+                        return
+                    }
+                    self.uncopiedPhotos.removeValue(forKey: outgoing.id)
+                    guard let index = self.messages.firstIndex(where: { $0.id == outgoing.id }) else { return }
                     self.messages[index].imageFile = name
                     self.persistTranscript()
                 }
@@ -538,6 +730,10 @@ final class MurmurSessionModel: ObservableObject {
     /// which, after a bad afternoon on the server, is a screen full of messages
     /// with no way to send any of them.
     func resend(_ messageID: String) {
+        if !messages.contains(where: { $0.id == messageID }), let row = historyPage?.first(where: { $0.id == messageID }) {
+            messages.append(row)
+            messages.sort { $0.sentAt < $1.sentAt }
+        }
         sendFailures.removeValue(forKey: messageID)
         if let index = messages.firstIndex(where: { $0.id == messageID }) {
             messages[index].delivery = .sending
@@ -742,16 +938,30 @@ final class MurmurSessionModel: ObservableObject {
         }
     }
 
+    /// Deletes the account and, with it, the conversation and photo-room
+    /// history kept on this device.
     func deleteAccount() async {
         settingsMessage = nil
         do {
             try await api.deleteAccount()
-            identity = nil
-            devices = []
-            connection = .needsEnrollment
-            clearCurrent()
         } catch {
             recordSettingsFailure(error)
+            return
+        }
+        // The account is gone on the server, so this device is no longer
+        // enrolled — whatever happens to its local copies below.
+        let chatCleared = await clearTranscript()
+        let archiveCleared = await archive.clear()
+        identity = nil
+        devices = []
+        connection = .needsEnrollment
+        clearCurrent()
+        if !chatCleared || !archiveCleared {
+            failure = MurmurFailure(
+                code: "local_clear_incomplete",
+                message: "账号已删除，但这台设备上的记录没有全部清空。删除 App 可以移除剩余记录。",
+                retryable: false
+            )
         }
     }
 
@@ -926,7 +1136,6 @@ final class MurmurSessionModel: ObservableObject {
                         case let .done(_, nextMove, nextScene):
                             move = nextMove
                             scene = nextScene
-                            phase = wasQuiet && bubbles.isEmpty ? .quiet : .complete
                             terminal = true
                         case let .failure(_, streamFailure):
                             throw streamFailure
@@ -942,6 +1151,9 @@ final class MurmurSessionModel: ObservableObject {
                 }
             }
             await discardAfterTranscriptCopy(submission)
+            // Quiet is Murmur choosing to say nothing.  A reply that was only a
+            // song still said something.
+            phase = wasQuiet && bubbles.isEmpty ? .quiet : .complete
             pendingMessageID = nil
             if !bubbles.isEmpty && !didRequestNotificationPrompt {
                 didRequestNotificationPrompt = true
@@ -987,9 +1199,25 @@ final class MurmurSessionModel: ObservableObject {
     /// The upload's temporary file is also what the transcript copies from, so
     /// deleting it before that copy lands would leave a photo message with no
     /// photo in it.
+    ///
+    /// Once the copy exists the original goes, whether or not the row itself
+    /// has been saved yet: the next save that succeeds carries the row, and the
+    /// copy is already in transcript storage.  Only a photo whose copy failed
+    /// keeps its original — the one picture the row can still get — until the
+    /// copy is retried, the history is cleared, or the next cold start sweeps it.
     private func discardAfterTranscriptCopy(_ submission: Submission) async {
         await adoptTasks.removeValue(forKey: submission.messageID)?.value
+        await transcriptWriter.drain()
+        if submission.photo != nil, uncopiedPhotos[submission.messageID] != nil {
+            storageFailure = await transcriptStore.lastError ?? "图片尚未保存到本机，请重试。"
+            return
+        }
         await photoLoader.discard(submission.photo)
+    }
+
+    /// Whether this row's send is queued or on the wire right now.
+    private func isStillSending(_ messageID: String) -> Bool {
+        pendingMessageID == messageID || queue.contains { $0.messageID == messageID }
     }
 
     private func refreshProactive(expectedMomentID: String?) async {

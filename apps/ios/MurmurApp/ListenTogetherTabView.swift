@@ -28,13 +28,14 @@ struct ListenTogetherTabView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: MurmurTheme.contentWidth)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(MurmurTheme.paper.ignoresSafeArea())
+        .navigationTitle("一起听")
+        .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showPicker) {
             NeteaseSearchSheet(
                 api: netease.api,
@@ -44,31 +45,6 @@ struct ListenTogetherTabView: View {
         }
         .accessibilityIdentifier("listen-together-tab")
     }
-
-    // MARK: - Header
-
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("一起听")
-                .font(MurmurTheme.display(.title2))
-                .foregroundStyle(MurmurTheme.ink)
-                .accessibilityAddTraits(.isHeader)
-            Spacer(minLength: 8)
-            if music.isListenTogetherAvailable, presentation != .inactive {
-                Text(presentation.statusTag)
-                    .font(MurmurTheme.body(.caption2, weight: .semibold))
-                    .foregroundStyle(presentation.statusColor)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(presentation.statusColor.opacity(0.13), in: Capsule())
-            }
-        }
-        .padding(.horizontal, MurmurTheme.pageInset)
-        .padding(.top, 8)
-        .padding(.bottom, 16)
-    }
-
-    // MARK: - Which face
 
     @ViewBuilder
     private var content: some View {
@@ -122,12 +98,8 @@ struct ListenTogetherTabView: View {
                 .fixedSize(horizontal: false, vertical: true)
             if music.isNeteaseSearchAvailable {
                 Button("选一首歌") { showPicker = true }
-                    .font(MurmurTheme.body(.subheadline, weight: .semibold))
-                    .foregroundStyle(MurmurTheme.onAccent)
-                    .padding(.horizontal, 24)
-                    .frame(minHeight: MurmurTheme.floatingDisc)
-                    .background(MurmurTheme.accent, in: Capsule())
-                    .buttonStyle(MurmurPressStyle())
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                     // 离线时搜索一定失败。给一个必然打不开的门不如先关上它。
                     .disabled(model.connection.isOffline)
                     .opacity(model.connection.isOffline ? 0.45 : 1)
@@ -179,14 +151,9 @@ struct ListenTogetherTabView: View {
                     }
                 } label: {
                     Text("重新建房")
-                        .font(MurmurTheme.body(.subheadline, weight: .semibold))
-                        .foregroundStyle(MurmurTheme.onAccent)
-                        .padding(.horizontal, 24)
-                        .frame(minHeight: MurmurTheme.floatingDisc)
-                        .background(MurmurTheme.accent, in: Capsule())
-                        .contentShape(Capsule())
                 }
-                .buttonStyle(MurmurPressStyle())
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             default:
                 EmptyView()
             }
@@ -197,6 +164,7 @@ struct ListenTogetherTabView: View {
     // MARK: - The player
 
     private var player: some View {
+        ScrollView {
         VStack(spacing: 0) {
             Spacer(minLength: 8)
             cover
@@ -246,6 +214,7 @@ struct ListenTogetherTabView: View {
         }
         .padding(.horizontal, MurmurTheme.pageInset)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: presentation)
+        }
     }
 
     @ViewBuilder
@@ -301,40 +270,23 @@ struct ListenTogetherTabView: View {
     private func quietKey(
         _ symbol: String, label: String, action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(MurmurTheme.body(.subheadline, weight: .semibold))
-                .foregroundStyle(MurmurTheme.ink)
-                .frame(width: 46, height: 46)
-                .background(MurmurTheme.raisedPaper.opacity(0.74), in: Circle())
-                .overlay { Circle().stroke(MurmurTheme.rule, lineWidth: 1) }
-                .contentShape(Circle())
-        }
-        .buttonStyle(MurmurPressStyle())
-        .disabled(!sideKeysEnabled)
-        .opacity(sideKeysEnabled ? 1 : 0.4)
-        .accessibilityLabel(label)
+        Button(label, systemImage: symbol, action: action)
+            .labelStyle(.iconOnly)
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .buttonBorderShape(.circle)
+            .disabled(!sideKeysEnabled)
     }
 
     private var primaryKey: some View {
         Button(action: performPrimaryAction) {
-            Group {
-                if presentation.isSyncing {
-                    ProgressView().controlSize(.regular).tint(MurmurTheme.onAccent)
-                } else {
-                    Image(systemName: presentation.primarySymbol)
-                        .font(.system(size: 24, weight: .semibold))
-                }
-            }
-            // 全屏唯一一处填充 accent 的地方。
-            .foregroundStyle(MurmurTheme.onAccent)
-            .frame(width: 64, height: 64)
-            .background(MurmurTheme.accent, in: Circle())
-            .contentShape(Circle())
+            if presentation.isSyncing { ProgressView() }
+            else { Image(systemName: presentation.primarySymbol) }
         }
-        .buttonStyle(MurmurPressStyle())
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .buttonBorderShape(.circle)
         .disabled(presentation.isSyncing || presentation == .offline)
-        .opacity(presentation == .offline ? 0.45 : 1)
         .accessibilityLabel(presentation.primaryAccessibilityLabel)
     }
 
@@ -353,7 +305,7 @@ struct ListenTogetherTabView: View {
                 .font(MurmurTheme.body(.subheadline, weight: .semibold))
                 .foregroundStyle(MurmurTheme.coral)
                 .frame(minHeight: MurmurTheme.floatingDisc)
-                .buttonStyle(MurmurPressStyle())
+                .buttonStyle(.automatic)
                 .disabled(presentation == .offline)
             if let failure = netease.failureMessage {
                 Text(failure)
@@ -366,14 +318,7 @@ struct ListenTogetherTabView: View {
     }
 
     private func quietPill(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .font(MurmurTheme.body(.subheadline, weight: .medium))
-            .foregroundStyle(MurmurTheme.ink)
-            .padding(.horizontal, 20)
-            .frame(minHeight: MurmurTheme.floatingDisc)
-            .background(MurmurTheme.raisedPaper, in: Capsule())
-            .overlay { Capsule().stroke(MurmurTheme.rule, lineWidth: 1) }
-            .buttonStyle(MurmurPressStyle())
+        Button(title, action: action).buttonStyle(.bordered).controlSize(.large)
     }
 
     // MARK: - Bits
@@ -518,8 +463,9 @@ struct NeteaseSearchSheet: View {
     let onPick: (MusicTrackAttachmentV1) -> Void
 
     @StateObject private var model: NeteaseSearchModel
+    /// The sheet exists to search, so the field is active from the start.
+    @State private var searchActive = false
     @Environment(\.dismiss) private var dismiss
-    @FocusState private var focused: Bool
 
     init(
         api: any MurmurAPIClient,
@@ -537,11 +483,12 @@ struct NeteaseSearchSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                field
-                Divider().padding(.horizontal, MurmurTheme.pageInset)
                 results
             }
             .background(MurmurTheme.paper.ignoresSafeArea())
+            .searchable(text: $model.query, isPresented: $searchActive, prompt: "搜网易云的歌")
+            .onSubmit(of: .search) { model.search() }
+            .onAppear { searchActive = true }
             .navigationTitle("选一首歌")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -551,26 +498,6 @@ struct NeteaseSearchSheet: View {
             }
         }
         .presentationDetents([.large])
-        .onAppear { focused = true }
-    }
-
-    private var field: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(MurmurTheme.secondaryInk)
-                .accessibilityHidden(true)
-            TextField("搜网易云的歌", text: $model.query)
-                .font(MurmurTheme.body(.body))
-                .focused($focused)
-                .submitLabel(.search)
-                .onSubmit { model.search() }
-                .accessibilityIdentifier("netease-search-field")
-        }
-        .padding(.horizontal, 14)
-        .frame(minHeight: MurmurTheme.floatingDisc)
-        .background(MurmurTheme.raisedPaper, in: Capsule())
-        .overlay { Capsule().stroke(MurmurTheme.rule, lineWidth: 1) }
-        .padding(MurmurTheme.pageInset)
     }
 
     @ViewBuilder

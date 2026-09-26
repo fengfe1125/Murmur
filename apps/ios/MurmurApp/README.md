@@ -1,9 +1,10 @@
 # Murmur iOS
 
-> 状态：现状记录｜适用：iPhone/iPad 主客户端｜核验：2026-08-28｜依据：PR #13、PR #14；未宣称本轮真机验收
+> 状态：现状记录｜适用：iPhone/iPad 主客户端｜核验：2026-09-24｜依据：PR #13、PR #14、PR #37；未宣称本轮真机验收
 
-iOS 是体验主线，最低 iOS 18，不支持 Mac Catalyst。当前入口仍是聊天、当年今日、我的。
+iOS 是体验主线，最低 iOS 18，不支持 Mac Catalyst。入口是系统标签栏的聊天、一起听、当年今日、我的。
 聊天在本机保留并恢复；照片房间使用独立按天存档，可续聊旧日期。清空两个记录分别操作。
+两份记录各在原目录的 SQLite 中，旧 JSON 首次读取时导入，见 [数据生命周期](../../../docs/architecture/data-lifecycle.md)。
 当年今日会读旧照片的拍摄时间与位置（`PHAsset`，不解 EXIF，也不申请定位权限），
 地名在本机反解后随上传声明；经纬度只在服务端折成匿名指纹，不落库、不出网做地图查询。
 新定位中的日记确认和风格选择尚未实现，见 [当前能力](../../../docs/product/current-state.md)。
@@ -27,6 +28,8 @@ xcodebuild test -project apps/ios/MurmurApp.xcodeproj -scheme Murmur \
   -destination 'platform=iOS Simulator,name=iPhone 17' -only-testing:MurmurTests
 ```
 
-当年今日的 Metal shader 需要对应 Xcode Metal toolchain。测试与构建产物不提交。
-现有单元测试覆盖身份、SSE、失败恢复、临时文件、聊天持久化和独立存档。
+测试与构建产物不提交。
+现有单元测试覆盖身份、SSE、失败恢复、临时文件、聊天持久化、日期分页、旧格式导入和独立存档。
 App Attest/APNs 真机、签名与生产环境必须另行验收，模拟器和无签名编译不替代它们。
+
+界面重构的检查项与截图见 [界面验收记录](../../../docs/validation/native-chat-photo-refactor-2026-09-23.md)。

@@ -1,30 +1,4 @@
 import Foundation
-import Metal
-
-/// The dissolve shader's availability, proven before any gesture can reach it.
-///
-/// `ShaderLibrary.default` resolves functions by name at draw time, so a
-/// .metal file that never made Compile Sources — or a misspelled function
-/// name — compiles clean and crashes mid-swipe.  Reading the default Metal
-/// library's symbol table up front demotes a missing shader to a plain fade
-/// instead of a crash.
-enum MurmurShaderSupport {
-    static let particleDissolve: Bool = {
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let library = try? device.makeDefaultLibrary(bundle: .main)
-        else { return false }
-        let found = library.functionNames.contains("onThisDayDissolve")
-#if DEBUG
-        if !found {
-            Task { @MainActor in
-                MurmurDiagnostics.record("onThisDayDissolve shader missing; send falls back to fade")
-            }
-        }
-#endif
-        return found
-    }()
-}
-
 enum MurmurEnvironment {
     @MainActor
     static func makeAPIClient() -> any MurmurAPIClient {
@@ -87,6 +61,9 @@ enum MurmurEnvironment {
             if arguments.contains("--murmur-reset-transcript") {
                 try? FileManager.default.removeItem(at: directory)
             }
+            if arguments.contains("--murmur-seed-dated-chat") {
+                seedDatedUITestTranscript(in: directory)
+            }
             if arguments.contains("--murmur-seed-long-transcript") {
                 seedLongUITestTranscript(in: directory)
             }
@@ -113,6 +90,24 @@ enum MurmurEnvironment {
                 momentID: "ui-long-moment-\(index / 2)"
             )
         }
+        writeUITestTranscript(rows, in: directory)
+    }
+
+    /// Yesterday and today, so the chat calendar has two dated days to jump
+    /// between and a latest line to come back to.
+    private static func seedDatedUITestTranscript(in directory: URL) {
+        let now = Date()
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: now) ?? now.addingTimeInterval(-86_400)
+        writeUITestTranscript([
+            MurmurMessage(id: "dated-yesterday", author: .you, text: "昨天整理了旅行照片。", sentAt: yesterday),
+            MurmurMessage(id: "dated-today", author: .you, text: "想恢复周末散步的习惯。", sentAt: now, delivery: .answered),
+            MurmurMessage(id: "dated-answer", author: .murmur, text: "开始的时间还没有确定。", sentAt: now.addingTimeInterval(1))
+        ], in: directory)
+    }
+
+    /// Seeds are written in the legacy JSON form, so every seeded launch also
+    /// goes through the SQLite import.
+    private static func writeUITestTranscript(_ rows: [MurmurMessage], in directory: URL) {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(rows) else { return }
@@ -254,32 +249,48 @@ private actor UITestMurmurAPIClient: MurmurAPIClient {
     func events(momentID: String, lastEventID: String?) async -> AsyncThrowingStream<MurmurStreamEvent, Error> {
         let isReading = readings.contains(momentID)
         let note = notesByMoment[momentID]
+        // `--murmur-slow-reply` holds the answer back long enough for a test to
+        // scroll the conversation while Murmur is still composing.
+        let replyDelay: Duration? = arguments.contains("--murmur-slow-reply") ? .seconds(4) : nil
         return AsyncThrowingStream { continuation in
+            @Sendable func answer() {
+                if isReading {
+                    continuation.yield(.bubble(id: "2", text: "这是……刚下过雨？"))
+                    continuation.yield(.angles(
+                        id: "3",
+                        texts: ["那天的天气", "右边那个人", "上次说要再来"]
+                    ))
+                } else {
+                    let answer: String
+                    switch note {
+                    case "日期续聊第一句": answer = "接住第一句"
+                    case "日期续聊第二句": answer = "接住第二句"
+                    default: answer = "这一刻，我收到了。"
+                    }
+                    continuation.yield(.bubble(id: "2", text: answer))
+                }
+                continuation.yield(.done(id: "4", move: nil, scene: nil))
+                continuation.finish()
+            }
             // Production sequence numbers restart for every moment.  Keeping
             // that wire shape in UI tests guards the room-wide SwiftUI IDs.
             continuation.yield(.accepted(id: "1"))
-            if isReading {
-                continuation.yield(.bubble(id: "2", text: "这是……刚下过雨？"))
-                continuation.yield(.angles(
-                    id: "3",
-                    texts: ["那天的天气", "右边那个人", "上次说要再来"]
-                ))
-            } else {
-                let answer: String
-                switch note {
-                case "日期续聊第一句": answer = "接住第一句"
-                case "日期续聊第二句": answer = "接住第二句"
-                default: answer = "这一刻，我收到了。"
+            if let replyDelay {
+                let delayed = Task {
+                    try? await Task.sleep(for: replyDelay)
+                    answer()
                 }
-                continuation.yield(.bubble(id: "2", text: answer))
+                continuation.onTermination = { _ in delayed.cancel() }
+            } else {
+                answer()
             }
-            continuation.yield(.done(id: "4", move: nil, scene: nil))
-            continuation.finish()
         }
     }
     func currentProactive() async throws -> ProactiveMoment? { nil }
     func acknowledge(momentID: String, reply: String?) async throws {}
-    func updateDevice(apnsToken: String?, environment: String, timezone: String, deviceName: String) async throws {}
+    func updateDevice(apnsToken: String?, environment: String, timezone: String, deviceName: String) async throws {
+        if arguments.contains("--murmur-stub-netease-offline") { throw URLError(.notConnectedToInternet) }
+    }
     func devices() async throws -> [MurmurDevice] { [] }
     func removeDevice(deviceID: String) async throws {}
     func preferences() async throws -> MurmurPreferences { MurmurPreferences() }

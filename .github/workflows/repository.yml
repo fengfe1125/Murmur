@@ -119,10 +119,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Download Metal toolchain
-        run: |
-          xcodebuild -version
-          xcodebuild -downloadComponent MetalToolchain
+      - name: Show Xcode version
+        run: xcodebuild -version
       - name: Build
         run: >-
           xcodebuild -project "$XCODE_PROJECT" -scheme Murmur

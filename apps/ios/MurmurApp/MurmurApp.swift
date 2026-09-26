@@ -27,6 +27,7 @@ struct MurmurApp: App {
             MurmurRootView(session: session, music: music)
                 .environmentObject(notifications)
                 .preferredColorScheme(uiTestPreferredColorScheme)
+                .modifier(MurmurUITestTextSize())
         }
     }
 
@@ -234,5 +235,17 @@ final class MurmurAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificati
     ) async {
         guard let momentID = response.notification.request.content.userInfo["moment_id"] as? String else { return }
         await MainActor.run { MurmurNotificationBridge.shared.receive(momentID: momentID) }
+    }
+}
+
+private struct MurmurUITestTextSize: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--murmur-ui-test-large-type") {
+            content.dynamicTypeSize(.accessibility5)
+        } else { content }
+#else
+        content
+#endif
     }
 }

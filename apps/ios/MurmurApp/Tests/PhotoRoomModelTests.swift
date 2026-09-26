@@ -227,6 +227,39 @@ final class PhotoRoomModelTests: XCTestCase {
         XCTAssertTrue(leftovers.isEmpty, "left behind: \(leftovers)")
     }
 
+    /// The archive never got its copy of the photo, so the original is the only
+    /// picture it can still get: closing the room hands the file to the archive
+    /// instead of deleting it, and the archive deletes it once a retry lands.
+    func testClosingWithTheArchiveCopyMissingHandsTheOriginalToTheArchive() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // A file where the archive directory should be: nothing can be stored.
+        let directory = root.appendingPathComponent("archive")
+        try Data("blocked".utf8).write(to: directory)
+        let archive = MurmurArchive(store: MurmurTranscriptStore.archive(directory: directory))
+        let model = PhotoRoomModel(
+            image: makeImage(),
+            api: RoomAPI(),
+            uploadTimeoutSeconds: 5,
+            requestTimeoutSeconds: 5,
+            bubblePacing: .instant,
+            placeLookup: StubPlaceLookup(answer: nil),
+            transcript: archive
+        )
+        model.open()
+        await settle { model.phase == .listening }
+        model.close()
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(temporaryUploads().isEmpty)
+
+        try FileManager.default.removeItem(at: directory)
+        await archive.retryStorage()
+        await settle { self.temporaryUploads().isEmpty }
+        XCTAssertTrue(temporaryUploads().isEmpty, "left behind: \(temporaryUploads())")
+        XCTAssertNil(archive.storageFailure)
+    }
+
     /// A reading that fails on the wire keeps its file, because 再试一次 is an
     /// offer to send that same photo again under the same idempotency key.
     func testARetryableFailureKeepsTheFileAndTheKey() async {

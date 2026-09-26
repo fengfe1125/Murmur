@@ -1,6 +1,7 @@
 import DeviceCheck
 import UIKit
 import XCTest
+import SQLite3
 @testable import Murmur
 
 @MainActor
@@ -47,6 +48,241 @@ final class MurmurSessionModelTests: XCTestCase {
             durationSeconds: 201,
             explicit: false
         )
+    }
+
+    func testRetryAfterInitialReadFailureRestoresExistingTranscript() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("blocked directory".utf8).write(to: directory)
+        let store = MurmurTranscriptStore(directory: directory)
+        let model = MurmurSessionModel(api: FakeMurmurAPIClient(), transcriptStore: store)
+        await model.loadTranscript()
+        XCTAssertTrue(model.messages.isEmpty)
+        XCTAssertNotNil(model.storageFailure)
+
+        try FileManager.default.removeItem(at: directory)
+        let row = MurmurMessage(id: "retained", author: .you, text: "原来的聊天", delivery: .answered)
+        let saved = await store.save([row])
+        XCTAssertTrue(saved)
+        model.retryTranscriptSave()
+        try await waitUntil {
+            model.messages.contains { $0.id == "retained" } && model.storageFailure == nil
+        }
+        XCTAssertNil(model.storageFailure)
+    }
+
+    func testArchivePhotoSaveFailureRemainsVisibleAndCanBeRetried() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("archive")
+        try Data("blocked directory".utf8).write(to: directory)
+        let photo = root.appendingPathComponent("photo.jpg")
+        let bytes = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).jpegData(withCompressionQuality: 0.8) { context in
+            UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        }
+        try bytes.write(to: photo)
+        let store = MurmurTranscriptStore.archive(directory: directory)
+        let archive = MurmurArchive(store: store)
+        await archive.record(MurmurMessage(id: "retry-photo", author: .you, text: ""), photoURL: photo)
+        XCTAssertNotNil(archive.storageFailure)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: photo.path))
+        try FileManager.default.removeItem(at: directory)
+        await archive.retryStorage()
+        XCTAssertNil(archive.storageFailure)
+        let loaded = await store.load()
+        XCTAssertEqual(loaded.count, 1)
+        let name = try XCTUnwrap(loaded.first?.imageFile)
+        XCTAssertEqual(try Data(contentsOf: store.imageURL(for: name)), bytes)
+    }
+
+    func testSameTimestampPaginationPreservesInsertionOrder() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let date = Date(timeIntervalSince1970: 1_790_000_000)
+        let rows = ["z", "a", "b"].map { MurmurMessage(id: $0, author: .you, text: $0, sentAt: date) }
+        let saved = await store.save(rows)
+        XCTAssertTrue(saved)
+        let newest = await store.page(limit: 1)
+        XCTAssertEqual(newest.first?.id, "b")
+        let earlier = await store.page(before: newest.first, limit: 2)
+        XCTAssertEqual(earlier.map(\.id), ["z", "a"])
+    }
+
+    func testInterruptedMigrationRollsBackBeforeRetry() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rows = [MurmurMessage(id: "first", author: .you, text: "先保存的内容"), MurmurMessage(id: "second", author: .you, text: "仍在旧文件中")]
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let legacy = directory.appendingPathComponent("transcript.json")
+        try encoder.encode(rows).write(to: legacy)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("transcript.sqlite").path, &db), SQLITE_OK)
+        let schema = "CREATE TABLE messages(id TEXT PRIMARY KEY,sent_at REAL NOT NULL,filing_at REAL NOT NULL,image_file TEXT,payload TEXT NOT NULL); CREATE TRIGGER interrupt_import BEFORE INSERT ON messages WHEN NEW.id='second' BEGIN SELECT RAISE(ABORT,'interrupted'); END;"
+        XCTAssertEqual(sqlite3_exec(db, schema, nil, nil, nil), SQLITE_OK)
+        let store = MurmurTranscriptStore(directory: directory)
+        let failed = await store.load(); XCTAssertTrue(failed.isEmpty)
+        let error = await store.lastError; XCTAssertNotNil(error)
+        var statement: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT count(*) FROM messages", -1, &statement, nil)
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW); XCTAssertEqual(sqlite3_column_int(statement, 0), 0)
+        sqlite3_finalize(statement)
+        XCTAssertEqual(sqlite3_exec(db, "DROP TRIGGER interrupt_import", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        let retry = await store.load(); XCTAssertEqual(retry.map(\.id), ["first", "second"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
+    }
+
+    /// Earlier builds appended archive rows without checking ids, and a photo
+    /// room's 再试一次 replays the same moment's events, so one reply could be
+    /// written twice.  The import keeps the later copy instead of refusing the
+    /// whole history — which used to leave the archive unreadable, unwritable
+    /// and impossible to clear.
+    func testDuplicateLegacyIDsMigrateKeepingLastCopy() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let photoRow = MurmurMessage(
+            id: "photo", author: .you, text: "",
+            sentAt: Date(timeIntervalSince1970: 1_790_000_000), momentID: "moment-1"
+        )
+        let first = MurmurMessage(
+            id: "moment-1-2", author: .murmur, text: "接住了",
+            sentAt: Date(timeIntervalSince1970: 1_790_000_010), momentID: "moment-1"
+        )
+        let replay = MurmurMessage(
+            id: "moment-1-2", author: .murmur, text: "接住了",
+            sentAt: Date(timeIntervalSince1970: 1_790_000_060), momentID: "moment-1"
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([photoRow, first, replay]).write(to: directory.appendingPathComponent("transcript.json"))
+        let store = MurmurTranscriptStore.archive(directory: directory)
+
+        let loaded = await store.load()
+        XCTAssertEqual(loaded.map(\.id), ["photo", "moment-1-2"])
+        XCTAssertEqual(loaded.last?.sentAt, replay.sentAt)
+        let saved = await store.save([MurmurMessage(id: "new", author: .you, text: "新的一句")])
+        XCTAssertTrue(saved)
+        let cleared = await store.clear()
+        XCTAssertTrue(cleared)
+        let afterClear = await MurmurTranscriptStore.archive(directory: directory).load()
+        XCTAssertTrue(afterClear.isEmpty)
+    }
+
+    func testClearSucceedsWhileMigrationIsFailing() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let legacy = directory.appendingPathComponent("transcript.json")
+        try encoder.encode([MurmurMessage(id: "blocked", author: .you, text: "导不进去")]).write(to: legacy)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("transcript.sqlite").path, &db), SQLITE_OK)
+        let schema = """
+            CREATE TABLE messages(id TEXT PRIMARY KEY, sent_at REAL NOT NULL, filing_at REAL NOT NULL,
+                image_file TEXT, payload TEXT NOT NULL);
+            CREATE TRIGGER block_import BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'blocked'); END;
+            """
+        XCTAssertEqual(sqlite3_exec(db, schema, nil, nil, nil), SQLITE_OK)
+        let store = MurmurTranscriptStore(directory: directory)
+        let failed = await store.load()
+        XCTAssertTrue(failed.isEmpty)
+        let failure = await store.lastError
+        XCTAssertNotNil(failure)
+
+        let cleared = await store.clear()
+        XCTAssertTrue(cleared)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+
+        XCTAssertEqual(sqlite3_exec(db, "DROP TRIGGER block_import", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        let afterClear = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertTrue(afterClear.isEmpty)
+    }
+
+    func testNewReplyDoesNotReplaceTheHistoricalReadingWindow() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Date())!
+        await store.save([
+            MurmurMessage(id: "old", author: .you, text: "旧记录", sentAt: yesterday),
+            MurmurMessage(id: "recent", author: .you, text: "今天早些时候", sentAt: Date().addingTimeInterval(-60))
+        ])
+        let model = MurmurSessionModel(api: FakeMurmurAPIClient(), transcriptStore: store, bubblePacing: .instant)
+        await model.bootstrap()
+        await model.loadTranscript()
+        let opened = await model.openChatDate(yesterday)
+        XCTAssertTrue(opened)
+        XCTAssertFalse(model.historyFollowsLatest)
+        model.draftText = "今天的新消息"
+        model.submit()
+        try await waitUntil { model.phase == .complete }
+        XCTAssertEqual(model.visibleMessages.map(\.id), ["old"])
+        model.returnToLatest()
+        XCTAssertTrue(model.visibleMessages.contains { $0.text == "今天的新消息" })
+    }
+
+    /// Pulling older pages in above the newest lines is still the live
+    /// conversation: what Murmur says next has to land in that window.
+    func testRepliesStayVisibleAfterLoadingEarlierHistory() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let start = Date().addingTimeInterval(-3_600)
+        await store.save((0..<120).map {
+            MurmurMessage(
+                id: "row-\($0)", author: .you, text: "第 \($0) 条",
+                sentAt: start.addingTimeInterval(Double($0)), delivery: .answered
+            )
+        })
+        let model = MurmurSessionModel(api: FakeMurmurAPIClient(), transcriptStore: store, bubblePacing: .instant)
+        await model.bootstrap()
+        await model.loadTranscript()
+        XCTAssertFalse(model.reachedEarliestHistory)
+        await model.loadHistory(earlier: true)
+        XCTAssertEqual(model.visibleMessages.count, 120)
+        XCTAssertTrue(model.historyFollowsLatest)
+        XCTAssertTrue(model.reachedEarliestHistory)
+
+        model.draftText = "翻旧记录时说一句"
+        model.submit()
+        try await waitUntil { model.phase == .complete }
+
+        XCTAssertTrue(model.visibleMessages.contains { $0.text == "翻旧记录时说一句" })
+        XCTAssertTrue(model.visibleMessages.contains { $0.author == .murmur })
+    }
+
+    func testLoadingLaterHistoryReachesTheLiveTail() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+        let older = (0..<150).map {
+            MurmurMessage(id: "y-\($0)", author: .you, text: "昨天 \($0)", sentAt: yesterday.addingTimeInterval(Double($0 * 60)))
+        }
+        let newer = (0..<50).map {
+            MurmurMessage(id: "t-\($0)", author: .you, text: "今天 \($0)", sentAt: today.addingTimeInterval(Double($0)))
+        }
+        await store.save(older + newer)
+        let model = MurmurSessionModel(api: FakeMurmurAPIClient(), transcriptStore: store, bubblePacing: .instant)
+        await model.bootstrap()
+        await model.loadTranscript()
+
+        let opened = await model.openChatDate(yesterday)
+        XCTAssertTrue(opened)
+        XCTAssertEqual(model.visibleMessages.first?.id, "y-0")
+        XCTAssertFalse(model.historyFollowsLatest)
+
+        await model.loadHistory(earlier: false)
+        XCTAssertEqual(model.visibleMessages.last?.id, "t-49")
+        XCTAssertTrue(model.historyFollowsLatest)
     }
 
     func testTranscriptSurvivesAReloadAndMarksInterruptedSendsFailed() async throws {
@@ -154,8 +390,10 @@ final class MurmurSessionModelTests: XCTestCase {
         await store.save([.init(id: "m1", author: .you, text: "看这个", imageFile: name)])
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.imageURL(for: name).path))
 
-        // Once nothing refers to it, it goes.
+        // Saving a different page cannot destroy this page's attachment.
         await store.save([.init(id: "m2", author: .you, text: "别的")])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.imageURL(for: name).path))
+        await store.remove(id: "m1")
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.imageURL(for: name).path))
     }
 
@@ -183,19 +421,89 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertNotNil(try? PhotoLoader.downsample(url: url, maximumPixels: 400))
     }
 
-    func testTranscriptKeepsOnlyTheMostRecentHistory() async throws {
-        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    func testLongHistoryPagesWithoutDroppingRowsBeyondBothOldCaps() async throws {
+        let directory = URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:directory) }
+        let store = MurmurTranscriptStore(directory:directory)
+        let base = Date(timeIntervalSince1970:1_700_000_000)
+        let rows = (0..<6_100).map { MurmurMessage(id:"m\($0)",author:.you,text:"row \($0)",sentAt:base.addingTimeInterval(Double($0))) }
+        let saved = await store.save(rows)
+        XCTAssertTrue(saved)
+        var page = await MurmurTranscriptStore(directory:directory).load()
+        XCTAssertEqual(page.count,100)
+        var ids = Set(page.map(\.id))
+        while let first = page.first {
+            page = await store.page(before:first)
+            XCTAssertLessThanOrEqual(page.count,100)
+            for row in page { XCTAssertTrue(ids.insert(row.id).inserted) }
+        }
+        XCTAssertEqual(ids.count,6_100)
+        let index = await store.days()
+        XCTAssertEqual(index.reduce(0) { $0 + $1.count },6_100)
+    }
+
+    func testLegacyJSONImportsUnchangedAndStaysUntilCleared() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacy = directory.appendingPathComponent("transcript.json")
+        let original = MurmurMessage(
+            id: "migrated", author: .you, text: "保留我",
+            sentAt: Date(timeIntervalSince1970: 1_700_000_000), delivery: .answered, idempotencyKey: "stable-key"
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([original]).write(to: legacy)
         let store = MurmurTranscriptStore(directory: directory)
 
-        let overflow = MurmurTranscriptStore.historyLimit + 40
-        await store.save((0..<overflow).map { .init(author: .you, text: "m\($0)") })
+        let restored = await store.load()
+        XCTAssertEqual(restored, [original])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
 
-        let reloaded = await store.load()
-        XCTAssertEqual(reloaded.count, MurmurTranscriptStore.historyLimit)
-        XCTAssertEqual(reloaded.first?.text, "m40")
-        XCTAssertEqual(reloaded.last?.text, "m\(overflow - 1)")
+        await store.clear()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+        let afterClear = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertTrue(afterClear.isEmpty)
+    }
+
+    /// Content that does not decode never will.  The old reader showed an empty
+    /// history for it; the bytes are now set aside unread and the store keeps
+    /// working, instead of failing every read, write and clear from then on.
+    func testUnreadableLegacyJSONIsSetAsideAndStoreStaysWritable() async throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacy = directory.appendingPathComponent("transcript.json")
+        let setAside = directory.appendingPathComponent("transcript.unreadable.json")
+        try Data("[incomplete".utf8).write(to: legacy)
+        let store = MurmurTranscriptStore(directory: directory)
+
+        let loaded = await store.load()
+        XCTAssertTrue(loaded.isEmpty)
+        let error = await store.lastError
+        XCTAssertNil(error)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+        XCTAssertEqual(try String(contentsOf: setAside, encoding: .utf8), "[incomplete")
+
+        let saved = await store.save([MurmurMessage(id: "after", author: .you, text: "之后的一句")])
+        XCTAssertTrue(saved)
+        let reloaded = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertEqual(reloaded.map(\.id), ["after"])
+
+        let cleared = await store.clear()
+        XCTAssertTrue(cleared)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: setAside.path))
+    }
+
+    func testPersistenceFailureIsVisible() async throws {
+        let path = URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:path) }
+        try Data("blocked".utf8).write(to:path)
+        let store = MurmurTranscriptStore(directory:path)
+        let saved = await store.save([.init(author:.you,text:"不能丢失")])
+        XCTAssertFalse(saved)
+        let error = await store.lastError
+        XCTAssertNotNil(error)
     }
 
     func testColdBootstrapIsEmptyAndDoesNotFetchProactive() async throws {
@@ -658,6 +966,108 @@ final class MurmurSessionModelTests: XCTestCase {
         XCTAssertNotNil(model.currentPhoto?.preview)
     }
 
+    /// The one exception to deleting the original when a send ends: its copy
+    /// never reached transcript storage, so the original is the only picture
+    /// the row can still get.  A retry copies it in and then deletes it.
+    func testOriginalStaysOnlyUntilAFailedCopyIsRetried() async throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("session-photo-test-\(UUID().uuidString).jpg")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { context in
+            UIColor.systemCoralForTest.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+        }
+        try XCTUnwrap(image.jpegData(compressionQuality: 0.8)).write(to: source)
+        // A file where the transcript directory should be: nothing can be stored.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data("blocked".utf8).write(to: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = MurmurSessionModel(
+            api: FakeMurmurAPIClient(),
+            transcriptStore: MurmurTranscriptStore(directory: directory),
+            bubblePacing: .instant
+        )
+        await model.bootstrap()
+
+        model.preparePhoto(at: source)
+        try await waitUntil { model.phase == .ready }
+        let original = try XCTUnwrap(model.draftPhoto?.originalURL)
+        model.submit()
+        try await waitUntil { model.phase == .complete }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertNotNil(model.storageFailure)
+
+        try FileManager.default.removeItem(at: directory)
+        model.retryTranscriptSave()
+        try await waitUntil { !FileManager.default.fileExists(atPath: original.path) }
+        XCTAssertNotNil(model.messages.first?.imageFile)
+    }
+
+    func testDeletingTheAccountClearsThisDevicesHistory() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MurmurTranscriptStore(directory: directory)
+        await store.save([MurmurMessage(id: "kept", author: .you, text: "本机记录")])
+        let archive = MurmurArchive(store: MurmurTranscriptStore.archive(directory: directory.appendingPathComponent("archive")))
+        let model = MurmurSessionModel(
+            api: FakeMurmurAPIClient(), transcriptStore: store, archive: archive, bubblePacing: .instant
+        )
+        await model.bootstrap()
+        await model.loadTranscript()
+
+        await model.deleteAccount()
+
+        XCTAssertNil(model.identity)
+        XCTAssertEqual(model.connection, .needsEnrollment)
+        XCTAssertNil(model.failure)
+        let remaining = await MurmurTranscriptStore(directory: directory).load()
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    /// The server account is already gone by the time the local copies are
+    /// cleared, so a local failure must not leave the app enrolled to it.
+    func testDeletingTheAccountEndsEnrollmentEvenWhenLocalClearingFails() async throws {
+        let blocked = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data("blocked".utf8).write(to: blocked)
+        defer { try? FileManager.default.removeItem(at: blocked) }
+        let model = MurmurSessionModel(
+            api: FakeMurmurAPIClient(),
+            transcriptStore: MurmurTranscriptStore(directory: blocked),
+            archive: MurmurArchive(store: MurmurTranscriptStore.archive(directory: blocked)),
+            bubblePacing: .instant
+        )
+        await model.bootstrap()
+
+        await model.deleteAccount()
+
+        XCTAssertNil(model.identity)
+        XCTAssertEqual(model.connection, .needsEnrollment)
+        XCTAssertEqual(model.failure?.code, "local_clear_incomplete")
+    }
+
+    /// Quiet is Murmur choosing to say nothing.  A reply that is only a song
+    /// still said something, so the moment completes.
+    func testSongOnlyReplyCompletesRatherThanGoingQuiet() async throws {
+        let model = MurmurSessionModel(api: FakeMurmurAPIClient(mode: .songOnlyReply), bubblePacing: .instant)
+        await model.bootstrap()
+        model.draftText = "放首歌吧"
+        model.submit()
+        try await waitUntil {
+            model.messages.contains { $0.author == .murmur && $0.musicTrack != nil }
+                && model.phase == .complete
+        }
+        XCTAssertTrue(model.bubbles.isEmpty)
+    }
+
+    func testQuietEventWithNoBubblesEndsQuiet() async throws {
+        let model = MurmurSessionModel(api: FakeMurmurAPIClient(mode: .quietReply), bubblePacing: .instant)
+        await model.bootstrap()
+        model.draftText = "今天有点累"
+        model.submit()
+        try await waitUntil { model.phase == .quiet && !model.isAwaitingReply }
+        XCTAssertTrue(model.bubbles.isEmpty)
+    }
+
     func testBootstrapLoadsServerPreferences() async throws {
         let api = FakeMurmurAPIClient()
         let model = MurmurSessionModel(api: api, bubblePacing: .instant)
@@ -878,7 +1288,18 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
         case idempotencyConflict, proactiveReply, attestationKeyUnknown, slowCreates, neverCreates, neverStreams
         case proactiveThreeBubbles
         case orderedBubbles
+        case songOnlyReply, quietReply
     }
+
+    private static let song = MusicTrackAttachmentV1(
+        trackID: "night-sail",
+        title: "夜航",
+        artists: ["林一", "小野"],
+        artworkURL: nil,
+        canonicalURL: URL(string: "https://audius.co/lin/night-sail")!,
+        durationSeconds: 201,
+        explicit: false
+    )
 
     private let mode: Mode
     private var createCount = 0
@@ -949,6 +1370,16 @@ private actor FakeMurmurAPIClient: MurmurAPIClient {
                 continuation.yield(.accepted(id: "accepted-\(currentCreateCount)"))
                 continuation.yield(.bubble(id: "bubble-\(currentCreateCount)", text: "reply-\(currentCreateCount)"))
                 continuation.yield(.done(id: "done-\(currentCreateCount)", move: nil, scene: nil))
+                continuation.finish()
+            case .songOnlyReply:
+                continuation.yield(.accepted(id: "accepted-1"))
+                continuation.yield(.bubble(id: "song-1", text: "", musicTrack: Self.song))
+                continuation.yield(.done(id: "done-1", move: nil, scene: nil))
+                continuation.finish()
+            case .quietReply:
+                continuation.yield(.accepted(id: "accepted-1"))
+                continuation.yield(.quiet(id: "quiet-1"))
+                continuation.yield(.done(id: "done-1", move: nil, scene: nil))
                 continuation.finish()
             case .orderedBubbles:
                 continuation.yield(.accepted(id: "accepted-1"))
@@ -1060,32 +1491,6 @@ private extension UIColor {
 }
 
 final class MurmurKeyboardLayoutTests: XCTestCase {
-    func testBottomClearanceStaysStableUntilKeyboardPassesTheTabBar() {
-        let overlaps: [CGFloat] = [0, 40, 72, 73, 300, 73, 72, 40, 0]
-
-        XCTAssertEqual(
-            overlaps.map { MurmurKeyboardClearance.total(overlap: $0, resting: 72) },
-            [72, 72, 72, 73, 300, 73, 72, 72, 72]
-        )
-        XCTAssertEqual(
-            overlaps.map { MurmurKeyboardClearance.supplemental(overlap: $0, resting: 72) },
-            [0, 0, 0, 1, 228, 1, 0, 0, 0]
-        )
-    }
-
-    func testBottomClearanceTreatsMissingOrInvalidKeyboardGeometryAsHidden() {
-        let overlaps: [CGFloat] = [-30, 0, .nan, .infinity]
-
-        XCTAssertEqual(
-            overlaps.map { MurmurKeyboardClearance.total(overlap: $0, resting: 72) },
-            [72, 72, 72, 72]
-        )
-        XCTAssertEqual(
-            overlaps.map { MurmurKeyboardClearance.supplemental(overlap: $0, resting: 72) },
-            [0, 0, 0, 0]
-        )
-    }
-
     func testLayoutGuideOverlapExcludesTheRestingHomeIndicator() {
         XCTAssertEqual(
             MurmurKeyboardClearance.overlap(
@@ -1117,9 +1522,9 @@ final class MurmurKeyboardLayoutTests: XCTestCase {
     }
 
     @MainActor
-    func testFocusWithoutASoftwareKeyboardDoesNotCreateOverlap() {
+    func testMissingOrInvalidLayoutGuideGeometryDoesNotCreateOverlap() {
         let keyboard = MurmurKeyboardState()
-        keyboard.focusDidChange(true)
+        keyboard.updateFromLayoutGuide(overlap: .nan)
         XCTAssertEqual(keyboard.overlap, 0)
     }
 

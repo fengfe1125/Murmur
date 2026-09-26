@@ -193,7 +193,6 @@ struct MusicPickerView: View {
     let onSend: (MusicTrackAttachmentV1) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @FocusState private var searchFocused: Bool
 
     init(
         client: any MusicLibraryBrowsing,
@@ -223,7 +222,6 @@ struct MusicPickerView: View {
                     .pickerStyle(.segmented)
                     .padding(.horizontal, MurmurTheme.pageInset)
                 }
-                if model.source == .search { searchField }
                 if let playlist = model.openPlaylist {
                     Button {
                         model.closePlaylist()
@@ -239,6 +237,14 @@ struct MusicPickerView: View {
                 content
             }
             .background(MurmurTheme.paper)
+            .searchable(text: $model.query, prompt: "搜索 Audius")
+            // Artist and track names, not prose: autocorrect would rewrite them.
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .onSubmit(of: .search) {
+                model.source = .search
+                model.reload()
+            }
             .navigationTitle("音乐")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -247,33 +253,6 @@ struct MusicPickerView: View {
                 }
             }
         }
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(MurmurTheme.secondaryInk)
-            TextField("搜索 Audius", text: $model.query)
-                .font(MurmurTheme.body(.body))
-                .foregroundStyle(MurmurTheme.ink)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .submitLabel(.search)
-                .focused($searchFocused)
-                .onSubmit { model.reload() }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            MurmurTheme.raisedPaper,
-            in: RoundedRectangle(cornerRadius: MurmurTheme.corner, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: MurmurTheme.corner, style: .continuous)
-                .stroke(searchFocused ? MurmurTheme.accentInk : MurmurTheme.rule,
-                        lineWidth: searchFocused ? 2 : 1)
-        }
-        .padding(.horizontal, MurmurTheme.pageInset)
     }
 
     @ViewBuilder
@@ -313,30 +292,25 @@ struct MusicPickerView: View {
     }
 
     private var list: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(model.playlists) { playlist in
-                    PlaylistRow(playlist: playlist) { model.open(playlist) }
-                    Divider().overlay(MurmurTheme.rule)
-                }
-                ForEach(model.tracks) { track in
-                    PickerTrackRow(track: track) {
-                        onSend(track)
-                        dismiss()
-                    }
-                    Divider().overlay(MurmurTheme.rule)
-                }
-                if model.canLoadMore {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .onAppear { model.loadMore() }
+        List {
+            ForEach(model.playlists) { playlist in
+                PlaylistRow(playlist: playlist) { model.open(playlist) }
+            }
+            ForEach(model.tracks) { track in
+                PickerTrackRow(track: track) {
+                    onSend(track)
+                    dismiss()
                 }
             }
-            .padding(.horizontal, MurmurTheme.pageInset)
+            if model.canLoadMore {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .onAppear { model.loadMore() }
+            }
         }
+        .listStyle(.plain)
     }
+
 }
 
 /// One song in a list of candidates.
@@ -370,12 +344,8 @@ struct PickerTrackRow: View {
             // sending it to somebody are different decisions, and only one of
             // them can be taken back.
             Button(actionLabel, action: onSend)
-                .font(MurmurTheme.body(.footnote, weight: .semibold))
-                .foregroundStyle(MurmurTheme.accentInk)
-                .padding(.horizontal, 12)
-                .frame(minHeight: MurmurTheme.floatingDisc)
-                .background(MurmurTheme.accent.opacity(0.16), in: Capsule())
-                .buttonStyle(.plain)
+                .buttonStyle(.bordered)
+                .controlSize(.large)
                 .accessibilityLabel(actionName)
         }
         .padding(.vertical, 8)

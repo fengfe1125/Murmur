@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import SQLite3
 
 enum MurmurMessageAuthor: String, Codable, Sendable {
     case you
@@ -75,6 +76,8 @@ struct MurmurMessage: Identifiable, Codable, Equatable, Sendable {
 /// JSON file would each overwrite the other's turn.
 @MainActor
 protocol MurmurRoomRecorder: AnyObject {
+    var storageFailure: String? { get }
+    func retryStorage() async
     /// Appends one row.  `photoURL` is copied into transcript storage before
     /// the row lands, so a row never names a file that is about to be deleted.
     func record(_ message: MurmurMessage, photoURL: URL?) async
@@ -83,6 +86,48 @@ protocol MurmurRoomRecorder: AnyObject {
     /// Takes a row back out.  For a line that never left: the room puts those
     /// words back in the field, and the history must not claim they were sent.
     func withdraw(_ messageID: String)
+    /// Whether this row's photo has yet to reach archive storage.  While it
+    /// has not, the temporary original is the only copy and must stay.
+    func holdsPendingPhoto(rowID: String) -> Bool
+    /// The room is closing with that photo still pending.  The recorder takes
+    /// the temporary original over and deletes it once its copy lands or the
+    /// history is cleared; the next cold start sweeps anything left.
+    func takeOverPendingPhoto(rowID: String)
+}
+
+extension MurmurRoomRecorder {
+    var storageFailure: String? { nil }
+    func retryStorage() async {}
+    func holdsPendingPhoto(rowID: String) -> Bool { false }
+    func takeOverPendingPhoto(rowID: String) {}
+}
+
+/// Runs persistence jobs one at a time, in the order they were asked for, so a
+/// later snapshot can never land before an earlier one.
+@MainActor
+final class MurmurSerialWriter {
+    private var tail: Task<Void, Never>?
+
+    func enqueue(_ job: @escaping @MainActor () async -> Void) {
+        let previous = tail
+        tail = Task { @MainActor in
+            await previous?.value
+            await job()
+        }
+    }
+
+    /// Waits for every job enqueued so far.
+    func drain() async {
+        await tail?.value
+    }
+}
+
+/// One local calendar day in a transcript's date index.
+struct MurmurTranscriptDay: Identifiable, Sendable {
+    var id: String
+    var date: Date
+    var count: Int
+    var photos: Int
 }
 
 /// The on-device chat history.
@@ -90,101 +135,420 @@ protocol MurmurRoomRecorder: AnyObject {
 /// Murmur's server keeps private memory, never a transcript, so the history a
 /// person scrolls through exists only here.  Deleting the app deletes it, and
 /// `clear()` is what the settings screen calls.
+///
+/// Each history is a SQLite database in its original directory, beside its
+/// photos.  A page is a read window: saving it never deletes rows outside the
+/// window, so history stays until the person clears it.
 actor MurmurTranscriptStore {
-    /// Old turns are dropped rather than kept forever: the transcript is a
-    /// convenience for the reader, not an archive, and an unbounded JSON file
-    /// would eventually cost a visible pause on launch.
-    static let historyLimit = 600
-    /// 当年今日's archive is the one place that *is* an archive — a day you
-    /// talked about a photo should still be on the calendar next year — so it
-    /// takes a far higher ceiling.  Still a ceiling: an unbounded file would
-    /// eventually be read on every launch.
-    static let archiveLimit = 6_000
+    static let pageSize = 100
 
     private let directory: URL
     private let fileURL: URL
+    private let databaseURL: URL
     private let imageDirectory: URL
-    private let limit: Int
-    /// Photos copied in but not yet named by any saved message.  A send saves
-    /// the transcript at least twice — once when the line appears, again when
-    /// the reply lands — and the copy finishes somewhere in between.  Without
-    /// this, the save in the middle prunes the photo it has not been told
-    /// about, and the message ends up pointing at a file that no longer exists.
+    private var migrated = false
+    /// Photos copied in but not yet named by any saved row, so a prune that
+    /// runs in between leaves them alone.
     private var pendingAdoptions: Set<String> = []
+    private(set) var lastError: String?
 
-    init(directory: URL? = nil, limit: Int = MurmurTranscriptStore.historyLimit) {
+    init(directory: URL? = nil) {
         let base = directory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Murmur", isDirectory: true)
         self.directory = base
-        self.fileURL = base.appendingPathComponent("transcript.json")
-        self.imageDirectory = base.appendingPathComponent("images", isDirectory: true)
-        self.limit = limit
+        fileURL = base.appendingPathComponent("transcript.json")
+        databaseURL = base.appendingPathComponent("transcript.sqlite")
+        imageDirectory = base.appendingPathComponent("images", isDirectory: true)
     }
 
-    /// The store 当年今日's rooms write into.  A directory of its own, beside
-    /// the conversation and never mixed into it: what was said about an old
-    /// photo belongs to the day it was said on, not to the chat.
+    /// The store 当年今日's rooms write into: a directory of its own, beside
+    /// the conversation and never mixed into it.
     static func archive(directory: URL? = nil) -> MurmurTranscriptStore {
         let base = directory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Murmur", isDirectory: true)
-            .appendingPathComponent("archive", isDirectory: true)
-        return MurmurTranscriptStore(directory: base, limit: archiveLimit)
+            .appendingPathComponent("Murmur/archive", isDirectory: true)
+        return MurmurTranscriptStore(directory: base)
     }
 
-    private func ensureDirectories() {
-        for url in [directory, imageDirectory] {
-            try? FileManager.default.createDirectory(
-                at: url, withIntermediateDirectories: true,
-                attributes: [.protectionKey: FileProtectionType.complete]
+    // ---- SQLite -------------------------------------------------------------
+
+    private struct StorageFailure: Error {}
+
+    private static let schema = """
+        PRAGMA journal_mode=WAL;
+        PRAGMA synchronous=FULL;
+        CREATE TABLE IF NOT EXISTS messages(
+            id TEXT PRIMARY KEY,
+            sent_at REAL NOT NULL,
+            filing_at REAL NOT NULL,
+            image_file TEXT,
+            payload TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS messages_sent ON messages(sent_at, id);
+        CREATE INDEX IF NOT EXISTS messages_filing ON messages(filing_at, sent_at, id);
+        CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        """
+
+    private func execute(_ db: OpaquePointer, _ sql: String) throws {
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw StorageFailure() }
+    }
+
+    private func statement(_ db: OpaquePointer, _ sql: String) throws -> OpaquePointer {
+        var result: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &result, nil) == SQLITE_OK, let result else {
+            throw StorageFailure()
+        }
+        return result
+    }
+
+    private func bind(_ statement: OpaquePointer, _ index: Int32, _ value: String) {
+        _ = value.withCString {
+            sqlite3_bind_text(statement, index, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
+    }
+
+    /// Opens the database for one piece of work.  Unless told otherwise, the
+    /// first open imports the legacy JSON history before any work runs.
+    private func withDatabase<T>(migrating: Bool = true, _ work: (OpaquePointer) throws -> T) throws -> T {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.complete]
+        )
+        var connection: OpaquePointer?
+        guard sqlite3_open(databaseURL.path, &connection) == SQLITE_OK, let db = connection else {
+            if let connection { sqlite3_close(connection) }
+            throw StorageFailure()
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 5000)
+        try execute(db, Self.schema)
+        if migrating, !migrated {
+            try importLegacyJSON(db)
+            migrated = true
+        }
+        for path in [databaseURL.path, databaseURL.path + "-wal", databaseURL.path + "-shm"]
+        where FileManager.default.fileExists(atPath: path) {
+            try FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: path
             )
         }
+        return try work(db)
     }
 
-    func load() -> [MurmurMessage] {
-        guard let data = try? Data(contentsOf: fileURL) else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard var messages = try? decoder.decode([MurmurMessage].self, from: data) else {
+    /// Moves `transcript.json` into the database, once.  Every row is read back
+    /// and compared before the marker is written.  A storage failure rolls the
+    /// import back and leaves the JSON file where it was, for the next open.
+    ///
+    /// Content problems do not block the store: rows repeated under one id
+    /// keep their last copy, and a file that does not decode — the old reader
+    /// showed an empty history for it — is set aside unread rather than
+    /// deleted, so the history can still be written to and cleared.
+    private func importLegacyJSON(_ db: OpaquePointer) throws {
+        let marker = try statement(db, "SELECT value FROM metadata WHERE key='json_migrated'")
+        let done = sqlite3_step(marker) == SQLITE_ROW
+        sqlite3_finalize(marker)
+        guard !done else { return }
+        var legacy: [MurmurMessage] = []
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            let data = try Data(contentsOf: fileURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            if let rows = try? decoder.decode([MurmurMessage].self, from: data) {
+                legacy = Self.lastCopyOfEachRow(rows)
+            } else {
+                try setAsideUnreadableLegacyFile()
+            }
+        }
+        try execute(db, "BEGIN IMMEDIATE")
+        do {
+            try upsert(legacy, db: db)
+            for row in legacy {
+                guard try storedRow(id: row.id, db: db) == row else { throw StorageFailure() }
+            }
+            try execute(db, "INSERT OR REPLACE INTO metadata VALUES('json_migrated','1'); COMMIT")
+        } catch {
+            try? execute(db, "ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Earlier builds appended rows without checking their ids, so a reply
+    /// replayed by a retried stream can appear twice.  The later copy wins,
+    /// the way an upsert would have had it.
+    private static func lastCopyOfEachRow(_ rows: [MurmurMessage]) -> [MurmurMessage] {
+        var seen = Set<String>()
+        return Array(rows.reversed().filter { seen.insert($0.id).inserted }.reversed())
+    }
+
+    private func setAsideUnreadableLegacyFile() throws {
+        var destination = directory.appendingPathComponent("transcript.unreadable.json")
+        if FileManager.default.fileExists(atPath: destination.path) {
+            destination = directory.appendingPathComponent("transcript.unreadable-\(UUID().uuidString).json")
+        }
+        try FileManager.default.moveItem(at: fileURL, to: destination)
+#if DEBUG
+        Task { @MainActor in
+            MurmurDiagnostics.record("legacy transcript did not decode; set aside as \(destination.lastPathComponent)")
+        }
+#endif
+    }
+
+    /// The JSON history and anything set aside from it.
+    private func removeLegacyFiles() throws {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        for name in names where name == "transcript.json" || name.hasPrefix("transcript.unreadable") {
+            try FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
+    }
+
+    private func storedRow(id: String, db: OpaquePointer) throws -> MurmurMessage? {
+        let query = try statement(db, "SELECT payload FROM messages WHERE id=?")
+        defer { sqlite3_finalize(query) }
+        bind(query, 1, id)
+        guard sqlite3_step(query) == SQLITE_ROW, let raw = sqlite3_column_text(query, 0) else { return nil }
+        return try JSONDecoder().decode(MurmurMessage.self, from: Data(String(cString: raw).utf8))
+    }
+
+    private func upsert(_ rows: [MurmurMessage], db: OpaquePointer) throws {
+        let insert = try statement(db, """
+            INSERT INTO messages(id, sent_at, filing_at, image_file, payload) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                sent_at = excluded.sent_at,
+                filing_at = excluded.filing_at,
+                image_file = excluded.image_file,
+                payload = excluded.payload
+            """)
+        defer { sqlite3_finalize(insert) }
+        let encoder = JSONEncoder()
+        for row in rows {
+            let payload = String(decoding: try encoder.encode(row), as: UTF8.self)
+            bind(insert, 1, row.id)
+            sqlite3_bind_double(insert, 2, row.sentAt.timeIntervalSince1970)
+            sqlite3_bind_double(insert, 3, (row.archiveDay ?? row.sentAt).timeIntervalSince1970)
+            if let image = row.imageFile {
+                bind(insert, 4, image)
+            } else {
+                sqlite3_bind_null(insert, 4)
+            }
+            bind(insert, 5, payload)
+            guard sqlite3_step(insert) == SQLITE_DONE else { throw StorageFailure() }
+            sqlite3_reset(insert)
+            sqlite3_clear_bindings(insert)
+        }
+    }
+
+    // ---- Reading ------------------------------------------------------------
+
+    /// The newest page.
+    func load() -> [MurmurMessage] { page() }
+
+    /// One read window, oldest first.  Keyset pagination breaks ties between
+    /// rows sharing a timestamp with their durable insertion order.
+    func page(
+        before: MurmurMessage? = nil,
+        after: MurmurMessage? = nil,
+        day: Date? = nil,
+        archive: Bool = false,
+        fromStart: Bool = true,
+        limit: Int = MurmurTranscriptStore.pageSize
+    ) -> [MurmurMessage] {
+        do {
+            let result = try withDatabase { db in
+                let dayColumn = archive ? "filing_at" : "sent_at"
+                var clauses: [String] = []
+                if before != nil {
+                    clauses.append("(sent_at < ? OR (sent_at = ? AND rowid < (SELECT rowid FROM messages WHERE id=?)))")
+                }
+                if after != nil {
+                    clauses.append("(sent_at > ? OR (sent_at = ? AND rowid > (SELECT rowid FROM messages WHERE id=?)))")
+                }
+                if day != nil {
+                    clauses.append("\(dayColumn) >= ? AND \(dayColumn) < ?")
+                }
+                let forward = after != nil || (day != nil && fromStart)
+                let order = forward ? "ASC" : "DESC"
+                let filter = clauses.isEmpty ? "" : " WHERE " + clauses.joined(separator: " AND ")
+                let query = try statement(
+                    db,
+                    "SELECT payload FROM messages\(filter) ORDER BY sent_at \(order), rowid \(order) LIMIT ?"
+                )
+                defer { sqlite3_finalize(query) }
+                var index: Int32 = 1
+                for anchor in [before, after].compactMap({ $0 }) {
+                    sqlite3_bind_double(query, index, anchor.sentAt.timeIntervalSince1970)
+                    sqlite3_bind_double(query, index + 1, anchor.sentAt.timeIntervalSince1970)
+                    bind(query, index + 2, anchor.id)
+                    index += 3
+                }
+                if let day {
+                    let calendar = archive ? Calendar.murmur : Calendar.current
+                    let start = calendar.startOfDay(for: day)
+                    let end = calendar.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400)
+                    sqlite3_bind_double(query, index, start.timeIntervalSince1970)
+                    sqlite3_bind_double(query, index + 1, end.timeIntervalSince1970)
+                    index += 2
+                }
+                sqlite3_bind_int(query, index, Int32(min(500, max(1, limit))))
+                let decoder = JSONDecoder()
+                var rows: [MurmurMessage] = []
+                var status = sqlite3_step(query)
+                while status == SQLITE_ROW {
+                    guard let raw = sqlite3_column_text(query, 0) else { throw StorageFailure() }
+                    var row = try decoder.decode(MurmurMessage.self, from: Data(String(cString: raw).utf8))
+                    // A send interrupted by a crash or a force quit never
+                    // reached the server; it must not spin forever.
+                    if row.delivery == .sending { row.delivery = .failed }
+                    rows.append(row)
+                    status = sqlite3_step(query)
+                }
+                guard status == SQLITE_DONE else { throw StorageFailure() }
+                return forward ? rows : rows.reversed()
+            }
+            lastError = nil
+            return result
+        } catch {
+            lastError = "本机记录读取失败，原记录未删除。请重试。"
             return []
         }
-        // A send interrupted by a crash or a force quit must not sit on a
-        // spinner forever; it never reached the server.
-        for index in messages.indices where messages[index].delivery == .sending {
-            messages[index].delivery = .failed
-        }
-        return messages
     }
 
-    func save(_ messages: [MurmurMessage]) {
-        ensureDirectories()
-        let trimmed = messages.suffix(limit)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(Array(trimmed)) else { return }
-        try? data.write(to: fileURL, options: [.atomic, .completeFileProtection])
-        let referenced = Set(trimmed.compactMap(\.imageFile))
-        pruneImages(keeping: referenced.union(pendingAdoptions))
-        // Anything this snapshot names is durable now and no longer pending.
-        pendingAdoptions.subtract(referenced)
+    /// The local days that have rows, newest first.  Reads the index columns
+    /// only, never message payloads.
+    func days(archive: Bool = false) -> [MurmurTranscriptDay] {
+        do {
+            return try withDatabase { db in
+                let column = archive ? "filing_at" : "sent_at"
+                let query = try statement(db, """
+                    SELECT strftime('%Y-%m-%d', \(column), 'unixepoch', 'localtime'),
+                           MIN(\(column)), COUNT(*), SUM(image_file IS NOT NULL)
+                    FROM messages GROUP BY 1 ORDER BY 1 DESC
+                    """)
+                defer { sqlite3_finalize(query) }
+                let calendar = archive ? Calendar.murmur : Calendar.current
+                var result: [MurmurTranscriptDay] = []
+                while sqlite3_step(query) == SQLITE_ROW {
+                    let first = Date(timeIntervalSince1970: sqlite3_column_double(query, 1))
+                    result.append(.init(
+                        id: String(cString: sqlite3_column_text(query, 0)),
+                        date: calendar.startOfDay(for: first),
+                        count: Int(sqlite3_column_int(query, 2)),
+                        photos: Int(sqlite3_column_int(query, 3))
+                    ))
+                }
+                return result
+            }
+        } catch {
+            lastError = "日期索引读取失败，请重试。"
+            return []
+        }
     }
+
+    // ---- Writing ------------------------------------------------------------
+
+    /// Inserts or updates these rows.  Rows it does not name are left alone.
+    @discardableResult
+    func save(_ rows: [MurmurMessage]) -> Bool {
+        do {
+            try withDatabase { db in
+                try execute(db, "BEGIN IMMEDIATE")
+                do {
+                    try upsert(rows, db: db)
+                    try execute(db, "COMMIT")
+                } catch {
+                    try? execute(db, "ROLLBACK")
+                    throw error
+                }
+            }
+            // Anything these rows name is durable now and no longer pending.
+            pendingAdoptions.subtract(rows.compactMap(\.imageFile))
+            lastError = nil
+            return true
+        } catch {
+            lastError = "本机记录未保存，请重试。"
+            return false
+        }
+    }
+
+    /// Deletes one row, and any photo that only it referred to.
+    @discardableResult
+    func remove(id: String) -> Bool {
+        do {
+            try withDatabase { db in
+                let delete = try statement(db, "DELETE FROM messages WHERE id=?")
+                defer { sqlite3_finalize(delete) }
+                bind(delete, 1, id)
+                guard sqlite3_step(delete) == SQLITE_DONE else { throw StorageFailure() }
+            }
+            try pruneUnreferencedImages()
+            lastError = nil
+            return true
+        } catch {
+            lastError = "删除未完成，请重试。"
+            return false
+        }
+    }
+
+    /// Deletes the whole history.  Never waits on the legacy import: a history
+    /// that cannot be read still has to be possible to delete.
+    @discardableResult
+    func clear() -> Bool {
+        do {
+            try withDatabase(migrating: false) { db in
+                try execute(db, "BEGIN IMMEDIATE")
+                do {
+                    try execute(db, """
+                        DELETE FROM messages;
+                        INSERT OR REPLACE INTO metadata VALUES('json_migrated','1');
+                        COMMIT
+                        """)
+                } catch {
+                    try? execute(db, "ROLLBACK")
+                    throw error
+                }
+            }
+            migrated = true
+            // With the marker written, no JSON copy can bring cleared rows
+            // back; the copies themselves go only on this explicit deletion.
+            try removeLegacyFiles()
+            pendingAdoptions = []
+            try pruneUnreferencedImages()
+            lastError = nil
+            return true
+        } catch {
+            lastError = "清空未完成，请重试。"
+            return false
+        }
+    }
+
+    // ---- Photos -------------------------------------------------------------
 
     /// Copies a picked photo out of the temporary directory, which the photo
     /// loader clears, and into storage the transcript controls.
     func adoptImage(at url: URL, id: String) -> String? {
-        ensureDirectories()
-        let name = "\(id).\(url.pathExtension.isEmpty ? "jpg" : url.pathExtension)"
-        let destination = imageDirectory.appendingPathComponent(name)
-        try? FileManager.default.removeItem(at: destination)
+        guard !id.contains("/"), !id.contains("..") else {
+            lastError = "图片标识无效。"
+            return nil
+        }
         do {
-            try FileManager.default.copyItem(at: url, to: destination)
-            try? FileManager.default.setAttributes(
-                [.protectionKey: FileProtectionType.complete], ofItemAtPath: destination.path
+            try FileManager.default.createDirectory(
+                at: imageDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.protectionKey: FileProtectionType.complete]
+            )
+            let name = "\(id).\(url.pathExtension.isEmpty ? "jpg" : url.pathExtension)"
+            let data = try Data(contentsOf: url)
+            try data.write(
+                to: imageDirectory.appendingPathComponent(name),
+                options: [.atomic, .completeFileProtection]
             )
             pendingAdoptions.insert(name)
+            lastError = nil
             return name
         } catch {
+            lastError = "图片未能保存到本机，请重试。"
             return nil
         }
     }
@@ -193,18 +557,21 @@ actor MurmurTranscriptStore {
         imageDirectory.appendingPathComponent(name)
     }
 
-    private func pruneImages(keeping names: Set<String>) {
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: imageDirectory, includingPropertiesForKeys: nil
-        ) else { return }
-        for url in urls where !names.contains(url.lastPathComponent) {
-            try? FileManager.default.removeItem(at: url)
+    private func pruneUnreferencedImages() throws {
+        let referenced = try withDatabase { db -> Set<String> in
+            let query = try statement(db, "SELECT DISTINCT image_file FROM messages WHERE image_file IS NOT NULL")
+            defer { sqlite3_finalize(query) }
+            var names = Set<String>()
+            while sqlite3_step(query) == SQLITE_ROW {
+                names.insert(String(cString: sqlite3_column_text(query, 0)))
+            }
+            return names
         }
-    }
-
-    func clear() {
-        pendingAdoptions = []
-        try? FileManager.default.removeItem(at: fileURL)
-        try? FileManager.default.removeItem(at: imageDirectory)
+        guard FileManager.default.fileExists(atPath: imageDirectory.path) else { return }
+        let files = try FileManager.default.contentsOfDirectory(at: imageDirectory, includingPropertiesForKeys: nil)
+        for url in files
+        where !referenced.contains(url.lastPathComponent) && !pendingAdoptions.contains(url.lastPathComponent) {
+            try FileManager.default.removeItem(at: url)
+        }
     }
 }

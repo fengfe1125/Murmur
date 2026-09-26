@@ -2,23 +2,6 @@ import Photos
 import XCTest
 @testable import Murmur
 
-final class OnThisDayShaderTests: XCTestCase {
-    /// The dissolve resolves its shader by name at draw time, so a .metal file
-    /// that never made Compile Sources compiles clean and only fails on a
-    /// swipe.  MurmurShaderSupport is the guard against that — but a guard
-    /// that answers "missing" for a shader which is present is worse than no
-    /// guard at all: the particle send-off would silently never run, on every
-    /// device, and the plain fade would stand in for it forever.
-    func testTheDissolveShaderIsFoundInTheShippedLibrary() {
-        XCTAssertTrue(
-            MurmurShaderSupport.particleDissolve,
-            "onThisDayDissolve is not visible in the app's default.metallib. "
-                + "Either OnThisDay.metal left the target, or the symbol is not "
-                + "listed the way MurmurShaderSupport looks for it."
-        )
-    }
-}
-
 final class OnThisDayAuthorizationTests: XCTestCase {
     /// `.restricted` is not a fifth state in the UI: a managed device that
     /// cannot grant the library is, for this feature, the same door as a
@@ -447,5 +430,99 @@ final class MurmurArchiveTests: XCTestCase {
     /// device: Monday first, whatever phone this is.
     func testTheCalendarStartsOnMonday() {
         XCTAssertEqual(Calendar.murmur.firstWeekday, 2)
+    }
+}
+
+// MARK: - Horizontal paging and asynchronous image identity
+
+@MainActor
+final class OnThisDayPagingTests: XCTestCase {
+    func testBackwardPagingPreservesIdentityAndBoundsDecodedImages() async {
+        let model = OnThisDayModel(library: CountingLibrary(sameDay: 5, album: 0))
+        await model.requestAuthorization()
+        let first = model.selectedID
+        for _ in 0..<4 {
+            model.advance()
+            await waitUntil { model.canSend }
+        }
+        XCTAssertFalse(model.canAdvance)
+        model.previous()
+        await waitUntil { model.canSend }
+        XCTAssertEqual(model.index, 3)
+        XCTAssertEqual(model.currentCandidate?.id, model.selectedID)
+        model.select(id: first!)
+        await waitUntil { model.canSend }
+        XCTAssertEqual(model.index, 0)
+        XCTAssertFalse(model.canGoBack)
+        XCTAssertLessThanOrEqual(model.cachedImages.count, 3)
+    }
+
+    func testOutOfOrderImageCannotReplaceSelectedPhotoOrBeSent() async {
+        let library = DeferredPagingLibrary()
+        let model = OnThisDayModel(library: library)
+        await model.requestAuthorization()
+        model.select(id: "page-1")
+        XCTAssertFalse(model.canSend)
+        XCTAssertNil(model.currentImage)
+        await library.waitForRequest("page-1")
+        model.select(id: "page-2")
+        await library.waitForRequest("page-2")
+        await library.finish("page-2", succeeds: true)
+        await waitUntil { model.canSend }
+        XCTAssertEqual(model.currentCandidate?.id, "page-2")
+        await library.finish("page-1", succeeds: true)
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(model.currentCandidate?.id, "page-2")
+        XCTAssertEqual(model.selectedID, "page-2")
+    }
+
+    func testFailedPhotoCannotSendAndRetryUsesTheSameCandidate() async {
+        let library = DeferredPagingLibrary()
+        let model = OnThisDayModel(library: library)
+        await model.requestAuthorization()
+        model.select(id: "page-1")
+        await library.waitForRequest("page-1")
+        await library.finish("page-1", succeeds: false)
+        await waitUntil { model.imageFailed }
+        XCTAssertFalse(model.canSend)
+        XCTAssertNil(model.currentCandidate)
+        model.retryImage()
+        await library.waitForRequest("page-1")
+        await library.finish("page-1", succeeds: true)
+        await waitUntil { model.canSend }
+        XCTAssertEqual(model.currentCandidate?.id, "page-1")
+        XCTAssertFalse(model.imageFailed)
+    }
+
+    private func waitUntil(_ condition: () -> Bool) async {
+        for _ in 0..<200 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Image selection did not settle")
+    }
+}
+
+private actor DeferredPagingLibrary: OnThisDayLibrary {
+    private var requests: [String: CheckedContinuation<UIImage?, Never>] = [:]
+    func authorization() async -> OnThisDayAuthorization { .authorized }
+    func requestAuthorization() async -> OnThisDayAuthorization { .authorized }
+    func candidates(around date: Date, yearsBack: Int) async -> [OnThisDayCandidate] {
+        (0..<3).map { OnThisDayCandidate(id: "page-\($0)", creationDate: date.addingTimeInterval(Double(-$0 * 86400)), origin: .elsewhere) }
+    }
+    func randomCandidates(count: Int, excluding: Set<String>) async -> [OnThisDayCandidate] { [] }
+    func image(for candidate: OnThisDayCandidate, targetPixels: CGFloat) async -> UIImage? {
+        if candidate.id == "page-0" { return UIImage(systemName: "photo") }
+        return await withCheckedContinuation { requests[candidate.id] = $0 }
+    }
+    func waitForRequest(_ id: String) async {
+        for _ in 0..<200 {
+            if requests[id] != nil { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Expected image request was not started")
+    }
+    func finish(_ id: String, succeeds: Bool) {
+        requests.removeValue(forKey: id)?.resume(returning: succeeds ? UIImage(systemName: "photo") : nil)
     }
 }

@@ -134,7 +134,7 @@ struct TranscriptPhoto: View {
 struct MurmurPhotoLightbox: View {
     let url: URL
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.murmurReduceMotion) private var reduceMotion
 
     @State private var image: UIImage?
     @State private var scale: CGFloat = 1
@@ -152,6 +152,7 @@ struct MurmurPhotoLightbox: View {
     }
 
     var body: some View {
+        NavigationStack {
         ZStack {
             Color.black
                 .opacity(backdropOpacity)
@@ -170,24 +171,16 @@ struct MurmurPhotoLightbox: View {
                 ProgressView().tint(.white)
             }
         }
-        .overlay(alignment: .topLeading) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    // Light, because the backdrop it sits on is black.
-                    .background(.white.opacity(0.18), in: Circle())
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("完成") { dismiss() }
+                    .accessibilityLabel("关闭照片")
+                    .accessibilityIdentifier("close-photo")
             }
-            .padding(.leading, 8)
-            .accessibilityLabel("关闭照片")
-            .accessibilityIdentifier("close-photo")
         }
-        .statusBarHidden()
+        .toolbarColorScheme(.dark, for: .navigationBar)
+        }
         .task(id: url) {
             // Whatever the transcript already decoded shows immediately; the
             // sharper copy replaces it a moment later.
@@ -231,7 +224,7 @@ struct MurmurPhotoLightbox: View {
                 } else if value.translation.height > 120 || value.predictedEndTranslation.height > 420 {
                     dismiss()
                 } else {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    withAnimation(reduceMotion ? nil : MurmurMotion.content) {
                         offset = .zero
                     }
                 }
@@ -239,7 +232,7 @@ struct MurmurPhotoLightbox: View {
     }
 
     private func toggleZoom() {
-        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) {
+        withAnimation(reduceMotion ? nil : MurmurMotion.content) {
             if isZoomed {
                 reset()
             } else {
