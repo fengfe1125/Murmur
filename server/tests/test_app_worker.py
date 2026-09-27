@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import sqlite3
 import struct
 import sys
@@ -279,7 +280,8 @@ class AppWorkerTests(unittest.TestCase):
         row = self.store.moment_for_user(result.moment_id, self.enrollment.user_id)
         preview = Path(row["preview_path"])
         self.assertTrue(preview.is_file())
-        self.assertEqual(preview.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":  # Windows has no POSIX mode bits; 0600 is enforced where it exists
+            self.assertEqual(preview.stat().st_mode & 0o777, 0o600)
         with Image.open(preview) as image:
             self.assertFalse(image.getexif())
         events = self.store.events_after(result.moment_id, self.enrollment.user_id)
@@ -491,7 +493,8 @@ class AppWorkerTests(unittest.TestCase):
             worker.process_one()
         _, label = thread_key("app", "direct", self.enrollment.user_id)
         path = Dossier.load(self.root / "dossiers", label).path
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":  # Windows has no POSIX mode bits; 0600 is enforced where it exists
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_small_compressed_image_with_excessive_dimensions_is_rejected_predecode(self):
         raw = self.settings.upload_dir / "murmur-upload-pixel-bomb"

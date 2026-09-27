@@ -214,6 +214,9 @@ with tempfile.TemporaryDirectory() as directory:
     ))
     check("QQ 空名单 + 禁止自动入册会拒绝",
           qq_http.sent is False)
+    dt_mem.close()
+    wx_mem.close()
+    qq_mem.close()
 
 print("\n── 部署不会偷偷启用 Bot " + "─" * 32)
 root = Path(__file__).resolve().parents[2]

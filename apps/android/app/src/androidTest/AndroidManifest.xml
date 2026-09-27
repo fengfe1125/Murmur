@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The ui-test-manifest generic host (androidx.activity.ComponentActivity)
+         launches with the default adjustResize: on API 35 the system then
+         resizes the decor for the IME *and* Compose's imePadding applies again,
+         double-lifting content off the top of the window. adjustNothing leaves
+         IME handling solely to the app's imePadding — the same single
+         handling production gets from enableEdgeToEdge. -->
+    <application>
+        <activity
+            android:name="androidx.activity.ComponentActivity"
+            android:windowSoftInputMode="adjustNothing" />
+    </application>
+</manifest>

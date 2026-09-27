@@ -143,6 +143,7 @@ with tempfile.TemporaryDirectory() as d:
     check("写进记忆了", len(mem.recent(chat_id=wechat.wechat_thread("u1@im.wechat")[0])) > 0)
     check("打字状态点亮过又熄灭", wechat.TYPING_ON in client.typing
           and client.typing[-1] == wechat.TYPING_OFF)
+    mem.close()
 
 print("\n── 图片消息 " + "─" * 45)
 with tempfile.TemporaryDirectory() as d:
@@ -152,6 +153,7 @@ with tempfile.TemporaryDirectory() as d:
     h.handle(msg(image=True, text="你看"))
     check("图 + 配文能回", client.sent_texts == ["嗯", "在等电梯？"],
           f"实际 {client.sent_texts}")
+    mem.close()
 
 print("\n── 白名单 " + "─" * 47)
 with tempfile.TemporaryDirectory() as d:
@@ -162,6 +164,7 @@ with tempfile.TemporaryDirectory() as d:
           f"实际 {client.sent_texts}")
     h.handle(msg(uid="friend@im.wechat", text="喂"))
     check("名单内的人正常回", "嗯" in client.sent_texts)
+    mem.close()
 
 print("\n── 自己的回声 " + "─" * 43)
 with tempfile.TemporaryDirectory() as d:
@@ -170,6 +173,7 @@ with tempfile.TemporaryDirectory() as d:
     h.handle(msg(text="这是机器人自己发的", message_type=wechat.MSG_TYPE_BOT))
     check("message_type=2 的消息不处理（否则自问自答）",
           client.sent_texts == [], f"实际 {client.sent_texts}")
+    mem.close()
 
 print("\n── 连发合并 " + "─" * 45)
 with tempfile.TemporaryDirectory() as d:
@@ -186,6 +190,7 @@ with tempfile.TemporaryDirectory() as d:
         t.join()
     check("4 句话只回一次（2 条气泡，不是 8 条）",
           len(client.sent_texts) == 2, f"实际发了 {len(client.sent_texts)} 条")
+    mem.close()
 
 print("\n── 说了别发就不发 " + "─" * 39)
 with tempfile.TemporaryDirectory() as d:
@@ -196,6 +201,7 @@ with tempfile.TemporaryDirectory() as d:
     h.handle(msg(text="别发了"))
     check("退出确认了一句", "不主动找你" in "".join(client.sent_texts))
     check("记进 optout 表", mem.is_opted_out(key))
+    mem.close()
 
 print("\n── 模型说 quiet 就真的不说话 " + "─" * 30)
 with tempfile.TemporaryDirectory() as d:
@@ -206,6 +212,7 @@ with tempfile.TemporaryDirectory() as d:
     h.handle(msg(text="……"))
     check("一条都不发", client.sent_texts == [])
     check("但打字状态收干净了", client.typing[-1] == wechat.TYPING_OFF)
+    mem.close()
     wechat.respond = lambda *a, **k: fake_reply(["嗯", "在等电梯？"])
 
 print("\n── 模型炸了也别把进程带走 " + "─" * 32)
@@ -221,6 +228,7 @@ with tempfile.TemporaryDirectory() as d:
     h.handle(msg(text="在吗"))
     check("回了一句错误提示而不是静默失踪",
           any("出错" in t for t in client.sent_texts), f"实际 {client.sent_texts}")
+    mem.close()
     wechat.respond = lambda *a, **k: fake_reply(["嗯", "在等电梯？"])
 
 print("\n── 两个人互不串线 " + "─" * 39)
@@ -240,6 +248,7 @@ with tempfile.TemporaryDirectory() as d:
     kb = wechat.wechat_thread("b@im.wechat")[0]
     check("记忆分开", ka != kb and len(mem.recent(chat_id=ka)) > 0
           and len(mem.recent(chat_id=kb)) > 0)
+    mem.close()
 
 print("\n── 发到一半炸了，对话也已经落库 " + "─" * 25)
 with tempfile.TemporaryDirectory() as d:

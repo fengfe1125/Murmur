@@ -12,6 +12,18 @@ enum class MurmurPhase {
 
     val isBusy: Boolean
         get() = this == PreparingPhoto || this == Uploading || this == Responding
+
+    val statusText: String
+        get() = when (this) {
+            Idle -> "此刻为空"
+            PreparingPhoto -> "正在准备照片"
+            Ready -> "准备好了"
+            Uploading -> "正在送往 Murmur"
+            Responding -> "Murmur 正在回应"
+            Complete -> "这一刻已完成"
+            Quiet -> "Murmur 选择安静陪着"
+            Error -> "没有送达"
+        }
 }
 
 sealed interface MurmurConnectionState {
@@ -41,6 +53,12 @@ class MurmurFailure(
     companion object {
         fun from(error: Throwable): MurmurFailure = when (error) {
             is MurmurFailure -> error
+            // TimeoutCancellationException is a CancellationException subclass; it
+            // must be mapped before the generic cancellation branch below.
+            is kotlinx.coroutines.TimeoutCancellationException ->
+                MurmurFailure("timeout", "等待时间有点久，请再试一次。", retryable = true)
+            is kotlinx.coroutines.CancellationException ->
+                MurmurFailure("cancelled", "已取消。", retryable = true)
             is java.net.SocketTimeoutException, is java.io.InterruptedIOException ->
                 MurmurFailure("timeout", "等待时间有点久，请再试一次。", retryable = true)
             is java.io.IOException ->
@@ -58,6 +76,30 @@ class MurmurFailure(
 }
 
 data class MurmurBubble(val id: String, val text: String)
+
+/**
+ * Why an outgoing row never landed, keyed by that row — the Android
+ * counterpart of `MurmurSendFailure` in `MurmurModels.swift`.  The mark and
+ * the reason sit on the bubble itself, so a second message sent after the
+ * failure does not inherit the first one's error.  In memory only: reading
+ * back 「暂时没有连上」 a week later would be a lie about now.
+ */
+data class MurmurSendFailure(
+    val message: String,
+    val canResend: Boolean,
+) {
+    companion object {
+        /**
+         * A row the app has no live reason for: still sending when the
+         * process was last killed, or failed in a session that has since
+         * ended.  The verdict survived in the transcript; the wording did
+         * not.  Pressable as long as the row still has something to send —
+         * the transcript keeps the words, its own copy of the photo and the
+         * key the send went up under.
+         */
+        fun interrupted(canResend: Boolean) = MurmurSendFailure("这条没有发出去。", canResend = canResend)
+    }
+}
 
 @Serializable
 data class MurmurIdentity(
@@ -112,6 +154,13 @@ sealed interface MurmurStreamEvent {
 
     data class Accepted(override val id: String?) : MurmurStreamEvent
     data class Bubble(override val id: String?, val text: String) : MurmurStreamEvent
+
+    /**
+     * 读图（intent=photo_reading）带回的三个话头，跟在 guess 气泡后、done 前。
+     * 同一个 moment 的另一种输出，不是新端点；普通 moment 永远不会收到。
+     */
+    data class Angles(override val id: String?, val texts: List<String>) : MurmurStreamEvent
+
     data class Quiet(override val id: String?) : MurmurStreamEvent
     data class Done(override val id: String?, val move: String?, val scene: String?) : MurmurStreamEvent
     data class Failure(override val id: String?, val failure: MurmurFailure) : MurmurStreamEvent
@@ -133,7 +182,18 @@ data class PhotoAttachment(
 interface MurmurApiClient {
     suspend fun storedIdentity(): MurmurIdentity?
     suspend fun enroll(inviteCode: String, deviceName: String): MurmurIdentity
-    suspend fun createMoment(note: String?, photo: PhotoAttachment?, idempotencyKey: String): MomentReceipt
+    /**
+     * [intent] 是服务端 moment-intent 白名单的拼写（目前只有 "photo_reading"）；
+     * [contextMomentIDs] 按 JSON 数组字符串发给服务端（去重后最多 8 个）。
+     * 两者缺省时发送的正文与改动前逐字节一致，普通聊天不需要传。
+     */
+    suspend fun createMoment(
+        note: String?,
+        photo: PhotoAttachment?,
+        idempotencyKey: String,
+        intent: String? = null,
+        contextMomentIDs: List<String>? = null,
+    ): MomentReceipt
     fun events(momentID: String, lastEventID: String?): Flow<MurmurStreamEvent>
     suspend fun currentProactive(): ProactiveMoment?
     suspend fun acknowledge(momentID: String, reply: String?)

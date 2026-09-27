@@ -50,6 +50,7 @@ with tempfile.TemporaryDirectory() as d:
 
     mem.enroll("dt", "6638270543882421", key, label, "毛老师")
     check("改名了跟得上", mem.roster("dt")[0]["nick"] == "毛老师")
+    mem.close()
 
 print("\n── 平台之间不串 " + "─" * 41)
 with tempfile.TemporaryDirectory() as d:
@@ -62,6 +63,7 @@ with tempfile.TemporaryDirectory() as d:
           and len(mem.roster("tg")) == 1)
     check("查钉钉不会查出微信的人",
           mem.roster("dt")[0]["chat_id"] == 1)
+    mem.close()
 
 print("\n── 说了别发就从名册结果里消失 " + "─" * 28)
 with tempfile.TemporaryDirectory() as d:
@@ -80,6 +82,7 @@ with tempfile.TemporaryDirectory() as d:
     mem.set_optout(kb, "dt:oto:b", False)
     check("反悔之后又回到收件人里",
           sorted(r["user_id"] for r in mem.roster("dt")) == ["a", "b"])
+    mem.close()
 
 print("\n── 顺序稳定（排程要可复现） " + "─" * 30)
 with tempfile.TemporaryDirectory() as d:
@@ -88,6 +91,7 @@ with tempfile.TemporaryDirectory() as d:
         mem.enroll("dt", u, i, f"dt:oto:{u}")
     check("按入册时间排，先来的在前",
           [r["user_id"] for r in mem.roster("dt")] == list("abcde"))
+    mem.close()
 
 print("\n── 跨进程可见（钉钉和 Telegram 是两个进程） " + "─" * 16)
 with tempfile.TemporaryDirectory() as d:
@@ -97,11 +101,14 @@ with tempfile.TemporaryDirectory() as d:
     b = Memory(p)          # 另一个进程打开同一个库
     check("另一个进程立刻看得到",
           [r["user_id"] for r in b.roster("dt")] == ["newguy"])
+    a.close()
+    b.close()
 
 print("\n── 空名册不炸 " + "─" * 43)
 with tempfile.TemporaryDirectory() as d:
     mem = Memory(Path(d) / "m.db")
     check("没人时返回空列表而不是 None", mem.roster("dt") == [])
+    mem.close()
 
 print("\n── 旧库能平滑升上来 " + "─" * 37)
 with tempfile.TemporaryDirectory() as d:
@@ -127,6 +134,7 @@ with tempfile.TemporaryDirectory() as d:
     check("老数据迁移后默认视为已送达", state == "committed")
     check("roster 表自动建出来了", mem.roster("dt") == [])
     check("能往旧库里入册", mem.enroll("dt", "x", 1, "dt:oto:x") is True)
+    mem.close()
 
 print("\n── 聊天原文库只许本人读写 " + "─" * 32)
 with tempfile.TemporaryDirectory() as d:

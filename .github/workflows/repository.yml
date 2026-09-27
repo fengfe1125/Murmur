@@ -149,6 +149,9 @@ jobs:
       - name: Build debug APK
         working-directory: ${{ needs.scope.outputs.android_directory }}
         run: ./gradlew assembleDebug --no-daemon
+      - name: JVM unit tests
+        working-directory: ${{ needs.scope.outputs.android_directory }}
+        run: ./gradlew test --no-daemon
 
   gate:
     name: Repository gate

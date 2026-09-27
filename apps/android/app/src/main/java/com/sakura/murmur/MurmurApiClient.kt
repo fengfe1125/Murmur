@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.DeserializationStrategy
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.serializer
@@ -82,11 +83,16 @@ class OkHttpMurmurApiClient(
         val keyID = authenticator.enrollmentKeyID()
         try {
             val challenge = challenge(purpose = "enrollment", keyID = keyID)
+            // Key Attestation generates the key inside this call (the
+            // attestation challenge is baked in at generation), so the key ID
+            // may only exist afterwards — ask again.
             val attestation = authenticator.enrollmentAttestation(challenge, keyID)
+            val finalKeyID = authenticator.enrollmentKeyID()
+                ?: throw MurmurFailure("attestation_failed", "无法生成设备安全密钥。", retryable = false)
             val payload = EnrollmentRequest(
                 challengeID = challenge.challengeID,
                 inviteCode = inviteCode,
-                keyID = keyID,
+                keyID = finalKeyID,
                 attestation = attestation,
                 deviceName = deviceName,
                 environment = authenticator.environment,
@@ -118,11 +124,29 @@ class OkHttpMurmurApiClient(
         note: String?,
         photo: PhotoAttachment?,
         idempotencyKey: String,
+        intent: String?,
+        contextMomentIDs: List<String>?,
     ): MomentReceipt = guard {
         val boundary = "Murmur-${UUID.randomUUID()}"
-        val bodyFile = makeMultipartBody(boundary, note, photo, idempotencyKey)
+        val bodyFile = File(cacheDir, "murmur-multipart-${UUID.randomUUID()}")
+        val writer = MultipartWriter(boundary)
         try {
-            val digest = sha256(bodyFile.readBytes())
+            bodyFile.outputStream().buffered().use { output ->
+                writer.field(output, "idempotency_key", idempotencyKey)
+                // Field order and the compact JSON array spelling mirror the
+                // iOS multipart body (MurmurAPI.swift makeMultipartBody); the
+                // server json.loads the value back into a list of moment IDs.
+                if (!intent.isNullOrEmpty()) writer.field(output, "intent", intent)
+                if (!contextMomentIDs.isNullOrEmpty()) {
+                    writer.field(output, "context_moment_ids", json.encodeToString(contextMomentIDs))
+                }
+                if (!note.isNullOrEmpty()) writer.field(output, "note", note)
+                photo?.let { writer.image(output, it.filename, it.mimeType, it.file) }
+                writer.finish(output)
+            }
+            // The digest is computed while the body is written, never by
+            // re-reading the whole file into memory.
+            val digest = writer.sha256()
             gate.lock()
             try {
                 val request = authorizedRequestBuilder("/v1/moments", "POST", digest)
@@ -165,31 +189,16 @@ class OkHttpMurmurApiClient(
             // a blank line terminates an SSE event, so any helper that drops
             // blank lines would silently merge every event into the last one.
             val source = it.body.source()
-            var eventID: String? = null
-            var eventName = "message"
-            val dataLines = mutableListOf<String>()
+            val decoder = SseEventDecoder()
             while (true) {
                 val line = try {
                     source.readUtf8LineStrict()
                 } catch (_: EOFException) {
                     null
                 } ?: break
-                when {
-                    line.isEmpty() -> {
-                        decodeEvent(eventID, eventName, dataLines.joinToString("\n"))?.let { emit(it) }
-                        eventID = null
-                        eventName = "message"
-                        dataLines.clear()
-                    }
-                    line.startsWith(":") -> Unit // keep-alive comment
-                    line.startsWith("id:") -> eventID = line.drop(3).trim()
-                    line.startsWith("event:") -> eventName = line.drop(6).trim()
-                    line.startsWith("data:") -> dataLines.add(line.drop(5).trim())
-                }
+                decoder.feed(line)?.let { emit(it) }
             }
-            if (dataLines.isNotEmpty()) {
-                decodeEvent(eventID, eventName, dataLines.joinToString("\n"))?.let { emit(it) }
-            }
+            decoder.flush()?.let { emit(it) }
         }
     }.flowOn(Dispatchers.IO)
 
@@ -425,53 +434,6 @@ class OkHttpMurmurApiClient(
         throw MurmurFailure.fromHTTPStatus(data.statusCode)
     }
 
-    private fun decodeEvent(id: String?, name: String, data: String): MurmurStreamEvent? = when (name) {
-        "accepted" -> MurmurStreamEvent.Accepted(id)
-        "bubble" -> MurmurStreamEvent.Bubble(id, json.decodeFromString(BubblePayload.serializer(), data).text)
-        "quiet" -> MurmurStreamEvent.Quiet(id)
-        "done" -> {
-            val done = try {
-                json.decodeFromString(DonePayload.serializer(), data)
-            } catch (_: Exception) {
-                DonePayload()
-            }
-            MurmurStreamEvent.Done(id, done.move, done.scene)
-        }
-        "error" -> {
-            val failure = json.decodeFromString(StreamFailurePayload.serializer(), data)
-            MurmurStreamEvent.Failure(id, MurmurFailure(failure.code, failure.message, failure.retryable))
-        }
-        else -> null
-    }
-
-    private fun makeMultipartBody(
-        boundary: String,
-        note: String?,
-        photo: PhotoAttachment?,
-        idempotencyKey: String,
-    ): File {
-        val file = File(cacheDir, "murmur-multipart-${UUID.randomUUID()}")
-        file.outputStream().buffered().use { output ->
-            fun write(string: String) = output.write(string.toByteArray(Charsets.UTF_8))
-            fun field(name: String, value: String) {
-                write("--$boundary\r\n")
-                write("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
-                write("$value\r\n")
-            }
-            field("idempotency_key", idempotencyKey)
-            if (!note.isNullOrEmpty()) field("note", note)
-            if (photo != null) {
-                write("--$boundary\r\n")
-                write("Content-Disposition: form-data; name=\"image\"; filename=\"${photo.filename}\"\r\n")
-                write("Content-Type: ${photo.mimeType}\r\n\r\n")
-                photo.file.inputStream().use { it.copyTo(output) }
-                write("\r\n")
-            }
-            write("--$boundary--\r\n")
-        }
-        return file
-    }
-
     private class ResponseData(val statusCode: Int, private val body: ByteArray) {
         fun bodyText(): String = String(body, Charsets.UTF_8)
     }
@@ -520,7 +482,9 @@ private data class EnrollmentRequest(
     // The server defaults a missing platform to "ios" (the shipped iOS client
     // predates the field).  An Android enrolment that stays silent would be
     // recorded as iOS: push-token validation and the per-request attestor are
-    // both chosen from the enrolled key's platform, so declare it here.
+    // both chosen from the enrolled key's platform, so this field MUST reach
+    // the wire even though it has a default value.
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS)
     val platform: String = "android",
 )
 
@@ -540,15 +504,6 @@ private data class DeviceRequest(
 
 @Serializable
 private data class DevicesResponse(val devices: List<MurmurDevice>)
-
-@Serializable
-private data class BubblePayload(val text: String)
-
-@Serializable
-private data class DonePayload(val move: String? = null, val scene: String? = null)
-
-@Serializable
-private data class StreamFailurePayload(val code: String, val message: String, val retryable: Boolean)
 
 @Serializable
 private data class ErrorEnvelope(val error: StreamFailurePayload)

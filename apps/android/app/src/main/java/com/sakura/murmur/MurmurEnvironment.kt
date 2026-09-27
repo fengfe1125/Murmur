@@ -29,22 +29,26 @@ object MurmurEnvironment {
             }
         }
 
-        val store = IdentityStore(context.applicationContext)
+        val store = AndroidIdentityStore(context.applicationContext)
         val authenticator: MurmurAuthenticator =
             if (BuildConfig.ALLOW_DEVELOPMENT && BuildConfig.MURMUR_DEV_TOKEN.isNotBlank()) {
                 DevelopmentAuthenticator(token = BuildConfig.MURMUR_DEV_TOKEN, store = store)
             } else if (BuildConfig.ALLOW_DEVELOPMENT) {
-                // Debug without a token still has no attestation path until Phase 2.
+                // Debug without a token still has no attestation path: the
+                // emulator's Keystore attestation is software-backed and the
+                // production server fails it closed by design.
                 throw MurmurFailure(
                     "not_configured",
                     "尚未配置开发令牌（local.properties 的 murmur.devToken）。",
                     retryable = false,
                 )
             } else {
-                throw MurmurFailure(
-                    "integrity_unsupported",
-                    "安卓正式设备认证将在后续版本接入。",
-                    retryable = false,
+                // Release: hardware Key Attestation (T2.1). A device with an
+                // unlocked bootloader or a non-TEE key is refused by the
+                // server — that is the production gate, not a client bug.
+                KeyAttestationAuthenticator(
+                    store = store,
+                    keys = KeystoreAttestationKeyProvider(),
                 )
             }
         return OkHttpMurmurApiClient(baseURL, authenticator, context.cacheDir)

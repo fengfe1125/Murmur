@@ -25,8 +25,15 @@ interface MurmurAuthenticator {
     fun publicHeaders(): Map<String, String>
     suspend fun storedIdentity(): MurmurIdentity?
     suspend fun pendingEnrollmentKeyID(): String?
-    suspend fun enrollmentKeyID(): String
-    suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String): String
+    /**
+     * The key ID this enrollment will claim. The development authenticator
+     * mints it on demand; the Key Attestation authenticator returns null until
+     * the key actually exists — the client generates the key inside
+     * [enrollmentAttestation] (the attestation challenge is baked in at key
+     * generation) and calls this again to learn the resulting ID.
+     */
+    suspend fun enrollmentKeyID(): String?
+    suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String?): String
     suspend fun assertion(
         challenge: AppAttestChallenge,
         method: String,
@@ -54,12 +61,45 @@ internal fun sha256(data: ByteArray): ByteArray =
     MessageDigest.getInstance("SHA-256").digest(data)
 
 /**
- * Device-bound identity store — the Android counterpart of the iOS
- * `KeychainIdentityStore` (AfterFirstUnlockThisDeviceOnly). Backed by
- * EncryptedSharedPreferences with a Keystore-held master key.
+ * The exact bytes a release-mode per-request assertion signs:
+ * `sha256(challenge ‖ METHOD ‖ path ‖ sha256(body))` — the wire contract in
+ * `deploy/android-server-plan.md` / `AppAuthenticator.request_client_data_hash`
+ * (the challenge is the DECODED raw bytes, not the base64url text). The
+ * development authenticator does NOT use this (its byte format is fixed
+ * separately); Key Attestation will in Phase 2.
  */
+internal fun clientDataHash(
+    challenge: AppAttestChallenge,
+    method: String,
+    path: String,
+    bodyDigest: ByteArray,
+): ByteArray {
+    val challengeBytes = challenge.bytes
+        ?: throw MurmurFailure("invalid_challenge", "服务端发来的挑战无法解析。", retryable = false)
+    var value = challengeBytes
+    value += method.uppercase().toByteArray(Charsets.UTF_8)
+    value += path.toByteArray(Charsets.UTF_8)
+    value += bodyDigest
+    return sha256(value)
+}
+
+/**
+ * Device-bound identity storage — the Android counterpart of the iOS
+ * `KeychainIdentityStore` (AfterFirstUnlockThisDeviceOnly). An interface so
+ * the session model and authenticators stay testable on the JVM; production
+ * uses [AndroidIdentityStore].
+ */
+interface IdentityStore {
+    suspend fun loadIdentity(): MurmurIdentity?
+    suspend fun saveIdentity(identity: MurmurIdentity)
+    suspend fun loadPendingKeyID(): String?
+    suspend fun savePendingKeyID(keyID: String)
+    suspend fun clearPendingKeyID()
+    suspend fun clear()
+}
+
 @Suppress("DEPRECATION")
-class IdentityStore(context: Context) {
+class AndroidIdentityStore(context: Context) : IdentityStore {
     private val json = Json { ignoreUnknownKeys = true }
     private val mutex = Mutex()
     private val prefs = EncryptedSharedPreferences.create(
@@ -70,30 +110,30 @@ class IdentityStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    suspend fun loadIdentity(): MurmurIdentity? = mutex.withLock {
+    override suspend fun loadIdentity(): MurmurIdentity? = mutex.withLock {
         prefs.getString(KEY_IDENTITY, null)?.let { json.decodeFromString<MurmurIdentity>(it) }
     }
 
-    suspend fun saveIdentity(identity: MurmurIdentity) = mutex.withLock {
+    override suspend fun saveIdentity(identity: MurmurIdentity) = mutex.withLock {
         prefs.edit()
             .putString(KEY_IDENTITY, json.encodeToString(MurmurIdentity.serializer(), identity))
             .putString(KEY_PENDING, identity.keyID)
             .apply()
     }
 
-    suspend fun loadPendingKeyID(): String? = mutex.withLock {
+    override suspend fun loadPendingKeyID(): String? = mutex.withLock {
         prefs.getString(KEY_PENDING, null)
     }
 
-    suspend fun savePendingKeyID(keyID: String) = mutex.withLock {
+    override suspend fun savePendingKeyID(keyID: String) = mutex.withLock {
         prefs.edit().putString(KEY_PENDING, keyID).apply()
     }
 
-    suspend fun clearPendingKeyID() = mutex.withLock {
+    override suspend fun clearPendingKeyID() = mutex.withLock {
         prefs.edit().remove(KEY_PENDING).apply()
     }
 
-    suspend fun clear() = mutex.withLock {
+    override suspend fun clear() = mutex.withLock {
         prefs.edit().remove(KEY_IDENTITY).remove(KEY_PENDING).apply()
     }
 
@@ -126,14 +166,14 @@ class DevelopmentAuthenticator(
 
     override suspend fun pendingEnrollmentKeyID(): String? = store.loadPendingKeyID()
 
-    override suspend fun enrollmentKeyID(): String {
+    override suspend fun enrollmentKeyID(): String? {
         store.loadPendingKeyID()?.let { if (it.startsWith("dev-")) return it }
         val keyID = "dev-${UUID.randomUUID().toString().lowercase()}"
         store.savePendingKeyID(keyID)
         return keyID
     }
 
-    override suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String): String =
+    override suspend fun enrollmentAttestation(challenge: AppAttestChallenge, keyID: String?): String =
         Base64Url.encode("development:${challenge.challengeID}:$keyID".toByteArray(Charsets.UTF_8))
 
     override suspend fun assertion(
