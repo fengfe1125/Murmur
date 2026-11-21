@@ -1,92 +1,15 @@
 import SwiftUI
 import UIKit
 
-/// The keyboard geometry shared by every screen inside one app shell.
-///
-/// This is deliberately owned by `MurmurShell`, not a process-wide singleton:
-/// keyboard layout guides belong to a particular window, and a late event from
-/// another scene must never move this scene's composer.
+/// Window-local observation for player visibility and scroll diagnostics.
+/// System safe areas, not this measurement, position composers.
 @MainActor
 final class MurmurKeyboardState: ObservableObject {
     /// How far the software keyboard reaches above the resting home-indicator
     /// inset. Hardware keyboards and an absent software keyboard both report 0.
     @Published private(set) var overlap: CGFloat = 0
-    private let injectedOverlap: CGFloat?
-
-    init() {
-        #if DEBUG
-        injectedOverlap = ProcessInfo.processInfo.arguments.contains(
-            "--murmur-stub-keyboard-overlap"
-        ) ? 301 : nil
-        #else
-        injectedOverlap = nil
-        #endif
-    }
-
     func updateFromLayoutGuide(overlap newValue: CGFloat) {
-        guard injectedOverlap == nil else { return }
-        // The probe only reports changes, so a value dropped here would never
-        // be offered again and the layout would sit at a stale overlap for as
-        // long as the keyboard stayed put.  Hold it instead of losing it.
-        guard !warming else { deferredOverlap = newValue; return }
         setOverlap(newValue)
-    }
-
-    /// Ask for the keyboard once, before anyone reaches for the field.
-    ///
-    /// The keyboard lives in another process, and the first field in a session
-    /// to ask for it waits while that process — and the input method inside
-    /// it, which for Pinyin is not small — is loaded.  That wait is the
-    /// "sometimes" in a keyboard that usually arrives at once: the first tap
-    /// after launch pays it, and so does the first tap after iOS has reclaimed
-    /// the keyboard behind a backgrounded app.  Nothing else on this screen
-    /// can shorten it; the only thing that helps is having asked already.
-    ///
-    /// A field that takes first responder and gives it straight back inside
-    /// one runloop turn asks for all of that without a keyboard ever being
-    /// shown — so the layout guide should not move at all.  `warming` is there
-    /// for the case where it twitches anyway: a keyboard nobody asked to see
-    /// must not move the composer on an idle screen.
-    func warm() {
-        // Never while the keyboard is up: taking first responder from the
-        // composer would put the keyboard away mid-sentence.
-        guard overlap == 0, !warming, let window = Self.keyWindow else { return }
-        warming = true
-        // A field has to be in a window to become first responder at all, and
-        // at zero size it is invisible for the one turn it spends there.
-        let field = UITextField(frame: .zero)
-        window.addSubview(field)
-        field.becomeFirstResponder()
-        field.resignFirstResponder()
-        field.removeFromSuperview()
-        // Layout runs after this turn, so the guard outlives the borrowed
-        // responder by one hop rather than ending with it.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.warming = false
-            guard let deferred = self.deferredOverlap else { return }
-            self.deferredOverlap = nil
-            self.setOverlap(deferred)
-        }
-    }
-
-    /// Set while the warm-up holds first responder, and for the layout pass
-    /// that follows it.
-    private var warming = false
-    private var deferredOverlap: CGFloat?
-
-    private static var keyWindow: UIWindow? {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows)
-            .first(where: \.isKeyWindow)
-    }
-
-    /// Deterministic geometry for UI layout tests. Production builds never
-    /// carry an injected value, so focus alone cannot manufacture an overlap.
-    func focusDidChange(_ focused: Bool) {
-        guard let injectedOverlap else { return }
-        setOverlap(focused ? injectedOverlap : 0)
     }
 
     private func setOverlap(_ newValue: CGFloat) {
@@ -99,20 +22,8 @@ final class MurmurKeyboardState: ObservableObject {
     }
 }
 
-/// One source of truth for the clearance beneath a composer.
+/// Coordinate conversion for observation; this never adds layout padding.
 enum MurmurKeyboardClearance {
-    /// The total clearance required by a screen that is outside the shell's
-    /// own content inset, such as an archive day pushed on a NavigationStack.
-    static func total(overlap: CGFloat, resting: CGFloat) -> CGFloat {
-        max(sanitized(overlap), max(0, resting))
-    }
-
-    /// Extra clearance for the ordinary chat, whose shell already reserves
-    /// `resting` points for the tab bar.
-    static func supplemental(overlap: CGFloat, resting: CGFloat) -> CGFloat {
-        max(0, sanitized(overlap) - max(0, resting))
-    }
-
     /// Converts a full-screen keyboard-layout-guide position into the overlap
     /// that remains after the resting home-indicator inset is removed.
     static func overlap(
@@ -125,9 +36,7 @@ enum MurmurKeyboardClearance {
         return max(0, reach - max(0, restingBottomInset))
     }
 
-    private static func sanitized(_ value: CGFloat) -> CGFloat {
-        value.isFinite ? max(0, value) : 0
-    }
+
 }
 
 /// A full-screen UIKit probe whose top marker is constrained to the system's

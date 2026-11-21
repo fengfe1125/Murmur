@@ -94,6 +94,33 @@ class AppAPITests(unittest.TestCase):
             "X-Murmur-Challenge-ID": response.json()["challenge_id"],
         }
 
+    def test_daily_review_capability_preferences_and_question_wire(self):
+        result = self.client.get("/v1/reviews/config", headers=self.authenticated_headers())
+        self.assertFalse(result.json()["available"])
+        result = self.client.get("/v1/reviews", headers=self.authenticated_headers())
+        self.assertEqual(result.status_code, 404)
+        self.client.close()
+        self.settings = replace(self.settings, daily_reviews_enabled=True)
+        self.client = TestClient(create_app(self.settings, cfg=self.cfg, store=self.store))
+        result = self.client.patch("/v1/reviews/preferences", headers=self.authenticated_headers(), json={"enabled": True, "local_time": "22:30"})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertIs(result.json()["enabled"], True)
+        day = result.json()["first_day"]
+        bad = self.client.patch("/v1/reviews/preferences", headers=self.authenticated_headers(), json={"local_time": "24:00"})
+        self.assertEqual(bad.status_code, 400)
+        empty = self.client.post(f"/v1/reviews/{day}/refresh", headers=self.authenticated_headers(), json={})
+        self.assertEqual(empty.json()["status"], "empty")
+        no_question = self.client.post("/v1/moments", headers=self.authenticated_headers(), files={"note": (None, "先试星期六"), "daily_question_day": (None, day), "idempotency_key": (None, "daily-answer-0001")})
+        self.assertEqual(no_question.status_code, 404, no_question.text)
+        with self.store._tx() as db:
+            db.execute("INSERT INTO app_daily_reviews(user_id,day,timezone,status,summary,question,updated_at) VALUES(?,?,?,'ready',?,?,?)", (self.identity["user_id"], day, "Asia/Shanghai", "今天讨论了散步安排。", "哪一天有空？", datetime.now(UTC).isoformat()))
+        detail = self.client.get(f"/v1/reviews/{day}", headers=self.authenticated_headers())
+        self.assertEqual(detail.json()["question"], "哪一天有空？")
+        answer = self.client.post("/v1/moments", headers=self.authenticated_headers(), files={"note": (None, "先试星期六"), "daily_question_day": (None, day), "idempotency_key": (None, "daily-answer-0001")})
+        self.assertEqual(answer.status_code, 202, answer.text)
+        row = self.store.conn.execute("SELECT question FROM app_review_answers WHERE moment_id=?", (answer.json()["moment_id"],)).fetchone()
+        self.assertEqual(row["question"], "哪一天有空？")
+
     def test_multipart_moment_idempotency_sse_and_no_history_route(self):
         headers = self.authenticated_headers()
         response = self.client.post(

@@ -27,6 +27,7 @@ from . import counters
 from .config import Config
 from .engine import _client
 from .memory import Entry, Memory
+from .objectivity import RULES
 
 log = logging.getLogger("murmur.dossier")
 
@@ -44,8 +45,7 @@ BLOCKS: dict[str, tuple[str, int]] = {
         900,
     ),
     "怎么跟他说话": (
-        "哪种说法他接了、哪种他没理、他反感什么。"
-        "从他的回复里学到的，是这份文件里最值钱的部分。",
+        "用户明确表达的沟通偏好。不根据没回复或语气推断偏好。",
         700,
     ),
 }
@@ -156,7 +156,7 @@ def _safe(thread: str) -> str:
 
 # ---------- 整理（离线跑，不在对话回路里） ----------
 
-_REWRITE = """\
+_REWRITE = RULES + """\
 你在维护一份关于某个人的长期记忆文件。
 
 下面给你三样东西：
@@ -177,8 +177,7 @@ _REWRITE = """\
 - **过期的删掉。** "下周面试"过了两周就该删，或者改成结果。
 - **每个分区不超过给定字数。** 超了就砍掉最不重要的。
 - 用短句，一行一件事，前面加 `- `。
-- 【怎么跟他说话】这一块最重要：从他回了什么、没回什么里总结。
-  比如"问'为什么'他会回避，改成陈述句他会自己说"。
+- 【怎么跟他说话】只记录用户明确提出的沟通偏好，不根据沉默猜测。
 - 什么都没学到的分区，写"（还不知道）"。
 
 只返回 JSON：{"他是谁": "...", "正在发生": "...", "怎么跟他说话": "..."}
@@ -284,8 +283,6 @@ def _fmt_entries(entries: list[Entry]) -> str:
             bits.append(f"说「{e.note}」")
         if e.scene and e.scene not in ("（纯文字）", ""):
             bits.append(f"发了图：{e.scene}")
-        if e.said:
-            bits.append(f"→ 它回「{e.said}」")
         elif e.move == "quiet":
             bits.append("→ 它没说话")
         if e.reply:

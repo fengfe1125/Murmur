@@ -282,8 +282,10 @@ class EngineProactiveGenerator:
         *,
         data_root: Path | None = None,
         memory_db_path: Path | None = None,
+        store: AppStore | None = None,
     ):
         self.cfg = cfg
+        self.store = store
         self.data_root = data_root or cfg.db_path.parent
         self.memory_db_path = memory_db_path or cfg.db_path
 
@@ -291,6 +293,13 @@ class EngineProactiveGenerator:
         chat_id, label = thread_key("app", "direct", user_id)
         with Memory(self.memory_db_path) as memory:
             dossier = Dossier.load(self.data_root / "dossiers", label)
+            from .daily_review import DailyReviews
+            review_mode = self.store is not None and DailyReviews(self.store).preferences(user_id) is not None
+            if review_mode:
+                # Legacy unsourced dossiers/continuity are never mixed back into
+                # user-correctable memory. Without a query, do not retrieve facts.
+                dossier.blocks = {}
+                memory = DailyReviews(self.store).history_view(user_id, memory)
             # 此刻要按用户设备的时区算：slot 是按它的本地时间排的。
             moment = Moment.text_only(tz or self.cfg.tz)
             recent_intents = [
@@ -298,7 +307,7 @@ class EngineProactiveGenerator:
             ]
             material: ProactiveMaterial | None = None
             open_loop_id: int | None = None
-            if self.cfg.open_loops:
+            if self.cfg.open_loops and not review_mode:
                 memory.expire_open_loops(chat_id, moment.at)
                 if due := memory.due_open_loops(chat_id, moment.at, limit=1):
                     open_loop_id = due[0].id

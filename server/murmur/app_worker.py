@@ -39,6 +39,7 @@ from .app_settings import AppSettings, music_user_allowed
 from .app_store import AccountDeleting, AppStore, Job, NotFound
 from .config import Config
 from .continuity import refresh_open_loops
+from .daily_review import DailyReviews, ReviewGenerator, ReviewWorker
 from .dossier import Dossier, refresh
 from .engine import Reply, read_photo, respond
 from .memory import Entry, Memory, thread_key
@@ -209,9 +210,18 @@ class EngineMomentProcessor:
         chat_id, label = thread_key("app", "direct", job.user_id)
         dossier = Dossier.load(self.data_root / "dossiers", label)
         prompt_parts: list[str] = []
-        if not dossier.is_empty:
+        reviews = DailyReviews(self.store) if self.store else None
+        review_mode = reviews is not None and reviews.preferences(job.user_id) is not None
+        if review_mode:
+            memory = reviews.history_view(job.user_id, memory)
+            prompt_parts.append(reviews.context(job.user_id, job.note or ""))
+            with self.store._lock:
+                answer = self.store.conn.execute("SELECT day,question FROM app_review_answers WHERE moment_id=? AND user_id=?", (job.moment_id, job.user_id)).fetchone()
+            if answer:
+                prompt_parts.append(f"用户在本轮回答 {answer['day']} 的每日问题：{answer['question']}。回复日期是今天。")
+        elif not dossier.is_empty:
             prompt_parts.append(dossier.as_prompt())
-        if self.cfg.open_loops:
+        if self.cfg.open_loops and not review_mode:
             loops = memory.pending_open_loops(chat_id, limit=4)
             if loops:
                 prompt_parts.append(
@@ -220,7 +230,7 @@ class EngineMomentProcessor:
                         f"- {loop.title}" for loop in loops
                     )
                 )
-        if self.cfg.affect:
+        if self.cfg.affect and not review_mode:
             state = preview_affect(
                 memory.affect_state(chat_id, moment.at), job.note, moment.at
             )
@@ -958,6 +968,8 @@ class AppWorker:
 
     def _refresh_dossier(self, memory: Memory, job: Job) -> None:
         """Refresh private long-term memory after SSE is already terminal."""
+        if DailyReviews(self.store).preferences(job.user_id) is not None:
+            return
         chat_id, label = thread_key("app", "direct", job.user_id)
         try:
             refreshed = refresh(
@@ -1258,7 +1270,7 @@ def run() -> None:
         scheduler = ProactiveScheduler(
             store, providers, EngineProactiveGenerator(
                 cfg, data_root=settings.data_root,
-                memory_db_path=settings.memory_db_path,
+                memory_db_path=settings.memory_db_path, store=store,
             ), lock_root=settings.data_root,
             delivery_budget_seconds=settings.push_delivery_budget_seconds,
         )
@@ -1271,11 +1283,24 @@ def run() -> None:
             processor=build_processor(cfg, settings, store, rooms=rooms, catalog=catalog),
             scheduler=scheduler, rooms=rooms,
         )
+        review_worker = None
+        review_thread = None
+        review_store = None
+        if settings.daily_reviews_enabled:
+            review_store = AppStore(settings.db_path)
+            review_worker = ReviewWorker(review_store, settings.memory_db_path, ReviewGenerator(cfg))
+            review_thread = threading.Thread(target=review_worker.run, name="daily-reviews", daemon=True)
+            review_thread.start()
         try:
             if rooms is not None:
                 _install_room_shutdown(worker)
             worker.serve_forever()
         finally:
+            if review_worker:
+                review_worker.stop_event.set()
+                review_thread.join(timeout=5)
+                if not review_thread.is_alive():
+                    review_store.close()
             if room_ipc is not None:
                 room_ipc.close()
 

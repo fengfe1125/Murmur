@@ -70,6 +70,7 @@ from .app_store import (
     NotFound,
 )
 from .config import Config
+from .daily_review import DailyReviews, day_string
 from .dossier import _safe
 from .initiative import wants_stop
 from .memory import Memory, thread_key
@@ -151,6 +152,12 @@ def _error_payload(error: APIError, request_id: str | None = None) -> dict:
 
 
 def _translate_error(exc: Exception) -> APIError:
+    from .app_email import EmailError
+    if isinstance(exc, EmailError):
+        return APIError(exc.status, exc.code, str(exc), retryable=exc.status >= 500)
+    from .app_quota import QuotaExceeded
+    if isinstance(exc, QuotaExceeded):
+        return APIError(429, exc.code, str(exc), retryable=False)
     if isinstance(exc, APIError):
         return exc
     if isinstance(exc, (ChallengeExpired,)):
@@ -166,7 +173,7 @@ def _translate_error(exc: Exception) -> APIError:
     if isinstance(exc, InviteInvalid):
         return APIError(403, exc.code, "邀请码无效、过期或已经使用。")
     if isinstance(exc, DeviceLimit):
-        return APIError(409, exc.code, "最多只能绑定三台设备。")
+        return APIError(409, exc.code, "最多绑定三台设备，请先从已登录设备移除旧设备。")
     if isinstance(exc, LastDevice):
         return APIError(409, exc.code, "不能移除最后一台设备；请改为删除账号。")
     if isinstance(exc, MusicTrackInvalid):
@@ -482,6 +489,7 @@ def create_app(
     music_link: MusicLink | None = None,
     music_catalog: MusicCatalog | None = None,
     room_client: RoomIPCClient | None = None,
+    email_sender=None,
 ):
     try:
         import python_multipart  # noqa: F401  # required by Request.form()
@@ -504,6 +512,9 @@ def create_app(
         pass
     owns_store = store is None
     store = store or AppStore(settings.db_path)
+    from .app_email import EmailError, EmailIdentity, resend_sender
+    email_identity = EmailIdentity(store, settings.email_otp_secret,
+        email_sender or resend_sender(settings.resend_api_key, settings.email_sender))
     authenticator = authenticator or AppAuthenticator(settings, store)
     limiter = RateLimiter(
         settings.requests_per_minute, max_keys=settings.rate_limit_max_keys
@@ -758,6 +769,16 @@ def create_app(
             body_digest=body_digest, allow_deleting=allow_deleting,
         )
 
+    from .app_email_routes import install as install_email_routes
+    install_email_routes(app, email_identity, settings, authenticate, limited_json_body)
+    from .app_sync_routes import install as install_sync_routes
+    install_sync_routes(app, store, authenticate, limited_json_body)
+
+    @app.get("/v1/account/quota")
+    async def account_quota(request: Request):
+        context = await authenticate(request)
+        return await asyncio.to_thread(store.ai_quota, context.user_id)
+
     @app.post("/v1/auth/challenges")
     async def issue_challenge(request: Request):
         raw = await limited_json_body(request)
@@ -792,7 +813,16 @@ def create_app(
         raw = await limited_json_body(request)
         data = _json(raw)
         challenge_id = _required_text(data, "challenge_id")
-        invite_code = _required_text(data, "invite_code")
+        email_grant = data.get("email_grant")
+        if email_grant is not None:
+            if not settings.email_registration_enabled:
+                raise EmailError("email_unavailable", "邮箱注册尚未开放。",503)
+            email_grant = _required_text(data,"email_grant")
+            enrollment_method = email_identity.enroll
+            enrollment_proof = {"grant": email_grant}
+        else:
+            enrollment_method = store.redeem_invite
+            enrollment_proof = {"code": _required_text(data, "invite_code")}
         key_id = _required_text(data, "key_id", 180)
         environment = data.get("environment")
         if environment not in {"development", "production"}:
@@ -816,8 +846,8 @@ def create_app(
         if environment != result.environment:
             raise APIError(401, "invalid_attestation", "验证环境不匹配。")
         enrollment = await asyncio.to_thread(
-            store.redeem_invite,
-            code=invite_code,
+            enrollment_method,
+            **enrollment_proof,
             key_id=key_id,
             public_key=result.public_key or None,
             receipt=result.receipt,
@@ -854,7 +884,7 @@ def create_app(
             auth = await authenticate(request, None, body_digest=wire_digest)
             try:
                 form = await request.form(
-                    max_files=1, max_fields=7, max_part_size=64 * 1024
+                    max_files=1, max_fields=8, max_part_size=64 * 1024
                 )
             except Exception as exc:
                 raise APIError(400, "validation_error", "multipart 内容无效。") from exc
@@ -873,6 +903,14 @@ def create_app(
                 intent = str(form.get("intent") or "").strip() or None
                 if intent is not None and intent not in MOMENT_INTENTS:
                     raise APIError(400, "validation_error", "intent 无效。")
+                daily_question_day = str(form.get("daily_question_day") or "").strip() or None
+                if daily_question_day:
+                    if not settings.daily_reviews_enabled:
+                        raise APIError(404, "not_found", "每日回顾尚未开放。")
+                    try:
+                        day_string(daily_question_day)
+                    except ValueError as exc:
+                        raise APIError(400, "validation_error", "每日问题日期无效。") from exc
                 context_value = form.get("context_moment_ids")
                 context_moment_ids: list[str] | None = None
                 if context_value not in (None, ""):
@@ -1001,9 +1039,12 @@ def create_app(
                 # no-op that returns the first song's receipt.
                 if music_canonical is not None:
                     digest_input += b"\x00" + music_canonical.encode("utf-8")
+                if daily_question_day:
+                    digest_input += b"\x00daily_question:" + daily_question_day.encode()
                 digest = hashlib.sha256(digest_input).hexdigest()
                 result = await asyncio.to_thread(
                     store.create_moment,
+                    daily_question_day=daily_question_day,
                     user_id=auth.user_id,
                     note=note or None,
                     image_path=str(temp_path) if temp_path else None,
@@ -1147,6 +1188,74 @@ def create_app(
         if not await asyncio.to_thread(store.revoke_device, auth.user_id, device_id):
             raise APIError(404, "not_found", "没有找到对应设备。")
         return Response(status_code=204)
+
+    def reviews_gate():
+        if not settings.daily_reviews_enabled:
+            raise APIError(404, "not_found", "每日回顾尚未开放。")
+        return DailyReviews(store)
+
+    @app.get("/v1/reviews/config")
+    async def reviews_config(request: Request):
+        auth = await authenticate(request, b"")
+        prefs = await asyncio.to_thread(DailyReviews(store).preferences, auth.user_id)
+        return {"available": settings.daily_reviews_enabled, "preferences": prefs}
+
+    @app.patch("/v1/reviews/preferences")
+    async def review_preferences(request: Request):
+        raw = await limited_json_body(request)
+        auth = await authenticate(request, raw)
+        reviews = reviews_gate()
+        data = _json(raw)
+        current = await asyncio.to_thread(reviews.preferences, auth.user_id) or {}
+        try:
+            return await asyncio.to_thread(reviews.configure, auth.user_id,
+                enabled=data.get("enabled", bool(current.get("enabled", True))),
+                local_time=data.get("local_time", current.get("local_time", "22:30")))
+        except ValueError as exc:
+            raise APIError(400, "validation_error", str(exc)) from exc
+
+    @app.get("/v1/reviews")
+    async def review_dates(request: Request):
+        auth = await authenticate(request, b"")
+        try:
+            dates = await asyncio.to_thread(reviews_gate().dates, auth.user_id, request.query_params.get("before"))
+            return {"dates": dates, "next_before": dates[-1]["day"] if len(dates)==90 else None}
+        except ValueError as exc:
+            raise APIError(400, "validation_error", "日期无效。") from exc
+
+    @app.get("/v1/reviews/{day}")
+    async def review_detail(day: str, request: Request):
+        auth = await authenticate(request, b"")
+        try:
+            return await asyncio.to_thread(reviews_gate().detail, auth.user_id, day)
+        except ValueError as exc:
+            raise APIError(400, "validation_error", "日期无效。") from exc
+
+    @app.post("/v1/reviews/{day}/refresh")
+    async def review_refresh(day: str, request: Request):
+        raw = await limited_json_body(request)
+        auth = await authenticate(request, raw)
+        _json(raw)
+        try:
+            result = await asyncio.to_thread(reviews_gate().request, auth.user_id, day, force=True)
+            return result or {"day": day, "status": "empty"}
+        except ValueError as exc:
+            raise APIError(400, "validation_error", "日期无效。") from exc
+
+    @app.patch("/v1/review-memories/{ident}")
+    async def review_edit(ident: str, request: Request):
+        raw = await limited_json_body(request)
+        auth = await authenticate(request, raw)
+        data = _json(raw)
+        try:
+            return await asyncio.to_thread(reviews_gate().edit, auth.user_id, ident, data.get("text"))
+        except ValueError as exc:
+            raise APIError(400, "validation_error", str(exc)) from exc
+
+    @app.delete("/v1/review-memories/{ident}")
+    async def review_forget(ident: str, request: Request):
+        auth = await authenticate(request, b"")
+        return await asyncio.to_thread(reviews_gate().edit, auth.user_id, ident, forget=True)
 
     @app.get("/v1/preferences")
     async def get_preferences(request: Request):

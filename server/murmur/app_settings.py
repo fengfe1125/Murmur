@@ -74,6 +74,11 @@ class AppSettings:
     apns_team_id: str | None
     apns_topic: str
     apns_environment: str
+    daily_reviews_enabled: bool = False
+    email_registration_enabled: bool = False
+    resend_api_key: str = ""
+    email_otp_secret: str = ""
+    email_sender: str = "Murmur <noreply@auth.sakuramu.edu.kg>"
     fcm_project_id: str | None = None
     fcm_service_account_path: Path | None = None
     android_enabled: bool = False
@@ -152,6 +157,10 @@ class AppSettings:
             os.getenv("MURMUR_APP_TIMEZONE", "Asia/Shanghai")
         )
         return cls(
+            daily_reviews_enabled=_bool(os.getenv("MURMUR_DAILY_REVIEWS_ENABLED")),
+            email_registration_enabled=_bool(os.getenv("MURMUR_EMAIL_REGISTRATION_ENABLED")),
+            resend_api_key=os.getenv("RESEND_API_KEY", ""),
+            email_otp_secret=os.getenv("MURMUR_EMAIL_OTP_SECRET", ""),
             db_path=db_path,
             memory_db_path=memory_db,
             data_root=data_root,

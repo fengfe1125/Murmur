@@ -26,8 +26,74 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         self.session = URLSession(configuration: configuration)
     }
 
+    func dailyReviews(_ payload: MurmurReviewRequest) async throws -> Data {
+        try await accountRequest(path: payload.path, method: payload.method, body: payload.body)
+    }
+
+    func accountRequest(path: String, method: String, body: Data) async throws -> Data {
+        let parts = path.split(separator:"?",maxSplits:1).map(String.init)
+        await protectedRequestGate.acquire()
+        do {
+            var request = try await authorizedRequest(path:parts[0],method:method,bodyDigest:Data(SHA256.hash(data:body)))
+            if parts.count == 2, let original = request.url, var components = URLComponents(url:original,resolvingAgainstBaseURL:false) {
+                components.percentEncodedQuery = parts[1]; request.url = components.url
+            }
+            request.httpBody = body.isEmpty ? nil : body
+            request.setValue("application/json",forHTTPHeaderField:"Content-Type")
+            let (data,response) = try await session.data(for:request)
+            try validate(response:response,data:data,expected:200..<300)
+            await protectedRequestGate.release()
+            return data
+        } catch { await protectedRequestGate.release(); throw error }
+    }
+
     func storedIdentity() async throws -> MurmurIdentity? {
         try await authenticator.storedIdentity()
+    }
+
+    func requestEmailCode(email: String) async throws -> MurmurEmailChallenge {
+        let keyID = try await authenticator.enrollmentKeyID()
+        let body = try JSONSerialization.data(withJSONObject: ["email": email, "key_id": keyID])
+        let response: EmailCodeResponse = try await send(path: "/v1/email/codes", method: "POST",
+            body: body, contentType: "application/json", authenticated: false)
+        return MurmurEmailChallenge(id: response.verification_id, keyID: keyID,
+            resendAt: Date().addingTimeInterval(TimeInterval(response.resend_after)),
+            expiresAt: Date().addingTimeInterval(TimeInterval(response.expires_in)))
+    }
+
+    func enrollEmail(challenge emailChallenge: MurmurEmailChallenge, code: String, deviceName: String) async throws -> MurmurIdentity {
+        let keyID = emailChallenge.keyID
+        // A committed registration may have lost its response. Recover before
+        // consuming another OTP or trying to attest the same key again.
+        do { return try await recoverEnrollment(keyID: keyID) }
+        catch {
+            let failure = MurmurFailure.from(error)
+            guard failure.code == "attestation_key_unknown" else { throw failure }
+        }
+        let verification = try JSONSerialization.data(withJSONObject: [
+            "verification_id": emailChallenge.id, "code": code, "key_id": keyID])
+        let proof: EmailGrantResponse = try await send(path: "/v1/email/verify", method: "POST",
+            body: verification, contentType: "application/json", authenticated: false)
+        do {
+            let challenge = try await challenge(purpose: "enrollment", keyID: keyID)
+            let attestation = try await authenticator.enrollmentAttestation(for: challenge, keyID: keyID)
+            let payload: [String: Any] = ["challenge_id": challenge.challengeID,
+                "email_grant": proof.email_grant, "key_id": keyID, "device_name": deviceName,
+                "environment": authenticator.environment, "attestation": attestation]
+            let identity: MurmurIdentity = try await send(path: "/v1/enrollments", method: "POST",
+                body: try JSONSerialization.data(withJSONObject: payload), contentType: "application/json", authenticated: false)
+            try await authenticator.completeEnrollment(identity)
+            return identity
+        } catch {
+            let failure=MurmurFailure.from(error)
+            if ["device_limit","account_deleting","email_grant_invalid","invalid_attestation",
+                "app_attest_invalid_key","invalid_challenge","challenge_expired"].contains(failure.code) {
+                // A rejected, already-attested key cannot be attested again.
+                // Unknown transport outcomes retain it for signed recovery.
+                try await authenticator.discardPendingEnrollmentKey()
+            }
+            throw failure
+        }
     }
 
     func enroll(inviteCode: String, deviceName: String) async throws -> MurmurIdentity {
@@ -101,6 +167,10 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         intent: MurmurMomentIntent?,
         contextMomentIDs: [String]
     ) async throws -> MomentReceipt {
+        try await createMoment(note:note,photo:photo,musicTrack:musicTrack,idempotencyKey:idempotencyKey,intent:intent,contextMomentIDs:contextMomentIDs,dailyQuestionDay:nil)
+    }
+
+    func createMoment(note: String?, photo: PhotoAttachment?, musicTrack: MusicTrackAttachmentV1?, idempotencyKey: String, intent: MurmurMomentIntent?, contextMomentIDs: [String], dailyQuestionDay: String?) async throws -> MomentReceipt {
         let boundary = "Murmur-\(UUID().uuidString)"
         let bodyURL = try makeMultipartBody(
             boundary: boundary,
@@ -109,7 +179,8 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             musicTrack: musicTrack,
             idempotencyKey: idempotencyKey,
             intent: intent,
-            contextMomentIDs: contextMomentIDs
+            contextMomentIDs: contextMomentIDs,
+            dailyQuestionDay: dailyQuestionDay
         )
         defer { try? FileManager.default.removeItem(at: bodyURL) }
         let digest = try sha256(fileURL: bodyURL)
@@ -643,7 +714,8 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
         musicTrack: MusicTrackAttachmentV1? = nil,
         idempotencyKey: String,
         intent: MurmurMomentIntent?,
-        contextMomentIDs: [String]
+        contextMomentIDs: [String],
+        dailyQuestionDay: String? = nil
     ) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("murmur-multipart-\(UUID().uuidString)")
@@ -664,6 +736,7 @@ actor URLSessionMurmurAPIClient: MurmurAPIClient {
             try write("\(value)\r\n")
         }
         try field("idempotency_key", idempotencyKey)
+        if let dailyQuestionDay { try field("daily_question_day", dailyQuestionDay) }
         if let intent { try field("intent", intent.rawValue) }
         if !contextMomentIDs.isEmpty {
             let encoded = try JSONEncoder().encode(contextMomentIDs)

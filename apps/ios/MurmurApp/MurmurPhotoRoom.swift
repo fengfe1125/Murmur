@@ -146,6 +146,7 @@ final class PhotoRoomModel: ObservableObject {
     @Published private(set) var openers: [String] = []
     @Published private(set) var phase: Phase = .reading
     @Published private(set) var failure: MurmurFailure?
+    @Published private(set) var storageFailure: String?
     @Published var draft = ""
 
     var canSend: Bool {
@@ -168,6 +169,7 @@ final class PhotoRoomModel: ObservableObject {
     /// What the photo says about itself: when it was taken, and where.  Nil for
     /// a room opened on something other than an old photo off the shelf.
     private let provenance: PhotoProvenance?
+    var photoDate: Date? { provenance?.shotAt }
     /// Turns the coordinate into a name, on this device.  Asked exactly once,
     /// at the moment the photo is sent.
     private let placeLookup: any MurmurPlaceLookup
@@ -320,6 +322,7 @@ final class PhotoRoomModel: ObservableObject {
             self.rowForLine[line.id] = row.id
             self.unsentRows.insert(row.id)
             await self.transcript?.record(row, photoURL: nil)
+            self.storageFailure = self.transcript?.storageFailure
             do {
                 let receipt = try await withTimeout(seconds: self.requestTimeoutSeconds) { [api = self.api] in
                     // No photo: the room's photo is already in Murmur's memory
@@ -362,6 +365,7 @@ final class PhotoRoomModel: ObservableObject {
         )
         photoRowID = row.id
         await transcript.record(row, photoURL: photo.originalURL)
+        storageFailure = transcript.storageFailure
     }
 
     private func recordBubble(_ line: Line, momentID: String) async {
@@ -374,6 +378,13 @@ final class PhotoRoomModel: ObservableObject {
             ),
             photoURL: nil
         )
+        storageFailure = transcript?.storageFailure
+    }
+
+    func retryStorage() async {
+        await transcript?.retryStorage()
+        storageFailure = transcript?.storageFailure
+        if storageFailure == nil { discardAttachment() }
     }
 
     // ---- Leaving ------------------------------------------------------------
@@ -394,6 +405,7 @@ final class PhotoRoomModel: ObservableObject {
     }
 
     private func discardAttachment() {
+        guard transcript?.storageFailure == nil else { return }
         let old = attachment
         attachment = nil
         guard old != nil else { return }
@@ -457,114 +469,32 @@ final class PhotoRoomModel: ObservableObject {
 
 // MARK: - View
 
-/// 当年今日's second half: the photo arrives out of its own particles, settles
-/// at the top of the screen, and stays there while the person tells Murmur what
-/// it is.  The guess and the three openers are the way in; everything after
-/// them is an ordinary exchange about one picture.
+/// A photo and its independent conversation, presented with native navigation.
 struct PhotoRoomView: View {
     @ObservedObject var model: PhotoRoomModel
-    let onClose: () -> Void
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.murmurReduceMotion) private var reduceMotion
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @FocusState private var composerFocused: Bool
-    @State private var settled = false
-
-    /// Matches the browser's dissolve, so the two halves read as one motion.
-    private static let cell: CGFloat = 8
-    private static let drift: CGFloat = 90
-    private static let arrival: TimeInterval = 0.7
-
     var body: some View {
-        VStack(spacing: 0) {
-            photo
-                .padding(.top, 64)
-                .padding(.bottom, 16)
-            exchange
-            composer
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(MurmurTheme.paper.ignoresSafeArea())
-        .overlay(alignment: .topLeading) {
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(MurmurTheme.ink)
-                    .frame(width: 34, height: 34)
-                    .background(MurmurTheme.raisedPaper, in: Circle())
-                    .overlay { Circle().stroke(MurmurTheme.rule, lineWidth: 1) }
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(MurmurPressStyle())
-            .padding(.leading, 12)
-            .padding(.top, 10)
-            .accessibilityLabel("离开这张照片")
-            .accessibilityIdentifier("close-photo-room")
-        }
-        .task {
-            model.open()
-            // A trigger, not a timeline: flipping this once starts the arrival
-            // track and the shader is never touched again.  See OnThisDayView.
-            settled = true
-        }
-        .onDisappear { model.close() }
+        exchange
+            .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+            .task { model.open() }
+            .onDisappear { model.close() }
     }
-
-    // ---- The photo, pinned at the top ---------------------------------------
 
     private var photo: some View {
-        Group {
-            if !reduceMotion, MurmurShaderSupport.particleDissolve {
-                KeyframeAnimator(initialValue: 1.0, trigger: settled) { progress in
-                    photoCard.layerEffect(
-                        ShaderLibrary.default.onThisDayDissolve(
-                            .float(Self.cell),
-                            .float(progress),
-                            .float(Self.drift)
-                        ),
-                        maxSampleOffset: CGSize(
-                            width: Self.cell + Self.drift,
-                            height: Self.cell + Self.drift
-                        )
-                    )
-                } keyframes: { _ in
-                    KeyframeTrack(\.self) {
-                        // 1 → 0: the particles come back together.  The browser
-                        // let them go upward, and this is where they land.
-                        LinearKeyframe(0.0, duration: Self.arrival)
-                    }
-                }
-            } else {
-                photoCard
-            }
-        }
-        .accessibilityLabel("你带进来的那张照片")
-        .accessibilityIdentifier("photo-room-photo")
+        photoCard
+            .accessibilityLabel("你带进来的那张照片")
+            .accessibilityIdentifier("photo-room-photo")
     }
 
-    /// A fixed band rather than the photo's own aspect ratio: the room's job is
-    /// the conversation under it, and a tall portrait shot left to itself takes
-    /// the screen.  `Color.clear` carries the frame so `scaledToFill` fills it
-    /// instead of proposing its own size to the stack.
     private var photoCard: some View {
-        Color.clear
-            .frame(height: 220)
-            .overlay {
-                Image(uiImage: model.image)
-                    .resizable()
-                    .scaledToFill()
-            }
-            // `.clipped` as well as `.clipShape`: the shape masks the drawing
-            // but leaves the overflowing image's own bounds behind it, and
-            // those bounds are what hit-testing and VoiceOver see — the photo
-            // reached up over the close button and down over the first line.
-            .clipped()
+        Image(uiImage: model.image)
+            .resizable()
+            .scaledToFit()
             .clipShape(RoundedRectangle(cornerRadius: MurmurTheme.corner))
-            .overlay {
-                RoundedRectangle(cornerRadius: MurmurTheme.corner)
-                    .stroke(MurmurTheme.rule, lineWidth: 1)
-            }
-            .frame(maxWidth: MurmurTheme.contentWidth)
+            .frame(maxWidth: 600, maxHeight: verticalSizeClass == .compact ? 160 : 260)
             .padding(.horizontal, MurmurTheme.pageInset)
             .frame(maxWidth: .infinity)
     }
@@ -579,6 +509,7 @@ struct PhotoRoomView: View {
                 // parked outside the viewport keep their transition parked
                 // with them, and stay in the tree after they are gone.
                 VStack(alignment: .leading, spacing: 12) {
+                    photo
                     ForEach(model.lines) { line in
                         bubble(line)
                             .id(line.id)
@@ -593,7 +524,11 @@ struct PhotoRoomView: View {
                     }
                     if !model.openers.isEmpty {
                         openersRow
-                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            .transition(.opacity)
+                    }
+                    if let storageFailure = model.storageFailure {
+                        Text(storageFailure).font(.footnote).foregroundStyle(MurmurTheme.coral)
+                        Button("重试本机保存") { Task { await model.retryStorage() } }.frame(minHeight: 44)
                     }
                     if let failure = model.failure {
                         failureRow(failure)
@@ -607,9 +542,9 @@ struct PhotoRoomView: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
-            .animation(.easeInOut(duration: 0.22), value: model.lines)
-            .animation(.easeInOut(duration: 0.22), value: model.openers)
-            .animation(.easeInOut(duration: 0.22), value: model.isAwaitingReply)
+            .animation(reduceMotion ? nil : MurmurMotion.content, value: model.lines.count)
+            .animation(reduceMotion ? nil : MurmurMotion.content, value: model.openers.count)
+            .animation(reduceMotion ? nil : MurmurMotion.content, value: model.isAwaitingReply)
             .onChange(of: model.lines.count) { _, _ in scrollToBottom(proxy) }
             .onChange(of: model.openers) { _, _ in scrollToBottom(proxy) }
             .onChange(of: model.isAwaitingReply) { _, _ in scrollToBottom(proxy) }
@@ -667,7 +602,7 @@ struct PhotoRoomView: View {
                         RoundedRectangle(cornerRadius: 12).stroke(MurmurTheme.rule, lineWidth: 1)
                     }
                 }
-                .buttonStyle(MurmurPressStyle())
+                .buttonStyle(.automatic)
                 .accessibilityLabel("从这里说起：\(opener)")
                 .accessibilityIdentifier("opener-\(index)")
             }
@@ -698,7 +633,7 @@ struct PhotoRoomView: View {
                             RoundedRectangle(cornerRadius: 12).stroke(MurmurTheme.rule, lineWidth: 1)
                         }
                 }
-                .buttonStyle(MurmurPressStyle())
+                .buttonStyle(.automatic)
                 .accessibilityIdentifier("retry-photo-room")
             }
         }
@@ -709,47 +644,17 @@ struct PhotoRoomView: View {
     // ---- Saying it ----------------------------------------------------------
 
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 6) {
-            TextField("跟它说说这张照片", text: $model.draft, axis: .vertical)
-                .font(MurmurTheme.body(.body))
-                .foregroundStyle(MurmurTheme.ink)
-                .lineLimit(1...4)
-                .focused($composerFocused)
-                .submitLabel(.send)
-                .onSubmit { model.send() }
-                .onChange(of: model.draft, initial: false) { _, newValue in
-                    guard newValue.contains("\n") else { return }
-                    model.draft = newValue.replacingOccurrences(of: "\n", with: "")
-                    model.send()
-                }
-                .padding(.leading, 12)
-                .padding(.vertical, 12)
-                .accessibilityLabel("你对这张照片想说的")
-                .accessibilityIdentifier("photo-room-composer")
-
-            Button { model.send() } label: {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(model.canSend ? MurmurTheme.paper : MurmurTheme.secondaryInk)
-                    .frame(width: MurmurTheme.disc, height: MurmurTheme.disc)
-                    .background(model.canSend ? MurmurTheme.ink : MurmurTheme.rule, in: Circle())
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(MurmurPressStyle())
-            .disabled(!model.canSend)
-            .accessibilityLabel("说给 Murmur")
-            .accessibilityIdentifier("photo-room-send")
-        }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 4)
-        .background(MurmurTheme.raisedPaper, in: RoundedRectangle(cornerRadius: 26))
-        .overlay { RoundedRectangle(cornerRadius: 26).stroke(MurmurTheme.rule, lineWidth: 1) }
-        .frame(maxWidth: MurmurTheme.contentWidth)
-        .padding(.horizontal, MurmurTheme.pageInset)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
-        .frame(maxWidth: .infinity)
+        MurmurComposer(
+            text: $model.draft,
+            focused: $composerFocused,
+            placeholder: "跟它说说这张照片",
+            fieldLabel: "你对这张照片想说的",
+            fieldIdentifier: "photo-room-composer",
+            sendIdentifier: "photo-room-send",
+            canSend: model.canSend,
+            onSend: { model.send() },
+            sendLabel: "说给 Murmur"
+        ) { EmptyView() }
     }
 
     private static let bottomAnchor = "photo-room-bottom"
@@ -764,32 +669,10 @@ struct PhotoRoomView: View {
 
 /// The room's own dots.  Same reason as `RoomBubbleShape`.
 private struct RoomTypingIndicator: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var phase = 0
-
-    private let timer = Timer.publish(every: 0.28, on: .main, in: .common).autoconnect()
-
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .fill(MurmurTheme.secondaryInk.opacity(0.55))
-                    .frame(width: 7, height: 7)
-                    .scaleEffect(!reduceMotion && phase == index ? 1.35 : 0.85)
-                    .animation(.easeInOut(duration: 0.26), value: phase)
-            }
-        }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 13)
-        .background(MurmurTheme.raisedPaper, in: RoomBubbleShape(isOutgoing: false))
-        .overlay {
-            RoomBubbleShape(isOutgoing: false).stroke(MurmurTheme.rule, lineWidth: 1)
-        }
-        .onReceive(timer) { _ in
-            guard !reduceMotion else { return }
-            phase = (phase + 1) % 3
-        }
-        .accessibilityLabel("Murmur 正在输入")
-        .accessibilityIdentifier("photo-room-typing")
+        ProgressView("Murmur 正在输入")
+            .font(.footnote)
+            .padding(12)
+            .accessibilityIdentifier("photo-room-typing")
     }
 }

@@ -1,0 +1,863 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Murmur × 网易云 · 一起听 MVP</title>
+  <link rel="stylesheet" href="./murmur-mvp-tokens.css">
+  <style>
+    /* Hallmark · component: realtime music header · genre: quiet editorial · theme: Murmur studied-DNA
+     * states: default · hover · focus · active · disabled · loading · error · success
+     * pre-emit critique: P5 H5 E5 S5 R5 V5 · contrast: pass
+     */
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; overflow-x: clip; }
+    body {
+      background: var(--color-rule);
+      color: var(--color-ink);
+      font-family: var(--font-body);
+      font-size: var(--text-body);
+      line-height: 1.5;
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    button, [role="button"] { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, input:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--color-focus);
+      outline-offset: 2px;
+    }
+    button:disabled { cursor: not-allowed; opacity: 0.48; }
+    .svg-icon { width: 1.15rem; height: 1.15rem; display: block; }
+
+    .prototype {
+      min-height: 100dvh;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      align-items: start;
+    }
+    .review-panel {
+      background: var(--color-paper-raised);
+      border-block-end: var(--rule-hairline) solid var(--color-rule);
+      padding: var(--space-md);
+      display: grid;
+      gap: var(--space-sm);
+      position: relative;
+      z-index: var(--z-sticky);
+    }
+    .review-panel h1 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: var(--text-title);
+      font-weight: 600;
+      line-height: 1.2;
+    }
+    .review-panel p {
+      margin: 0;
+      color: var(--color-ink-secondary);
+      font-size: var(--text-small);
+      max-width: 48ch;
+    }
+    .review-actions { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
+    .review-button {
+      min-height: 2.75rem;
+      padding-inline: var(--space-sm);
+      border: var(--rule-hairline) solid var(--color-rule);
+      border-radius: var(--radius-small);
+      background: var(--color-paper);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: transform var(--dur-micro) var(--ease-out), background-color var(--dur-short) var(--ease-out);
+    }
+    .review-button[aria-pressed="true"] {
+      background: var(--color-accent);
+      color: var(--color-on-accent);
+      border-color: var(--color-accent);
+      font-weight: 650;
+    }
+    .review-button:active { transform: translateY(1px); }
+
+    .app-stage { display: grid; place-items: start center; min-width: 0; }
+    .app {
+      width: 100%;
+      min-height: 40rem;
+      height: min(53.25rem, calc(100dvh - 10.5rem));
+      max-height: 53.25rem;
+      background: var(--color-paper);
+      display: flex;
+      flex-direction: column;
+      overflow: clip;
+      position: relative;
+      isolation: isolate;
+    }
+    .app.large-type { font-size: 1.2rem; }
+    .app-chrome { padding: max(var(--space-md), env(safe-area-inset-top)) var(--space-md) 0; }
+    .glass {
+      background: var(--color-glass);
+      border: var(--rule-hairline) solid var(--color-glass-edge);
+      box-shadow: 0 0.375rem 0.875rem var(--color-shadow);
+      backdrop-filter: blur(1.5rem);
+      -webkit-backdrop-filter: blur(1.5rem);
+    }
+    .header {
+      min-height: 3.25rem;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      align-items: center;
+      padding: var(--space-2xs);
+      border-radius: var(--radius-glass);
+      overflow: clip;
+      transition: grid-template-columns var(--dur-long) var(--ease-out), border-color var(--dur-short) var(--ease-out);
+    }
+    .header.active-room { grid-template-columns: auto minmax(0, 1fr); }
+    .header.failed { border-color: var(--color-coral); }
+    .brand-lockup {
+      min-width: 0;
+      min-height: 2.75rem;
+      padding-inline: var(--space-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-xs);
+    }
+    .active-room .brand-lockup {
+      justify-content: flex-start;
+      border-inline-end: var(--rule-hairline) solid var(--color-rule);
+    }
+    .wordmark {
+      font-family: var(--font-display);
+      font-size: var(--text-title);
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      white-space: nowrap;
+    }
+    .active-room .wordmark { font-size: 0.9375em; }
+    .brand-room-state {
+      display: none;
+      color: var(--color-accent-ink);
+      font-size: 0.625em;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+    .active-room .brand-room-state { display: inline; }
+    .header-room {
+      min-width: 0;
+      display: none;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: var(--space-2xs);
+      padding-inline-start: var(--space-xs);
+    }
+    .active-room .header-room { display: grid; }
+    .room-summary {
+      min-width: 0;
+      min-height: 2.75rem;
+      padding: 0 var(--space-2xs);
+      border: 0;
+      border-radius: var(--radius-small);
+      background: transparent;
+      display: grid;
+      grid-template-columns: 1.25rem minmax(0, 1fr);
+      align-items: center;
+      gap: var(--space-xs);
+      text-align: start;
+      cursor: pointer;
+    }
+    .live-bars {
+      width: 1.25rem;
+      height: 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.125rem;
+      color: var(--color-accent-ink);
+    }
+    .live-bars i {
+      width: 0.125rem;
+      height: 0.35rem;
+      border-radius: 999px;
+      background: currentColor;
+      transform-origin: center;
+    }
+    .header[data-room-state="connected"][data-playback="playing"] .live-bars i {
+      animation: live-bar 780ms var(--ease-in-out) infinite alternate;
+    }
+    .header[data-room-state="connected"][data-playback="playing"] .live-bars i:nth-child(2) { animation-delay: 130ms; }
+    .header[data-room-state="connected"][data-playback="playing"] .live-bars i:nth-child(3) { animation-delay: 260ms; }
+    .header[data-room-state="waiting"] .live-bars,
+    .header[data-room-state="syncing"] .live-bars { opacity: 0.55; }
+    .header[data-room-state="failed"] .live-bars { color: var(--color-coral); }
+    .header-room-copy { min-width: 0; }
+    .header-room-title,
+    .header-room-status {
+      display: block;
+      margin: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .header-room-title { font-size: 0.8125em; font-weight: 700; }
+    .header-room-status { color: var(--color-ink-secondary); font-size: 0.6875em; }
+    .header[data-room-state="failed"] .header-room-status { color: var(--color-coral); }
+    .header-actions { display: flex; align-items: center; }
+    .header-control {
+      width: 2.75rem;
+      height: 2.75rem;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      transition: transform var(--dur-micro) var(--ease-out), background-color var(--dur-short) var(--ease-out);
+    }
+    .header-control:active { transform: scale(0.96); }
+    .header-control .play-icon { display: none; }
+    .header[data-playback="paused"] .header-control .pause-icon { display: none; }
+    .header[data-playback="paused"] .header-control .play-icon { display: block; }
+    .header-control[data-state="loading"] .svg-icon { display: none; }
+    .header-control[data-state="loading"]::after {
+      content: "";
+      width: 1rem;
+      height: 1rem;
+      border: 2px solid var(--color-rule);
+      border-block-start-color: var(--color-accent-ink);
+      border-radius: 50%;
+      animation: spin 800ms linear infinite;
+    }
+
+    .transcript {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      padding: var(--space-lg) var(--space-md) var(--space-sm);
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      gap: var(--space-sm);
+      scroll-behavior: smooth;
+    }
+    .timestamp {
+      color: var(--color-ink-secondary);
+      font-size: var(--text-caption);
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+    .message { display: flex; align-items: flex-end; }
+    .message.you { justify-content: flex-end; }
+    .bubble {
+      width: fit-content;
+      max-width: min(82%, 18.75rem);
+      padding: 0.625rem 0.875rem;
+      border-radius: var(--radius-card);
+      background: var(--color-paper-raised);
+      border: var(--rule-hairline) solid var(--color-rule);
+      line-height: 1.45;
+    }
+    .message.you .bubble {
+      background: var(--color-accent);
+      color: var(--color-on-accent);
+      border-color: var(--color-accent);
+      border-end-end-radius: var(--space-2xs);
+    }
+    .message.murmur .bubble { border-end-start-radius: var(--space-2xs); }
+
+    .music-card {
+      width: min(82%, 18.75rem);
+      padding: 0.625rem var(--space-sm);
+      border-radius: var(--radius-card);
+      background: var(--color-paper-raised);
+      border: var(--rule-hairline) solid var(--color-rule);
+      display: grid;
+      gap: var(--space-xs);
+    }
+    .message.murmur .music-card { border-end-start-radius: var(--space-2xs); }
+    .message.you .music-card {
+      background: var(--color-accent);
+      color: var(--color-on-accent);
+      border-color: var(--color-accent);
+      border-end-end-radius: var(--space-2xs);
+    }
+    .track-main {
+      display: grid;
+      grid-template-columns: 3.5rem minmax(0, 1fr);
+      gap: var(--space-sm);
+      align-items: center;
+    }
+    .artwork {
+      width: 3.5rem;
+      height: 3.5rem;
+      border-radius: 0.625rem;
+      background: var(--color-cover);
+      color: var(--color-accent-ink);
+      display: grid;
+      place-items: center;
+      border: var(--rule-hairline) solid var(--color-rule);
+    }
+    .track-copy { min-width: 0; }
+    .track-title {
+      margin: 0;
+      font-size: 0.9375em;
+      font-weight: 650;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .track-artist {
+      margin: var(--space-2xs) 0 0;
+      color: var(--color-ink-secondary);
+      font-size: 0.8125em;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .message.you .track-artist { color: var(--color-on-accent); opacity: 0.72; }
+    .track-actions { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
+    .track-action {
+      min-height: 2.75rem;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--color-accent-ink);
+      font-size: 0.75em;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .message.you .track-action { color: var(--color-on-accent); }
+
+    .bottom-stack { padding-inline: var(--space-md); padding-block-end: max(var(--space-xs), env(safe-area-inset-bottom)); display: grid; gap: var(--space-xs); }
+
+    .composer {
+      min-height: 3.25rem;
+      border-radius: var(--radius-glass);
+      display: grid;
+      grid-template-columns: 2.75rem minmax(0, 1fr) 2.75rem;
+      align-items: center;
+      padding-inline: var(--space-xs);
+    }
+    .composer input {
+      width: 100%;
+      min-width: 0;
+      min-height: 2.75rem;
+      border: 0;
+      outline: 2px solid transparent;
+      background: transparent;
+      color: var(--color-ink);
+      padding-inline: var(--space-xs);
+    }
+    .composer input::placeholder { color: var(--color-ink-secondary); opacity: 1; }
+    .composer input:focus-visible { outline-color: var(--color-focus); border-radius: var(--radius-small); }
+    .disc {
+      width: 2.75rem;
+      height: 2.75rem;
+      border-radius: 50%;
+      border: 0;
+      display: grid;
+      place-items: center;
+      background: transparent;
+      cursor: pointer;
+    }
+    .disc.send { background: var(--color-accent); color: var(--color-on-accent); }
+
+    .tab-bar {
+      min-height: 4.375rem;
+      padding: var(--space-xs);
+      border-radius: var(--radius-tab);
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--space-2xs);
+    }
+    .tab {
+      min-height: 3.125rem;
+      border: 0;
+      border-radius: 1.375rem;
+      background: transparent;
+      color: var(--color-ink-secondary);
+      display: grid;
+      place-items: center;
+      align-content: center;
+      gap: 0.125rem;
+      cursor: pointer;
+      font-size: 0.6875rem;
+      white-space: nowrap;
+    }
+    .tab.active { background: var(--color-accent); color: var(--color-on-accent); font-weight: 650; }
+    .tab .svg-icon { width: 1.25rem; height: 1.25rem; }
+
+    .recognizing {
+      position: absolute;
+      inset-block-start: 7.5rem;
+      inset-inline-start: 50%;
+      transform: translateX(-50%);
+      z-index: var(--z-toast);
+      background: var(--color-paper-raised);
+      border: var(--rule-hairline) solid var(--color-rule);
+      border-radius: 999px;
+      min-height: 2.75rem;
+      padding-inline: var(--space-sm);
+      display: none;
+      align-items: center;
+      gap: var(--space-xs);
+      box-shadow: 0 0.25rem 0.75rem var(--color-shadow);
+      font-size: var(--text-small);
+      white-space: nowrap;
+    }
+    .recognizing.visible { display: flex; }
+    .spinner {
+      width: 1rem;
+      height: 1rem;
+      border: 2px solid var(--color-rule);
+      border-block-start-color: var(--color-accent-ink);
+      border-radius: 50%;
+      animation: spin 800ms linear infinite;
+    }
+
+    dialog {
+      position: fixed;
+      inset: 0;
+      margin: auto;
+      width: min(calc(100% - 2rem), 24rem);
+      max-height: min(80dvh, 36rem);
+      border: var(--rule-hairline) solid var(--color-rule);
+      border-radius: var(--radius-glass);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      padding: 0;
+      box-shadow: 0 1.5rem 4rem var(--color-shadow);
+    }
+    dialog::backdrop { background: var(--color-scrim); backdrop-filter: blur(0.25rem); }
+    dialog[open] { animation: dialog-in var(--dur-long) var(--ease-out) both; }
+    .sheet { padding: var(--space-lg); display: grid; gap: var(--space-lg); }
+    .sheet-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); }
+    .sheet-title { margin: 0; font-family: var(--font-display); font-size: var(--text-title); font-weight: 600; }
+    .text-button { min-height: 2.75rem; border: 0; background: transparent; color: var(--color-accent-ink); cursor: pointer; white-space: nowrap; }
+    .preview-track { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); gap: var(--space-sm); align-items: center; }
+    .preview-track .artwork { width: 4.5rem; height: 4.5rem; }
+    .sheet-note { margin: 0; color: var(--color-ink-secondary); font-size: var(--text-small); }
+    .primary-button {
+      min-height: 3.125rem;
+      border: 0;
+      border-radius: 0.9375rem;
+      background: var(--color-ink);
+      color: var(--color-paper);
+      font-weight: 650;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: transform var(--dur-micro) var(--ease-out), opacity var(--dur-short) var(--ease-out);
+    }
+    .primary-button:active { transform: translateY(1px); }
+
+    [popover] {
+      border: var(--rule-hairline) solid var(--color-rule);
+      border-radius: var(--radius-small);
+      background: var(--color-paper-raised);
+      color: var(--color-ink);
+      padding: var(--space-xs);
+      box-shadow: 0 0.5rem 1.5rem var(--color-shadow);
+    }
+    .menu { display: grid; min-width: 11rem; }
+    .menu button { min-height: 2.75rem; border: 0; border-radius: var(--space-xs); background: transparent; text-align: start; padding-inline: var(--space-sm); cursor: pointer; }
+    .menu .danger { color: var(--color-coral); }
+
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @keyframes dialog-in { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: none; } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes live-bar { from { transform: scaleY(0.65); } to { transform: scaleY(2.3); } }
+
+    @media (hover: hover) and (pointer: fine) {
+      .review-button:hover, .track-action:hover, .room-summary:hover, .header-control:hover, .disc:hover, .tab:hover, .text-button:hover, .menu button:hover {
+        background-color: var(--color-cover);
+      }
+      .review-button:hover { transform: translateY(-1px); }
+    }
+
+    @media (max-width: 24rem) {
+      .active-room .brand-room-state { display: none; }
+    }
+
+    @media (max-width: 22rem) {
+      .active-room .brand-lockup { padding-inline: var(--space-xs); }
+      .header-room { padding-inline-start: var(--space-2xs); gap: 0; }
+      .room-summary { grid-template-columns: minmax(0, 1fr); gap: 0; }
+      .live-bars { display: none; }
+    }
+
+    @media (min-width: 52rem) {
+      body { padding: var(--space-lg); }
+      .prototype {
+        width: min(100%, 54rem);
+        margin-inline: auto;
+        grid-template-columns: minmax(0, 24.5625rem) minmax(16rem, 1fr);
+        gap: var(--space-lg);
+      }
+      .review-panel {
+        grid-column: 2;
+        grid-row: 1;
+        position: sticky;
+        inset-block-start: var(--space-lg);
+        border: var(--rule-hairline) solid var(--color-rule);
+        border-radius: var(--radius-card);
+      }
+      .review-actions { display: grid; grid-template-columns: minmax(0, 1fr); }
+      .app-stage { grid-column: 1; grid-row: 1; }
+      .app {
+        width: 24.5625rem;
+        height: 53.25rem;
+        min-height: 53.25rem;
+        border-radius: var(--space-xl);
+        box-shadow: 0 1.5rem 4rem var(--color-shadow);
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 150ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 150ms !important;
+        scroll-behavior: auto !important;
+      }
+      dialog[open] { transform: none; }
+      .live-bars i { animation: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="prototype">
+    <aside class="review-panel" aria-label="原型场景控制">
+      <h1>一起听 · 交互 MVP</h1>
+      <p>顶部的 Murmur 标识会在创建房间后自然展开为实时一起听小窗。验证加入、暂停、分享和失效恢复。</p>
+      <div class="review-actions">
+        <button class="review-button" id="resetScene" type="button">Murmur 发歌</button>
+        <button class="review-button" id="joinScene" type="button">模拟已经加入</button>
+        <button class="review-button" id="shareScene" type="button">模拟用户分享</button>
+        <button class="review-button" id="failScene" type="button">模拟邀请过期</button>
+        <button class="review-button" id="themeToggle" type="button" aria-pressed="false">切换深色</button>
+        <button class="review-button" id="typeToggle" type="button" aria-pressed="false">放大文字</button>
+      </div>
+    </aside>
+
+    <section class="app-stage" aria-label="Murmur 手机界面原型">
+      <div class="app" id="appSurface">
+        <div class="app-chrome">
+          <header class="header glass" id="roomCard" data-room-state="none" data-playback="playing" aria-label="Murmur 与一起听状态">
+            <div class="brand-lockup">
+              <span class="wordmark">Murmur</span>
+              <span class="brand-room-state" id="brandRoomState">一起听</span>
+            </div>
+            <div class="header-room">
+              <button class="room-summary" id="roomPrimary" type="button" aria-label="一起听房间状态">
+                <span class="live-bars" aria-hidden="true"><i></i><i></i><i></i></span>
+                <span class="header-room-copy">
+                  <span class="header-room-title">夜空中最亮的星</span>
+                  <span class="header-room-status" id="roomStatus">等你在网易云加入</span>
+                </span>
+              </button>
+              <div class="header-actions" id="roomControls">
+                <button class="header-control" id="playPauseButton" type="button" data-command="暂停" aria-label="暂停">
+                  <svg class="svg-icon pause-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h4v14H7zm6 0h4v14h-4z"/></svg>
+                  <svg class="svg-icon play-icon" viewBox="0 0 24 24" fill="currentColor"><path d="m8 5 11 7-11 7z"/></svg>
+                </button>
+                <button class="header-control" type="button" popovertarget="roomMenu" aria-label="更多一起听操作">
+                  <svg class="svg-icon" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+                </button>
+              </div>
+            </div>
+          </header>
+        </div>
+
+        <div class="recognizing" id="recognizing" role="status" aria-live="polite">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="recognizingText">正在识别网易云歌曲…</span>
+        </div>
+
+        <section class="transcript" id="transcript" aria-label="聊天记录">
+          <time class="timestamp">20:18 周二</time>
+          <div class="message you"><div class="bubble">今晚想听点安静的</div></div>
+          <div class="message murmur"><div class="bubble">那就从一首慢一点的开始。</div></div>
+          <div class="message murmur" id="incomingTrack"></div>
+        </section>
+
+        <div class="bottom-stack">
+          <form class="composer glass" id="composerForm">
+            <button class="disc" type="button" id="addButton" aria-label="添加内容">
+              <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+            <label class="visually-hidden" for="composerInput">这一刻的文字</label>
+            <input id="composerInput" type="text" placeholder="这一刻的文字" autocomplete="off">
+            <button class="disc send" type="submit" aria-label="发送">
+              <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
+            </button>
+          </form>
+
+          <nav class="tab-bar glass" aria-label="主要导航">
+            <button class="tab active" type="button" aria-current="page">
+              <svg class="svg-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-5 3v-4a2 2 0 0 1-1-1V6a2 2 0 0 1 2-2z"/></svg>
+              聊天
+            </button>
+            <button class="tab" type="button">
+              <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>
+              当年今日
+            </button>
+            <button class="tab" type="button">
+              <svg class="svg-icon" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="8" r="4"/><path d="M4 22a8 8 0 0 1 16 0z"/></svg>
+              我的
+            </button>
+          </nav>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="shareDialog" aria-labelledby="shareTitle">
+    <div class="sheet">
+      <div class="sheet-header">
+        <h2 class="sheet-title" id="shareTitle">发送这首歌？</h2>
+        <button class="text-button" type="button" id="cancelShare">取消</button>
+      </div>
+      <div class="preview-track">
+        <span class="artwork" aria-hidden="true">
+          <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>
+        </span>
+        <div class="track-copy">
+          <p class="track-title">如愿</p>
+          <p class="track-artist">王菲</p>
+        </div>
+      </div>
+      <p class="sheet-note">发送后，Murmur 收到的是这首歌的官方元数据和链接，不是分享文案里的内容。</p>
+      <button class="text-button" type="button" id="verifyTrack">在网易云里核对</button>
+      <button class="primary-button" type="button" id="confirmShare">发给 Murmur</button>
+    </div>
+  </dialog>
+
+  <div id="roomMenu" popover>
+    <div class="menu">
+      <button type="button" data-command="上一首">上一首</button>
+      <button type="button" data-command="下一首">下一首</button>
+      <button type="button" id="openNetease">在网易云打开</button>
+      <button class="danger" type="button" id="endRoom">结束一起听</button>
+    </div>
+  </div>
+
+  <template id="musicCardTemplate">
+    <article class="music-card">
+      <div class="track-main">
+        <span class="artwork" aria-hidden="true">
+          <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>
+        </span>
+        <div class="track-copy">
+          <p class="track-title"></p>
+          <p class="track-artist"></p>
+        </div>
+      </div>
+      <div class="track-actions">
+        <button class="track-action open-provider" type="button">在网易云打开</button>
+        <button class="track-action listen-together" type="button">和 Murmur 一起听</button>
+      </div>
+    </article>
+  </template>
+
+  <script>
+    const html = document.documentElement;
+    const appSurface = document.querySelector('#appSurface');
+    const transcript = document.querySelector('#transcript');
+    const incomingTrack = document.querySelector('#incomingTrack');
+    const roomCard = document.querySelector('#roomCard');
+    const roomStatus = document.querySelector('#roomStatus');
+    const roomPrimary = document.querySelector('#roomPrimary');
+    const brandRoomState = document.querySelector('#brandRoomState');
+    const playPauseButton = document.querySelector('#playPauseButton');
+    const roomMenu = document.querySelector('#roomMenu');
+    const commandButtons = document.querySelectorAll('[data-command]');
+    const recognizing = document.querySelector('#recognizing');
+    const recognizingText = document.querySelector('#recognizingText');
+    const shareDialog = document.querySelector('#shareDialog');
+    const template = document.querySelector('#musicCardTemplate');
+    const themeToggle = document.querySelector('#themeToggle');
+    const typeToggle = document.querySelector('#typeToggle');
+
+    let roomState = 'none';
+    let isPaused = false;
+    let pendingCommand = null;
+    let commandTimer;
+
+    function createMusicCard(title, artist, outgoing = false) {
+      const fragment = template.content.cloneNode(true);
+      const card = fragment.querySelector('.music-card');
+      fragment.querySelector('.track-title').textContent = title;
+      fragment.querySelector('.track-artist').textContent = artist;
+      fragment.querySelector('.open-provider').addEventListener('click', () => showTransientStatus('将交给网易云 App 打开'));
+      fragment.querySelector('.listen-together').addEventListener('click', () => setRoom('waiting'));
+      if (outgoing) card.querySelector('.listen-together').textContent = roomState === 'none' ? '和 Murmur 一起听' : '换成这首';
+      return fragment;
+    }
+
+    function renderInitialTrack() {
+      incomingTrack.replaceChildren(createMusicCard('夜空中最亮的星', '逃跑计划'));
+    }
+
+    function updatePlaybackButton() {
+      const command = isPaused ? '继续' : '暂停';
+      playPauseButton.dataset.command = command;
+      playPauseButton.setAttribute('aria-label', command);
+      roomCard.dataset.playback = isPaused ? 'paused' : 'playing';
+    }
+
+    function setRoom(nextState, message) {
+      window.clearTimeout(commandTimer);
+      roomState = nextState;
+      roomCard.dataset.roomState = nextState;
+      roomCard.classList.toggle('active-room', nextState !== 'none');
+      roomCard.classList.toggle('failed', nextState === 'failed');
+      updatePlaybackButton();
+      commandButtons.forEach(button => {
+        button.disabled = nextState !== 'connected';
+        button.dataset.state = nextState === 'syncing' && button.dataset.command === pendingCommand ? 'loading' : '';
+      });
+
+      if (nextState === 'waiting') {
+        brandRoomState.textContent = '等待加入';
+        roomStatus.textContent = '点此打开网易云邀请';
+        roomPrimary.setAttribute('aria-label', '等你加入，打开网易云邀请');
+      } else if (nextState === 'connected') {
+        brandRoomState.textContent = isPaused ? '已暂停' : '一起听';
+        roomStatus.textContent = message || (isPaused ? '已暂停，房间仍保持连接' : '已连接，正在一起听');
+        roomPrimary.setAttribute('aria-label', `一起听房间，${roomStatus.textContent}`);
+      } else if (nextState === 'syncing') {
+        brandRoomState.textContent = '同步中';
+        roomStatus.textContent = message || '命令已送出，等待网易云同步';
+        roomPrimary.setAttribute('aria-label', roomStatus.textContent);
+      } else if (nextState === 'failed') {
+        brandRoomState.textContent = '需重连';
+        roomStatus.textContent = message || '邀请已过期，点此重试';
+        roomPrimary.setAttribute('aria-label', '邀请已过期，重新邀请');
+      } else {
+        brandRoomState.textContent = '一起听';
+        roomStatus.textContent = '尚未创建房间';
+        roomPrimary.setAttribute('aria-label', '尚未创建一起听房间');
+      }
+    }
+
+    function runCommand(label) {
+      if (roomState !== 'connected') return;
+      pendingCommand = label;
+      setRoom('syncing', `${label}同步中…`);
+      commandTimer = window.setTimeout(() => {
+        if (label === '暂停') isPaused = true;
+        if (label === '继续') isPaused = false;
+        pendingCommand = null;
+        setRoom('connected', label === '暂停' ? '已暂停，房间仍保持连接' : `${label}已与网易云同步`);
+      }, 900);
+    }
+
+    function closeRoomMenu() {
+      if (roomMenu.matches(':popover-open')) roomMenu.hidePopover();
+    }
+
+    function showTransientStatus(text) {
+      recognizingText.textContent = text;
+      recognizing.classList.add('visible');
+      window.setTimeout(() => {
+        recognizing.classList.remove('visible');
+        recognizingText.textContent = '正在识别网易云歌曲…';
+      }, 1200);
+    }
+
+    function openShareFlow() {
+      recognizing.classList.add('visible');
+      window.setTimeout(() => {
+        recognizing.classList.remove('visible');
+        shareDialog.showModal();
+        document.querySelector('#cancelShare').focus();
+      }, 650);
+    }
+
+    function addOutgoingTrack() {
+      const row = document.createElement('div');
+      row.className = 'message you';
+      row.append(createMusicCard('如愿', '王菲', true));
+      transcript.append(row);
+      shareDialog.close();
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    document.querySelector('#resetScene').addEventListener('click', () => {
+      isPaused = false;
+      pendingCommand = null;
+      setRoom('none');
+      transcript.querySelectorAll('.message.you .music-card').forEach(node => node.closest('.message').remove());
+      renderInitialTrack();
+    });
+    document.querySelector('#joinScene').addEventListener('click', () => setRoom('connected'));
+    document.querySelector('#shareScene').addEventListener('click', openShareFlow);
+    document.querySelector('#failScene').addEventListener('click', () => setRoom('failed'));
+    roomPrimary.addEventListener('click', () => {
+      if (roomState === 'failed') setRoom('waiting');
+      else if (roomState === 'waiting') showTransientStatus('将打开网易云邀请页');
+      else if (roomState === 'connected' && 'showPopover' in roomMenu) roomMenu.showPopover();
+    });
+    commandButtons.forEach(button => button.addEventListener('click', () => {
+      runCommand(button.dataset.command);
+      closeRoomMenu();
+    }));
+    document.querySelector('#cancelShare').addEventListener('click', () => shareDialog.close());
+    document.querySelector('#confirmShare').addEventListener('click', addOutgoingTrack);
+    document.querySelector('#verifyTrack').addEventListener('click', () => showTransientStatus('将交给网易云 App 打开'));
+    document.querySelector('#openNetease').addEventListener('click', () => {
+      closeRoomMenu();
+      showTransientStatus('将交给网易云 App 打开');
+    });
+    document.querySelector('#endRoom').addEventListener('click', () => {
+      closeRoomMenu();
+      isPaused = false;
+      pendingCommand = null;
+      setRoom('none');
+    });
+    document.querySelector('#addButton').addEventListener('click', openShareFlow);
+    document.querySelector('#composerForm').addEventListener('submit', event => {
+      event.preventDefault();
+      const input = document.querySelector('#composerInput');
+      const text = input.value.trim();
+      if (!text) return;
+      const row = document.createElement('div');
+      row.className = 'message you';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = text;
+      row.append(bubble);
+      transcript.append(row);
+      input.value = '';
+      transcript.scrollTop = transcript.scrollHeight;
+    });
+
+    themeToggle.addEventListener('click', () => {
+      const dark = html.dataset.theme !== 'dark';
+      html.dataset.theme = dark ? 'dark' : 'light';
+      themeToggle.setAttribute('aria-pressed', String(dark));
+      themeToggle.textContent = dark ? '切换浅色' : '切换深色';
+    });
+    typeToggle.addEventListener('click', () => {
+      const large = appSurface.classList.toggle('large-type');
+      typeToggle.setAttribute('aria-pressed', String(large));
+      typeToggle.textContent = large ? '恢复文字' : '放大文字';
+    });
+    shareDialog.addEventListener('click', event => {
+      if (event.target === shareDialog) shareDialog.close();
+    });
+
+    renderInitialTrack();
+    setRoom('none');
+  </script>
+</body>
+</html>

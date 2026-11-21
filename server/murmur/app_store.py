@@ -338,6 +338,14 @@ class AppStore:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
         self._migrate()
+        from .daily_review import initialize
+        initialize(self.conn)
+        from . import app_quota
+        app_quota.initialize(self.conn)
+        from . import app_email
+        app_email.initialize(self.conn)
+        from . import app_sync
+        app_sync.initialize(self.conn)
         self.conn.commit()
         try:
             self.path.chmod(0o600)
@@ -379,6 +387,8 @@ class AppStore:
         moment_columns = {
             row["name"] for row in self.conn.execute("PRAGMA table_info(app_moments)")
         }
+        if "review_timezone" not in moment_columns:
+            self.conn.execute("ALTER TABLE app_moments ADD COLUMN review_timezone TEXT")
         if "failure_retryable" not in moment_columns:
             self.conn.execute(
                 "ALTER TABLE app_moments ADD COLUMN failure_retryable INTEGER"
@@ -766,6 +776,12 @@ class AppStore:
 
     # ---- Moments and SSE ----------------------------------------------------------
 
+    def ai_quota(self, user_id: str) -> dict:
+        from .app_quota import status
+        with self._lock:
+            self.require_user_ready(user_id)
+            return status(self.conn, user_id, _now())
+
     def create_moment(
         self,
         *,
@@ -778,6 +794,7 @@ class AppStore:
         context_moment_ids: list[str] | tuple[str, ...] | None = None,
         provenance: str | None = None,
         music_track: str | None = None,
+        daily_question_day: str | None = None,
     ) -> MomentResult:
         if intent is not None and intent not in MOMENT_INTENTS:
             raise ValueError("unknown moment intent")
@@ -825,6 +842,8 @@ class AppStore:
                     ).fetchone()
                     if inflight:
                         raise MomentInFlight("another moment is still being processed")
+                    from .app_quota import reserve
+                    reserve(db, user_id, existing["id"], _now())
                     db.execute(
                         "UPDATE app_moments SET note=?,image_path=?,intent=?,"
                         "context_moment_ids=?,provenance=?,music_track=?,status='queued',"
@@ -868,7 +887,14 @@ class AppStore:
             ).fetchone()
             if inflight:
                 raise MomentInFlight("another moment is still being processed")
+            question = None
+            if daily_question_day is not None:
+                question = db.execute("SELECT question FROM app_daily_reviews WHERE user_id=? AND day=? AND question<>''", (user_id, daily_question_day)).fetchone()
+                if not question:
+                    raise NotFound("daily question not found")
             moment_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
+            from .app_quota import reserve
+            reserve(db, user_id, moment_id, _now())
             db.execute(
                 "INSERT INTO app_moments"
                 "(id,user_id,source,note,image_path,intent,context_moment_ids,"
@@ -877,6 +903,9 @@ class AppStore:
                 (moment_id, user_id, "inbound", note, image_path, intent, context_json,
                  provenance, music_track, request_digest, idempotency_key, "queued", now, now),
             )
+            db.execute("UPDATE app_moments SET review_timezone=COALESCE((SELECT timezone FROM app_devices WHERE user_id=? AND active=1 ORDER BY last_seen_at DESC,id DESC LIMIT 1),'Asia/Shanghai') WHERE id=?", (user_id,moment_id))
+            if question:
+                db.execute("INSERT INTO app_review_answers(moment_id,user_id,day,question) VALUES(?,?,?,?)", (moment_id,user_id,daily_question_day,question[0]))
             db.execute(
                 "INSERT INTO app_jobs(id,moment_id,created_at,updated_at) VALUES(?,?,?,?)",
                 (job_id, moment_id, now, now),
@@ -1853,6 +1882,12 @@ class AppStore:
                 db.executemany(
                     "DELETE FROM app_challenges WHERE key_id=?", [(key,) for key in keys]
                 )
+            email = db.execute("SELECT email FROM app_emails WHERE user_id=?", (user_id,)).fetchone()
+            if email:
+                # Retain short-lived source/global abuse counters without any
+                # mailbox identifier that can be linked back to this account.
+                db.execute("UPDATE app_email_sends SET email_hash='' WHERE email_hash=?",
+                           (_hash_secret(email[0]),))
             db.execute("DELETE FROM app_users WHERE id=?", (user_id,))
 
     def erase_user(self, user_id: str) -> dict:
